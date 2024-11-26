@@ -5,7 +5,6 @@ use {
     log::*,
     reqwest::{self, header::CONTENT_TYPE},
     serde_json::{json, Value},
-    serial_test::serial,
     solana_account_decoder::UiAccount,
     solana_client::{
         connection_cache::ConnectionCache,
