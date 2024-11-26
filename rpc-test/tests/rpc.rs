@@ -287,7 +287,6 @@ fn test_rpc_slot_updates() {
 }
 
 #[test]
-#[serial] // helps test pass
 fn test_rpc_subscriptions() {
     solana_logger::setup();
 
