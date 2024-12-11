@@ -9,11 +9,11 @@ use tokio::time::timeout;
 
 use crate::sigverify::SigverifyTracerPacketStats;
 
-pub(crate) struct JdsStage {
+pub(crate) struct JdsManager {
     threads: Vec<std::thread::JoinHandle<()>>,
 }
 
-impl JdsStage {
+impl JdsManager {
     pub fn new(
         jds_url: String,
         jds_enabled: Arc<AtomicBool>,

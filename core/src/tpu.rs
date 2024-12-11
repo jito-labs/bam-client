@@ -2,7 +2,7 @@
 //! multi-stage transaction processing pipeline in software.
 
 pub use solana_sdk::net::DEFAULT_TPU_COALESCE;
-use crate::jds_stage::JdsStage;
+use crate::jds_manager::JdsManager;
 
 use {
     crate::{
@@ -96,7 +96,7 @@ pub struct Tpu {
     block_engine_stage: BlockEngineStage,
     fetch_stage_manager: FetchStageManager,
     bundle_stage: BundleStage,
-    jds_stage: Option<JdsStage>,
+    jds_manager: Option<JdsStage>,
 }
 
 impl Tpu {
@@ -371,8 +371,8 @@ impl Tpu {
 
         let bank_forks_for_jds = bank_forks.clone();
         let exit_for_jds = exit.clone();
-        let jds_stage = jds_enabled.load(std::sync::atomic::Ordering::SeqCst).then(|| {
-            JdsStage::new(
+        let jds_manager = jds_enabled.load(std::sync::atomic::Ordering::SeqCst).then(|| {
+            JdsManager::new(
                 jds_url.unwrap(),
                 jds_enabled,
                 poh_recorder.clone(),
@@ -397,7 +397,7 @@ impl Tpu {
                 relayer_stage,
                 fetch_stage_manager,
                 bundle_stage,
-                jds_stage,
+                jds_manager,
             },
             vec![key_updater, forwards_key_updater],
         )
@@ -425,8 +425,8 @@ impl Tpu {
         if let Some(tpu_entry_notifier) = self.tpu_entry_notifier {
             tpu_entry_notifier.join()?;
         }
-        if let Some(jds_stage) = self.jds_stage {
-            jds_stage.join()?;
+        if let Some(jds_manager) = self.jds_manager {
+            jds_manager.join()?;
         }
         let _ = broadcast_result?;
         if let Some(tracer_thread_hdl) = self.tracer_thread_hdl {
