@@ -363,16 +363,18 @@ impl Tpu {
             cluster_info.clone(),
             entry_receiver,
             retransmit_slots_receiver,
-            exit,
+            exit.clone(),
             blockstore,
-            bank_forks,
+            bank_forks.clone(),
             shred_version,
             turbine_quic_endpoint_sender,
             shred_receiver_address,
         );
 
+        let bank_forks_for_jds = bank_forks.clone();
+        let exit_for_jds = exit.clone();
         let jds_stage = jds_enabled.load(std::sync::atomic::Ordering::SeqCst).then(|| {
-            JdsStage::new(jds_enabled)
+            JdsStage::new(jds_enabled, poh_recorder.clone(), bank_forks_for_jds, exit_for_jds)
         });
 
         (
