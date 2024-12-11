@@ -2,6 +2,8 @@
 //! multi-stage transaction processing pipeline in software.
 
 pub use solana_sdk::net::DEFAULT_TPU_COALESCE;
+use crate::{jds_packet_filter::JdsPacketFilter, jds_stage::JdsStage};
+
 use {
     crate::{
         banking_stage::BankingStage,
@@ -94,6 +96,8 @@ pub struct Tpu {
     block_engine_stage: BlockEngineStage,
     fetch_stage_manager: FetchStageManager,
     bundle_stage: BundleStage,
+    jds_stage: Option<JdsStage>,
+    jds_packet_filter: JdsPacketFilter,
 }
 
 impl Tpu {
@@ -224,6 +228,11 @@ impl Tpu {
         .unwrap();
 
         let (packet_sender, packet_receiver) = unbounded();
+        let (bundle_sender, bundle_receiver) = unbounded();
+
+        let jds_enabled = Arc::new(AtomicBool::new(false));
+        let (jds_packet_filter, packet_sender, bundle_sender) =
+            JdsPacketFilter::new(jds_enabled.clone(), packet_sender, bundle_sender, exit.clone());
 
         let sigverify_stage = {
             let verifier = TransactionSigVerifier::new(non_vote_sender.clone());
@@ -250,7 +259,6 @@ impl Tpu {
             block_builder_commission: 0,
         }));
 
-        let (bundle_sender, bundle_receiver) = unbounded();
         let block_engine_stage = BlockEngineStage::new(
             block_engine_config,
             bundle_sender,
@@ -363,6 +371,10 @@ impl Tpu {
             shred_receiver_address,
         );
 
+        let jds_stage = jds_enabled.load(std::sync::atomic::Ordering::SeqCst).then(|| {
+            JdsStage::new(jds_enabled)
+        });
+
         (
             Self {
                 fetch_stage,
@@ -380,6 +392,8 @@ impl Tpu {
                 relayer_stage,
                 fetch_stage_manager,
                 bundle_stage,
+                jds_stage,
+                jds_packet_filter,
             },
             vec![key_updater, forwards_key_updater],
         )
@@ -399,6 +413,7 @@ impl Tpu {
             self.relayer_stage.join(),
             self.block_engine_stage.join(),
             self.fetch_stage_manager.join(),
+            self.jds_packet_filter.join(),
         ];
         let broadcast_result = self.broadcast_stage.join();
         for result in results {
