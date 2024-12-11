@@ -143,6 +143,7 @@ impl Tpu {
         tip_manager_config: TipManagerConfig,
         shred_receiver_address: Arc<RwLock<Option<SocketAddr>>>,
         preallocated_bundle_cost: u64,
+        jds_url: Option<String>,
     ) -> (Self, Vec<Arc<dyn NotifyKeyUpdate + Sync + Send>>) {
         let TpuSockets {
             transactions: transactions_sockets,
@@ -230,7 +231,7 @@ impl Tpu {
         let (packet_sender, packet_receiver) = unbounded();
         let (bundle_sender, bundle_receiver) = unbounded();
 
-        let jds_enabled = Arc::new(AtomicBool::new(false));
+        let jds_enabled = Arc::new(AtomicBool::new(jds_url.is_some()));
         let (jds_packet_filter, packet_sender, bundle_sender) =
             JdsPacketFilter::new(jds_enabled.clone(), packet_sender, bundle_sender, exit.clone());
 
@@ -374,7 +375,7 @@ impl Tpu {
         let bank_forks_for_jds = bank_forks.clone();
         let exit_for_jds = exit.clone();
         let jds_stage = jds_enabled.load(std::sync::atomic::Ordering::SeqCst).then(|| {
-            JdsStage::new(jds_enabled, poh_recorder.clone(), bank_forks_for_jds, exit_for_jds)
+            JdsStage::new(jds_url.unwrap(), jds_enabled, poh_recorder.clone(), bank_forks_for_jds, exit_for_jds)
         });
 
         (

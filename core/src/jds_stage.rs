@@ -7,6 +7,7 @@ pub(crate) struct JdsStage {}
 
 impl JdsStage {
     pub fn new(
+        jds_url: String,
         jds_enabled: Arc<AtomicBool>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         bank_forks: Arc<RwLock<BankForks>>,

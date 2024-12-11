@@ -1742,6 +1742,7 @@ pub fn main() {
             .is_present("delay_leader_block_for_pending_fork"),
         preallocated_bundle_cost: value_of(&matches, "preallocated_bundle_cost")
             .expect("preallocated_bundle_cost set as default"),
+        jds_url: value_of(&matches, "jds_url"),
         ..ValidatorConfig::default()
     };
 
