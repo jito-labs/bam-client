@@ -55,4 +55,11 @@ impl JdsStage {
         let block_engine_channel = timeout(connection_timeout, backend_endpoint.connect()).await.unwrap().unwrap();
         let validator_client = ValidatorApiClient::new(block_engine_channel);
     }
+
+    pub fn join(self) -> std::thread::Result<()> {
+        for thread in self.threads {
+            thread.join()?;
+        }
+        Ok(())
+    }
 }
