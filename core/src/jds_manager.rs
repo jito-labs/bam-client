@@ -1,13 +1,9 @@
 use std::{sync::{atomic::AtomicBool, Arc, RwLock}, thread::Builder};
 
-use crossbeam_channel::Receiver;
 use jito_protos::proto::jds_api::validator_api_client::ValidatorApiClient;
-use solana_perf::packet::PacketBatch;
 use solana_poh::poh_recorder::PohRecorder;
 use solana_runtime::bank_forks::BankForks;
 use tokio::time::timeout;
-
-use crate::sigverify::SigverifyTracerPacketStats;
 
 pub(crate) struct JdsManager {
     threads: Vec<std::thread::JoinHandle<()>>,
@@ -37,7 +33,7 @@ impl JdsManager {
             .unwrap();
 
 
-        JdsStage {
+        Self {
             threads: vec![
                 api_connection_thread
             ],

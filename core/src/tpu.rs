@@ -96,7 +96,7 @@ pub struct Tpu {
     block_engine_stage: BlockEngineStage,
     fetch_stage_manager: FetchStageManager,
     bundle_stage: BundleStage,
-    jds_manager: Option<JdsStage>,
+    jds_manager: Option<JdsManager>,
 }
 
 impl Tpu {
