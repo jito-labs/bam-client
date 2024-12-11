@@ -18,7 +18,6 @@ impl JdsStage {
         jds_url: String,
         jds_enabled: Arc<AtomicBool>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
-        tpu_vote_receiver: Receiver<Arc<(Vec<PacketBatch>, Option<SigverifyTracerPacketStats>)>>,
         bank_forks: Arc<RwLock<BankForks>>,
         exit: Arc<AtomicBool>,
     ) -> Self {

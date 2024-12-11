@@ -376,7 +376,6 @@ impl Tpu {
                 jds_url.unwrap(),
                 jds_enabled,
                 poh_recorder.clone(),
-                tpu_vote_receiver,
                 bank_forks_for_jds,
                 exit_for_jds)
         });
