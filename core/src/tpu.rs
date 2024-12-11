@@ -316,7 +316,7 @@ impl Tpu {
             cluster_info,
             poh_recorder,
             non_vote_receiver,
-            tpu_vote_receiver,
+            tpu_vote_receiver.clone(),
             gossip_vote_receiver,
             transaction_status_sender.clone(),
             replay_vote_sender.clone(),
@@ -375,7 +375,13 @@ impl Tpu {
         let bank_forks_for_jds = bank_forks.clone();
         let exit_for_jds = exit.clone();
         let jds_stage = jds_enabled.load(std::sync::atomic::Ordering::SeqCst).then(|| {
-            JdsStage::new(jds_url.unwrap(), jds_enabled, poh_recorder.clone(), bank_forks_for_jds, exit_for_jds)
+            JdsStage::new(
+                jds_url.unwrap(),
+                jds_enabled,
+                poh_recorder.clone(),
+                tpu_vote_receiver,
+                bank_forks_for_jds,
+                exit_for_jds)
         });
 
         (
