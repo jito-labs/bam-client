@@ -6,6 +6,8 @@
 
 use std::{sync::{atomic::AtomicBool, Arc, RwLock}, thread::Builder};
 
+use crossbeam_channel::unbounded;
+use futures::channel::mpsc;
 use futures::{stream, FutureExt, StreamExt};
 use jito_protos::proto::{jds_api::{start_scheduler_response::Resp, validator_api_client::ValidatorApiClient}, jds_types::{MicroBlock, SignedSlotTick, SlotTick}};
 use solana_gossip::cluster_info::ClusterInfo;
@@ -115,7 +117,7 @@ impl JdsManager {
 
             // Keep receiving microblocks and actuating them as long as within the existing slot
             while Self::inside_leader_slot(&poh_recorder.read().unwrap()) {
-                let micro_block = current_jds_connection.recv_next();
+                let micro_block = current_jds_connection.try_recv();
                 if micro_block.is_none() {
                     tokio::time::sleep(std::time::Duration::from_micros(100)).await;
                     continue;
@@ -175,7 +177,8 @@ impl JdsManager {
 // Maintains a connection to the JDS block engine and handles sending and receiving messages
 // Keeps track of last received heartbeat 'behind the scenes' and will mark itself as unhealthy if no heartbeat is received
 struct JdsConnection {
-    stream: tonic::Streaming<jito_protos::proto::jds_api::StartSchedulerResponse>,
+    inbound_stream: tonic::Streaming<jito_protos::proto::jds_api::StartSchedulerResponse>,
+    outbound_sender: mpsc::UnboundedSender<SignedSlotTick>,
     its_over: bool,
     last_heartbeat: Option<std::time::Instant>,
 }
@@ -187,17 +190,19 @@ impl JdsConnection {
         let block_engine_channel = timeout(connection_timeout, backend_endpoint.connect()).await.ok()?.ok()?;
         let mut validator_client = ValidatorApiClient::new(block_engine_channel);
 
-        // TODO: signed init message for auth?
-        let stream = validator_client.start_scheduler_stream(stream::iter([])).await.ok()?.into_inner();
+        let (outbound_sender, outbound_receiver) = mpsc::unbounded();
+        let outbound_stream = tonic::Request::new(outbound_receiver.map(|req: SignedSlotTick| req));
+        let inbound_stream = validator_client.start_scheduler_stream(outbound_stream).await.ok()?.into_inner();
         Some(Self {
-            stream,
+            inbound_stream,
+            outbound_sender,
             its_over: false,
             last_heartbeat: None,
         })
     }
 
-    fn recv_next(&mut self) -> Option<MicroBlock> {
-        let next = self.stream.next().now_or_never()?;
+    fn try_recv(&mut self) -> Option<MicroBlock> {
+        let next = self.inbound_stream.next().now_or_never()?;
         match next {
             Some(Ok(response)) => {
                 self.last_heartbeat = Some(std::time::Instant::now());
@@ -215,13 +220,15 @@ impl JdsConnection {
         }
     }
 
-    fn send_signed_tick(&mut self, _signed_slot_tick: SignedSlotTick) {
-        // Hmmm....
+    // Send a signed slot tick to the JDS block engine
+    fn send_signed_tick(&mut self, signed_slot_tick: SignedSlotTick) {
+        let _ = self.outbound_sender.unbounded_send(signed_slot_tick);
     }
 
+    // Check if the connection is healthy
     fn is_healthy(&mut self) -> bool {
         // Will update last_heartbeat if a new one is received
-        let _ = self.recv_next();
+        let _ = self.try_recv();
 
         !self.its_over
             && self.last_heartbeat.map_or(true, 
