@@ -187,12 +187,7 @@ impl JdsConnection {
         let block_engine_channel = timeout(connection_timeout, backend_endpoint.connect()).await.ok()?.ok()?;
         let mut validator_client = ValidatorApiClient::new(block_engine_channel);
 
-        // TODO: Implement a blank init request rather than a dummy SignedSlotTick
-        let init_request = jito_protos::proto::jds_types::SignedSlotTick{
-            slot_tick: Default::default(),
-            signature: Default::default()
-        };
-        let stream = validator_client.start_scheduler_stream(stream::iter([init_request])).await.ok()?.into_inner();
+        let stream = validator_client.start_scheduler_stream(stream::iter([])).await.ok()?.into_inner();
         Some(Self {
             stream,
             its_over: false,
