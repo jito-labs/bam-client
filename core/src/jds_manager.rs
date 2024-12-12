@@ -7,12 +7,11 @@
 use std::{sync::{atomic::AtomicBool, Arc, RwLock}, thread::Builder};
 
 use jito_protos::proto::{jds_api::validator_api_client::ValidatorApiClient, jds_types::{MicroBlock, SignedSlotTick, SlotTick}};
-use solana_entry::poh;
 use solana_gossip::cluster_info::ClusterInfo;
 use solana_poh::poh_recorder::PohRecorder;
 use solana_runtime::bank_forks::BankForks;
-use solana_sdk::{clock::Slot, signer::Signer};
-use tokio::{task::spawn_blocking, time::timeout};
+use solana_sdk::signer::Signer;
+use tokio::task::spawn_blocking;
 
 use crate::jds_actuator::JdsActuator;
 
@@ -121,7 +120,10 @@ impl JdsManager {
                     continue;
                 }
                 jds_is_actuating.store(true, std::sync::atomic::Ordering::Relaxed);
-                jds_actuator.execute_and_commit_micro_block(micro_block.unwrap());
+                jds_actuator = spawn_blocking(move || {
+                    jds_actuator.execute_and_commit_micro_block(micro_block.unwrap());
+                    jds_actuator
+                }).await.unwrap();
                 jds_is_actuating.store(false, std::sync::atomic::Ordering::Relaxed);
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
