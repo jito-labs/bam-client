@@ -1,13 +1,18 @@
+/// Manages majority of the JDS related functionality:
+/// - Connecting to the JDS block engine via GRPC service
+/// - Sending signed slot ticks + Receive microblocks
+/// - Actuating the received microblocks
+/// - Disabling JDS and re-enabling standard txn processing when health check fails
+
 use std::{sync::{atomic::AtomicBool, Arc, RwLock}, thread::Builder};
 
 use jito_protos::proto::{jds_api::validator_api_client::ValidatorApiClient, jds_types::MicroBlock};
 use solana_poh::poh_recorder::PohRecorder;
-use solana_runtime::{bank, bank_forks::BankForks};
+use solana_runtime::bank_forks::BankForks;
 use solana_sdk::clock::Slot;
 use tokio::time::timeout;
-use tonic::IntoRequest;
 
-use crate::jds_actuator::{self, JdsActuator};
+use crate::jds_actuator::JdsActuator;
 
 pub(crate) struct JdsManager {
     threads: Vec<std::thread::JoinHandle<()>>,
