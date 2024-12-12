@@ -187,6 +187,7 @@ impl JdsConnection {
         let block_engine_channel = timeout(connection_timeout, backend_endpoint.connect()).await.ok()?.ok()?;
         let mut validator_client = ValidatorApiClient::new(block_engine_channel);
 
+        // TODO: signed init message for auth?
         let stream = validator_client.start_scheduler_stream(stream::iter([])).await.ok()?.into_inner();
         Some(Self {
             stream,
