@@ -8,9 +8,10 @@ use std::{sync::{atomic::AtomicBool, Arc, RwLock}, thread::Builder};
 
 use jito_protos::proto::{jds_api::validator_api_client::ValidatorApiClient, jds_types::{MicroBlock, SignedSlotTick, SlotTick}};
 use solana_entry::poh;
+use solana_gossip::cluster_info::ClusterInfo;
 use solana_poh::poh_recorder::PohRecorder;
 use solana_runtime::bank_forks::BankForks;
-use solana_sdk::clock::Slot;
+use solana_sdk::{clock::Slot, signer::Signer};
 use tokio::{task::spawn_blocking, time::timeout};
 
 use crate::jds_actuator::JdsActuator;
@@ -23,9 +24,11 @@ impl JdsManager {
     pub fn new(
         jds_url: String,
         jds_enabled: Arc<AtomicBool>,
+        jds_is_actuating: Arc<AtomicBool>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         bank_forks: Arc<RwLock<BankForks>>,
         exit: Arc<AtomicBool>,
+        cluster_info: Arc<ClusterInfo>,
     ) -> Self {
         let api_connection_thread = Builder::new()
             .name("block-engine-stage".to_string())
@@ -37,9 +40,11 @@ impl JdsManager {
                 rt.block_on(Self::start_manager(
                     jds_url,
                     jds_enabled,
+                    jds_is_actuating,
                     exit,
                     poh_recorder,
                     bank_forks,
+                    cluster_info,
                 ));
             })
             .unwrap();
@@ -54,14 +59,16 @@ impl JdsManager {
     async fn start_manager(
         jds_url: String,
         jds_enabled: Arc<AtomicBool>,
+        jds_is_actuating: Arc<AtomicBool>,
         exit: Arc<AtomicBool>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         bank_forks: Arc<RwLock<BankForks>>,
+        cluster_info: Arc<ClusterInfo>,
     ) {
         let mut jds_connection = None;
         let mut jds_actuator = JdsActuator::new();
 
-        // Run until the world ends
+        // Run until (our) world ends
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
 
             // If no connection exists; create one
@@ -95,7 +102,7 @@ impl JdsManager {
             }
 
             // Send slot tick
-            let Some(signed_slot_tick) = Self::get_signed_slot_tick(&poh_recorder.read().unwrap()) else {
+            let Some(signed_slot_tick) = Self::get_signed_slot_tick(&poh_recorder.read().unwrap(), &cluster_info) else {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 continue;
             };
@@ -113,7 +120,10 @@ impl JdsManager {
                     tokio::time::sleep(std::time::Duration::from_micros(100)).await;
                     continue;
                 }
+                jds_is_actuating.store(true, std::sync::atomic::Ordering::Relaxed);
                 jds_actuator.execute_and_commit_micro_block(micro_block.unwrap());
+                jds_is_actuating.store(false, std::sync::atomic::Ordering::Relaxed);
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
         }
     }
@@ -134,7 +144,7 @@ impl JdsManager {
         poh_recorder.would_be_leader(0)
     }
 
-    pub fn get_signed_slot_tick(poh_recorder: &PohRecorder) -> Option<SignedSlotTick> {
+    pub fn get_signed_slot_tick(poh_recorder: &PohRecorder, cluster_info: &ClusterInfo) -> Option<SignedSlotTick> {
         let Some(current_slot) = poh_recorder.bank().and_then(|bank| Some(bank.slot())) else {
             return None;
         };
@@ -142,7 +152,10 @@ impl JdsManager {
             return None;
         };
         let slot_tick = SlotTick{ current_slot, parent_slot };
-        let signature = todo!();
+        let mut message = Vec::new();
+        message.extend_from_slice(&slot_tick.current_slot.to_le_bytes());
+        message.extend_from_slice(&slot_tick.parent_slot.to_le_bytes());
+        let signature = cluster_info.keypair().sign_message(&message).to_string().into_bytes();
         Some(SignedSlotTick { slot_tick: Some(slot_tick), signature })
     }
 }

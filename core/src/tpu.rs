@@ -370,14 +370,18 @@ impl Tpu {
         );
 
         let bank_forks_for_jds = bank_forks.clone();
-        let exit_for_jds = exit.clone();
+        let exit_for_jds: Arc<AtomicBool> = exit.clone();
+        let jds_is_actuating = Arc::new(AtomicBool::new(false));
         let jds_manager = jds_enabled.load(std::sync::atomic::Ordering::SeqCst).then(|| {
             JdsManager::new(
                 jds_url.unwrap(),
                 jds_enabled,
+                jds_is_actuating,
                 poh_recorder.clone(),
                 bank_forks_for_jds,
-                exit_for_jds)
+                exit_for_jds,
+                cluster_info.clone(),
+            )
         });
 
         (
