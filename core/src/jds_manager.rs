@@ -6,9 +6,8 @@
 
 use std::{sync::{atomic::AtomicBool, Arc, RwLock}, thread::Builder};
 
-use crossbeam_channel::unbounded;
 use futures::channel::mpsc;
-use futures::{stream, FutureExt, StreamExt};
+use futures::{FutureExt, StreamExt};
 use jito_protos::proto::{jds_api::{start_scheduler_response::Resp, validator_api_client::ValidatorApiClient}, jds_types::{MicroBlock, SignedSlotTick, SlotTick}};
 use solana_gossip::cluster_info::ClusterInfo;
 use solana_poh::poh_recorder::PohRecorder;
