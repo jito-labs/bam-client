@@ -19,7 +19,10 @@ pub(crate) struct JdsManager {
     threads: Vec<std::thread::JoinHandle<()>>,
 }
 
+// The (woah)man of the hour; the JDS Manager
+// Run based on timeouts and messages received from the JDS block engine
 impl JdsManager {
+    // Create and run a new instance of the JDS Manager
     pub fn new(
         jds_url: String,
         jds_enabled: Arc<AtomicBool>,
@@ -55,6 +58,7 @@ impl JdsManager {
         }
     }
 
+    // The main loop for the JDS Manager running inside an async environment
     async fn start_manager(
         jds_url: String,
         jds_enabled: Arc<AtomicBool>,
@@ -130,6 +134,7 @@ impl JdsManager {
         }
     }
 
+    // Join all threads that the manager owns
     pub fn join(self) -> std::thread::Result<()> {
         for thread in self.threads {
             thread.join()?;
@@ -137,15 +142,22 @@ impl JdsManager {
         Ok(())
     }
 
+    // Check if it's time for an auction
+    // This is decided based on the PohRecorder's current slot and the lookahead
     pub fn time_for_auction(poh_recorder: &PohRecorder) -> bool {
         const TICK_LOOKAHEAD: u64 = 8;
         poh_recorder.would_be_leader(TICK_LOOKAHEAD)
     }
 
+    // Check if we are currently inside the leader slot
+    // and therefore can keep waiting for microblocks
     pub fn inside_leader_slot(poh_recorder: &PohRecorder) -> bool {
         poh_recorder.would_be_leader(0)
     }
 
+    // Get the special signed slot tick message to send to the JDS block engine
+    // This signed message is used to verify the authenticity of the sender (us)
+    // so that JDS knows we are allowed to receive potentially juicy microblocks
     pub fn get_signed_slot_tick(poh_recorder: &PohRecorder, cluster_info: &ClusterInfo) -> Option<SignedSlotTick> {
         let Some(current_slot) = poh_recorder.bank().and_then(|bank| Some(bank.slot())) else {
             return None;
