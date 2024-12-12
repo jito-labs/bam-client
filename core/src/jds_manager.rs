@@ -105,7 +105,9 @@ impl JdsManager {
             }
 
             // Send slot tick
-            let Some(signed_slot_tick) = Self::get_signed_slot_tick(&poh_recorder.read().unwrap(), &cluster_info) else {
+            let Some(signed_slot_tick) = Self::get_signed_slot_tick(
+                &poh_recorder.read().unwrap(), &cluster_info)
+            else {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 continue;
             };
