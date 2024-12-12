@@ -56,6 +56,7 @@ pub mod voting_service;
 pub mod warm_quic_cache_service;
 pub mod window_service;
 pub mod jds_manager;
+pub mod jds_actuator;
 
 #[macro_use]
 extern crate log;
