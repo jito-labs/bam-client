@@ -10,11 +10,11 @@ impl JdsActuator {
         Self {}
     }
 
-    fn parse_validate_execute_and_commit_bundle(bundle: Bundle) {
+    fn parse_validate_execute_and_commit_bundle(_bundle: Bundle) {
         todo!();
     }
 
-    fn parse_validate_execute_and_commit_transaction(packet: Packet) {
+    fn parse_validate_execute_and_commit_transaction(_packet: Packet) {
         todo!();
     }
 

@@ -6,12 +6,13 @@
 
 use std::{sync::{atomic::AtomicBool, Arc, RwLock}, thread::Builder};
 
-use jito_protos::proto::{jds_api::validator_api_client::ValidatorApiClient, jds_types::{MicroBlock, SignedSlotTick, SlotTick}};
+use futures::{stream, FutureExt, StreamExt};
+use jito_protos::proto::{jds_api::{start_scheduler_response::Resp, validator_api_client::ValidatorApiClient}, jds_types::{MicroBlock, SignedSlotTick, SlotTick}};
 use solana_gossip::cluster_info::ClusterInfo;
 use solana_poh::poh_recorder::PohRecorder;
 use solana_runtime::bank_forks::BankForks;
 use solana_sdk::signer::Signer;
-use tokio::task::spawn_blocking;
+use tokio::{task::spawn_blocking, time::timeout};
 
 use crate::jds_actuator::JdsActuator;
 
@@ -65,7 +66,7 @@ impl JdsManager {
         jds_is_actuating: Arc<AtomicBool>,
         exit: Arc<AtomicBool>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
-        bank_forks: Arc<RwLock<BankForks>>,
+        _bank_forks: Arc<RwLock<BankForks>>,
         cluster_info: Arc<ClusterInfo>,
     ) {
         let mut jds_connection = None;
@@ -76,7 +77,7 @@ impl JdsManager {
 
             // If no connection exists; create one
             let Some(current_jds_connection) = jds_connection.as_mut() else {
-                jds_connection = JdsConnection::try_init(jds_url.clone());
+                jds_connection = JdsConnection::try_init(jds_url.clone()).await;
                 if jds_connection.is_none() {
                     jds_enabled.store(false, std::sync::atomic::Ordering::Relaxed);
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -84,12 +85,6 @@ impl JdsManager {
                 }
                 continue;
             };
-
-            // If jds connection is not ready (hasn't received first heartbeat); wait and loop again
-            if !current_jds_connection.is_ready() {
-                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-                continue;
-            }
 
             // If the jds_connection is not healthy; disable jds
             if !current_jds_connection.is_healthy() {
@@ -176,37 +171,64 @@ impl JdsManager {
     }
 }
 
+
+// Maintains a connection to the JDS block engine and handles sending and receiving messages
+// Keeps track of last received heartbeat 'behind the scenes' and will mark itself as unhealthy if no heartbeat is received
 struct JdsConnection {
+    stream: tonic::Streaming<jito_protos::proto::jds_api::StartSchedulerResponse>,
+    its_over: bool,
+    last_heartbeat: Option<std::time::Instant>,
 }
 
 impl JdsConnection {
-    fn try_init(url: String) -> Option<Self> {
-        // let backend_endpoint = tonic::transport::Endpoint::from_shared(jds_url).unwrap();
-        // let connection_timeout = std::time::Duration::from_secs(5);
-        // let block_engine_channel = timeout(connection_timeout, backend_endpoint.connect()).await.unwrap().unwrap();
-        // let validator_client = ValidatorApiClient::new(block_engine_channel);
-        // let sent_tick_for_slot: Option<Slot> = None;
+    async fn try_init(url: String) -> Option<Self> {
+        let backend_endpoint = tonic::transport::Endpoint::from_shared(url).ok()?;
+        let connection_timeout = std::time::Duration::from_secs(5);
+        let block_engine_channel = timeout(connection_timeout, backend_endpoint.connect()).await.ok()?.ok()?;
+        let mut validator_client = ValidatorApiClient::new(block_engine_channel);
 
-        //let init_request = jito_protos::proto::jds_types::SignedSlotTick{ slot_tick: todo!(), signature: todo!() };
-        //let stream = validator_client.start_scheduler_stream(init_request).await.unwrap();
-
-
-        None
+        // TODO: Implement a blank init request rather than a dummy SignedSlotTick
+        let init_request = jito_protos::proto::jds_types::SignedSlotTick{
+            slot_tick: Default::default(),
+            signature: Default::default()
+        };
+        let stream = validator_client.start_scheduler_stream(stream::iter([init_request])).await.ok()?.into_inner();
+        Some(Self {
+            stream,
+            its_over: false,
+            last_heartbeat: None,
+        })
     }
 
     fn recv_next(&mut self) -> Option<MicroBlock> {
-        todo!()
+        let next = self.stream.next().now_or_never()?;
+        match next {
+            Some(Ok(response)) => {
+                self.last_heartbeat = Some(std::time::Instant::now());
+                if let Some(Resp::MicroBlock(micro_block)) = response.resp {
+                    Some(micro_block)
+                } else {
+                    None
+                }
+            }
+            Some(Err(_)) => {
+                self.its_over = true;
+                None
+            }
+            None => None
+        }
     }
 
     fn send_signed_tick(&mut self, _signed_slot_tick: SignedSlotTick) {
-        todo!()
+        // Hmmm....
     }
 
-    fn is_healthy(&self) -> bool {
-        todo!()
-    }
+    fn is_healthy(&mut self) -> bool {
+        // Will update last_heartbeat if a new one is received
+        let _ = self.recv_next();
 
-    fn is_ready(&self) -> bool {
-        todo!()
+        !self.its_over
+            && self.last_heartbeat.map_or(true, 
+                |heartbeat| heartbeat.elapsed().as_secs() < 5)
     }
 }
