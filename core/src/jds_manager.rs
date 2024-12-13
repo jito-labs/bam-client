@@ -9,6 +9,7 @@ use std::{sync::{atomic::AtomicBool, Arc, RwLock}, thread::Builder};
 use futures::channel::mpsc;
 use futures::{FutureExt, StreamExt};
 use jito_protos::proto::{jds_api::{start_scheduler_response::Resp, validator_api_client::ValidatorApiClient}, jds_types::{MicroBlock, SignedSlotTick, SlotTick}};
+use solana_entry::poh;
 use solana_gossip::cluster_info::ClusterInfo;
 use solana_poh::poh_recorder::PohRecorder;
 use solana_runtime::{bank_forks::BankForks, vote_sender_types::ReplayVoteSender};
@@ -117,8 +118,16 @@ impl JdsManager {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
 
+            let poh_recorder = poh_recorder.read().unwrap();
+            let current_slot = poh_recorder.bank().unwrap().slot();
+
             // Keep receiving microblocks and actuating them as long as within the existing slot
-            while Self::inside_leader_slot(&poh_recorder.read().unwrap()) {
+            while current_slot == poh_recorder.bank().unwrap().slot() {
+                if poh_recorder.tick_height() > 62 &&  poh_recorder.next_slot_leader() == Some(cluster_info.id()) {
+                    break;
+                }
+
+
                 let micro_block = current_jds_connection.try_recv();
                 if micro_block.is_none() {
                     tokio::time::sleep(std::time::Duration::from_micros(100)).await;
