@@ -55,7 +55,7 @@ impl Committer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn commit_transactions(
+    pub fn commit_transactions(
         &self,
         batch: &TransactionBatch,
         loaded_transactions: &mut [TransactionLoadResult],

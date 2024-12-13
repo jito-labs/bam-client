@@ -11,7 +11,7 @@ use futures::{FutureExt, StreamExt};
 use jito_protos::proto::{jds_api::{start_scheduler_response::Resp, validator_api_client::ValidatorApiClient}, jds_types::{MicroBlock, SignedSlotTick, SlotTick}};
 use solana_gossip::cluster_info::ClusterInfo;
 use solana_poh::poh_recorder::PohRecorder;
-use solana_runtime::bank_forks::BankForks;
+use solana_runtime::{bank_forks::BankForks, vote_sender_types::ReplayVoteSender};
 use solana_sdk::signer::Signer;
 use tokio::{task::spawn_blocking, time::timeout};
 
@@ -33,6 +33,7 @@ impl JdsManager {
         bank_forks: Arc<RwLock<BankForks>>,
         exit: Arc<AtomicBool>,
         cluster_info: Arc<ClusterInfo>,
+        replay_vote_sender: ReplayVoteSender,
     ) -> Self {
         let api_connection_thread = Builder::new()
             .name("block-engine-stage".to_string())
@@ -49,6 +50,7 @@ impl JdsManager {
                     poh_recorder,
                     bank_forks,
                     cluster_info,
+                    replay_vote_sender,
                 ));
             })
             .unwrap();
@@ -69,9 +71,10 @@ impl JdsManager {
         poh_recorder: Arc<RwLock<PohRecorder>>,
         _bank_forks: Arc<RwLock<BankForks>>,
         cluster_info: Arc<ClusterInfo>,
+        replay_vote_sender: ReplayVoteSender,
     ) {
         let mut jds_connection = None;
-        let mut jds_actuator = JdsActuator::new();
+        let mut jds_actuator = JdsActuator::new(poh_recorder.clone(), replay_vote_sender);
 
         // Run until (our) world ends
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
@@ -190,6 +193,7 @@ impl JdsConnection {
         let mut validator_client = ValidatorApiClient::new(block_engine_channel);
 
         let (outbound_sender, outbound_receiver) = mpsc::unbounded();
+        // TODO: send initial message to start the scheduler
         let outbound_stream = tonic::Request::new(outbound_receiver.map(|req: SignedSlotTick| req));
         let inbound_stream = validator_client.start_scheduler_stream(outbound_stream).await.ok()?.into_inner();
         Some(Self {

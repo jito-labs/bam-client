@@ -331,7 +331,7 @@ impl Tpu {
             poh_recorder,
             bundle_receiver,
             transaction_status_sender,
-            replay_vote_sender,
+            replay_vote_sender.clone(),
             log_messages_bytes_limit,
             exit.clone(),
             tip_manager,
@@ -381,6 +381,7 @@ impl Tpu {
                 bank_forks_for_jds,
                 exit_for_jds,
                 cluster_info.clone(),
+                replay_vote_sender.clone(),
             )
         });
 
