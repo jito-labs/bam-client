@@ -1,12 +1,14 @@
 use std::{borrow::Cow, sync::{Arc, RwLock}};
 
+use itertools::Itertools;
 /// Receives pre-scheduled microblocks and attempts to 'actuate' them by applying the transactions to the state.
 
 use jito_protos::proto::jds_types::{micro_block_packet::Data, Bundle, MicroBlock, Packet};
-use solana_poh::poh_recorder::PohRecorder;
+use solana_poh::poh_recorder::{PohRecorder, RecordTransactionsSummary};
 use solana_runtime::{bank::{Bank, ExecutedTransactionCounts, LoadAndExecuteTransactionsOutput}, prioritization_fee_cache::PrioritizationFeeCache, transaction_batch::TransactionBatch, vote_sender_types::ReplayVoteSender};
 use solana_sdk::{clock::MAX_PROCESSING_AGE, packet::{Meta, PacketFlags}, transaction::{MessageHash, SanitizedTransaction, VersionedTransaction}};
 use solana_svm::transaction_processor::{ExecutionRecordingConfig, TransactionProcessingConfig};
+use solana_transaction_status::PreBalanceInfo;
 
 use crate::banking_stage::{committer::Committer, immutable_deserialized_packet::ImmutableDeserializedPacket, leader_slot_timing_metrics::LeaderExecuteAndCommitTimings};
 
@@ -66,11 +68,10 @@ impl JdsActuator {
             false,
             bank,
             bank.get_reserved_account_keys())?;
-        let transaction = sanitized_transaction.to_versioned_transaction();
 
         // 2. Lock
         let txns = vec![sanitized_transaction];
-        let batch = bank.prepare_sanitized_batch(&txns);
+        let batch = bank.prepare_owned_sanitized_batch(txns);
 
         // 2. Execute
         let mut execute_and_commit_timings = LeaderExecuteAndCommitTimings::default();
@@ -93,7 +94,7 @@ impl JdsActuator {
             );
         Some(TransactionExecutionResult{
             execute_output,
-            transaction,
+            batch,
         })
     }
 
@@ -123,10 +124,10 @@ impl JdsActuator {
 
         // Record and commit successes
         let transaction_recorder = self.poh_recorder.read().unwrap().new_recorder();
-        let freeze_lock = bank.freeze_lock();
+        let _freeze_lock = bank.freeze_lock();
         for result in results {
             match result {
-                ExecutionResult::TransactionSuccess(TransactionExecutionResult{ execute_output, transaction} ) => {
+                ExecutionResult::TransactionSuccess(TransactionExecutionResult{ execute_output, batch} ) => {
                     let LoadAndExecuteTransactionsOutput {
                         mut loaded_transactions,
                         execution_results,
@@ -142,10 +143,41 @@ impl JdsActuator {
                     if !execution_results.first().unwrap().was_executed() {
                         continue;
                     }
+                    let executed_transactions = execution_results
+                        .iter()
+                        .zip(batch.sanitized_transactions())
+                        .filter_map(|(execution_result, tx)| {
+                            if execution_result.was_executed() {
+                                Some(tx.to_versioned_transaction())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect_vec();
                     let record_transactions_summary =
-                        transaction_recorder.record_transactions(bank.slot(), vec![vec![transaction]]);
+                        transaction_recorder.record_transactions(bank.slot(), vec![executed_transactions]);
 
-                    // TODO: commit
+                    let RecordTransactionsSummary {
+                            result: _,
+                            record_transactions_timings: _,
+                            starting_transaction_index,
+                        } = record_transactions_summary;
+                    let mut pre_balance_info = PreBalanceInfo::default();
+                    let mut execute_and_commit_timings = LeaderExecuteAndCommitTimings::default();
+                    self.transaction_committer.commit_transactions(
+                        &batch,
+                        &mut loaded_transactions,
+                        execution_results,
+                        last_blockhash,
+                        lamports_per_signature,
+                        starting_transaction_index,
+                        &bank,
+                        &mut pre_balance_info,
+                        &mut execute_and_commit_timings,
+                        signature_count,
+                        executed_transactions_count,
+                        executed_non_vote_transactions_count,
+                        executed_with_successful_result_count);
                 }
                 ExecutionResult::Failure => {}
             }
@@ -153,12 +185,12 @@ impl JdsActuator {
     }
 }
 
-struct TransactionExecutionResult {
+struct TransactionExecutionResult<'a, 'b> {
     execute_output: LoadAndExecuteTransactionsOutput,
-    transaction: VersionedTransaction,
+    batch: TransactionBatch<'a, 'b>,
 }
 
-enum ExecutionResult {
-    TransactionSuccess(TransactionExecutionResult),
+enum ExecutionResult<'a, 'b> {
+    TransactionSuccess(TransactionExecutionResult<'a, 'b>),
     Failure,
 }

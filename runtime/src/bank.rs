@@ -3289,6 +3289,19 @@ impl Bank {
         TransactionBatch::new(lock_results, self, Cow::Borrowed(txs))
     }
 
+    /// Prepare a locked, owned transaction batch from a list of sanitized transactions.
+    pub fn prepare_owned_sanitized_batch<'a>(
+        &'a self,
+        txs: Vec<SanitizedTransaction>,
+    ) -> TransactionBatch<'a, 'a> {
+        let tx_account_lock_limit = self.get_transaction_account_lock_limit();
+        let lock_results = self
+            .rc
+            .accounts
+            .lock_accounts(txs.iter(), tx_account_lock_limit);
+        TransactionBatch::new(lock_results, self, Cow::Owned(txs))
+    }
+
     /// Prepare a locked transaction batch from a list of sanitized transactions, and their cost
     /// limited packing status
     pub fn prepare_sanitized_batch_with_results<'a, 'b>(
