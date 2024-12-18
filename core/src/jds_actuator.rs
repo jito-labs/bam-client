@@ -115,14 +115,14 @@ impl JdsActuator {
                         results.push(ExecutionResult::Failure);
                         continue;
                     };
-                    results.push(ExecutionResult::Bundle(result));
+                    results.push(ExecutionResult::Maybe(result));
                 }
                 Data::Packet(packet) => {
                     let Some(result) = Self::parse_validate_execute_transactions(&bank, std::iter::once(&packet)) else {
                         results.push(ExecutionResult::Failure);
                         continue;
                     };
-                    results.push(ExecutionResult::Transaction(result));
+                    results.push(ExecutionResult::Maybe(result));
                 }
             }
         }
@@ -132,89 +132,35 @@ impl JdsActuator {
         let _freeze_lock = bank.freeze_lock();
         for result in results {
             match result {
-                ExecutionResult::Transaction(TransactionExecutionResult{ execute_output, batch} ) => {
+                ExecutionResult::Maybe(TransactionExecutionResult{ execute_output, batch} ) => {
                     let LoadAndExecuteTransactionsOutput {
                         mut loaded_transactions,
                         execution_results,
-                        mut retryable_transaction_indexes,
+                        retryable_transaction_indexes: _,
                         executed_transactions_count,
                         executed_non_vote_transactions_count,
                         executed_with_successful_result_count,
                         signature_count,
-                        error_counters,
+                        error_counters: _,
                         ..
                     } = execute_output;
                     let (last_blockhash, lamports_per_signature) = bank.last_blockhash_and_lamports_per_signature();
-                    if !execution_results.first().unwrap().was_executed() {
-                        continue;
-                    }
-                    let executed_transactions = execution_results
-                        .iter()
-                        .zip(batch.sanitized_transactions())
-                        .filter_map(|(execution_result, tx)| {
-                            if execution_result.was_executed() {
-                                Some(tx.to_versioned_transaction())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect_vec();
-                    let record_transactions_summary =
-                        transaction_recorder.record_transactions(bank.slot(), vec![executed_transactions]);
 
-                    let RecordTransactionsSummary {
-                            result: _,
-                            record_transactions_timings: _,
-                            starting_transaction_index,
-                        } = record_transactions_summary;
-                    let mut pre_balance_info = PreBalanceInfo::default();
-                    let mut execute_and_commit_timings = LeaderExecuteAndCommitTimings::default();
-                    self.transaction_committer.commit_transactions(
-                        &batch,
-                        &mut loaded_transactions,
-                        execution_results,
-                        last_blockhash,
-                        lamports_per_signature,
-                        starting_transaction_index,
-                        &bank,
-                        &mut pre_balance_info,
-                        &mut execute_and_commit_timings,
-                        signature_count,
-                        executed_transactions_count,
-                        executed_non_vote_transactions_count,
-                        executed_with_successful_result_count);
-                }
-                ExecutionResult::Bundle(TransactionExecutionResult{ execute_output, batch} ) => {
-                    let LoadAndExecuteTransactionsOutput {
-                        mut loaded_transactions,
-                        execution_results,
-                        mut retryable_transaction_indexes,
-                        executed_transactions_count,
-                        executed_non_vote_transactions_count,
-                        executed_with_successful_result_count,
-                        signature_count,
-                        error_counters,
-                        ..
-                    } = execute_output;
-                    let (last_blockhash, lamports_per_signature) = bank.last_blockhash_and_lamports_per_signature();
-                    if !execution_results.first().unwrap().was_executed() {
-                        continue;
-                    }
-                    let executed_transactions = execution_results
-                        .iter()
-                        .zip(batch.sanitized_transactions())
-                        .filter_map(|(execution_result, tx)| {
-                            if execution_result.was_executed() {
-                                Some(tx.to_versioned_transaction())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect_vec();
                     if executed_with_successful_result_count != batch.sanitized_transactions().len() {
                         continue;
                     }
-                    
+
+                    let executed_transactions = execution_results
+                        .iter()
+                        .zip(batch.sanitized_transactions())
+                        .filter_map(|(execution_result, tx)| {
+                            if execution_result.was_executed() {
+                                Some(tx.to_versioned_transaction())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect_vec();
                     let record_transactions_summary =
                         transaction_recorder.record_transactions(bank.slot(), vec![executed_transactions]);
 
@@ -252,7 +198,6 @@ struct TransactionExecutionResult<'a, 'b> {
 }
 
 enum ExecutionResult<'a, 'b> {
-    Transaction(TransactionExecutionResult<'a, 'b>),
-    Bundle(TransactionExecutionResult<'a, 'b>),
+    Maybe(TransactionExecutionResult<'a, 'b>),
     Failure,
 }
