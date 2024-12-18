@@ -113,7 +113,7 @@ impl JdsActuator {
         executed_non_vote_transactions_count: usize,
         executed_with_successful_result_count: usize,
         signature_count: u64,
-    ) {
+    ) -> bool {
         let executed_transactions = execution_results
             .iter()
             .zip(batch.sanitized_transactions())
@@ -134,7 +134,7 @@ impl JdsActuator {
                 starting_transaction_index,
             } = record_transactions_summary;
         if result.is_err() {
-            return;
+            return false;
         }
 
         let mut pre_balance_info = PreBalanceInfo::default();
@@ -153,6 +153,7 @@ impl JdsActuator {
             executed_transactions_count,
             executed_non_vote_transactions_count,
             executed_with_successful_result_count);
+        true
     }
 
     pub fn execute_and_commit_micro_block(&mut self, micro_block: MicroBlock) {
