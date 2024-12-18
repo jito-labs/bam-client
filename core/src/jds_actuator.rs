@@ -165,10 +165,14 @@ impl JdsActuator {
                         transaction_recorder.record_transactions(bank.slot(), vec![executed_transactions]);
 
                     let RecordTransactionsSummary {
-                            result: _,
+                            result,
                             record_transactions_timings: _,
                             starting_transaction_index,
                         } = record_transactions_summary;
+                    if result.is_err() {
+                        continue;
+                    }
+
                     let mut pre_balance_info = PreBalanceInfo::default();
                     let mut execute_and_commit_timings = LeaderExecuteAndCommitTimings::default();
                     self.transaction_committer.commit_transactions(
