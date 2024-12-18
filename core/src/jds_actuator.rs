@@ -32,45 +32,46 @@ impl JdsActuator {
         }
     }
 
-    fn parse_validate_execute_bundle(_bundle: Bundle) {
-        todo!();
-    }
-
-    fn parse_validate_execute_transaction(
+    fn parse_validate_execute_transactions<'a>(
         bank: &Bank,
-        packet: Packet)
-    -> Option<TransactionExecutionResult>
+        packets: impl Iterator<Item = &'a Packet>,
+    ) -> Option<TransactionExecutionResult>
     {
-        // 1. Parse
-        let mut solana_packet = solana_sdk::packet::Packet::default();
-        solana_packet.buffer_mut().copy_from_slice(&packet.data);
-        if let Some(meta) = packet.meta {
-            solana_packet.meta_mut().size = meta.size as usize;
-            solana_packet.meta_mut().addr = meta.addr.parse().ok()?;
-            solana_packet.meta_mut().port = meta.port as u16;
-            if let Some(flags) = meta.flags {
-                if flags.simple_vote_tx {
-                    solana_packet.meta_mut().flags.insert(PacketFlags::SIMPLE_VOTE_TX);
-                }
-                if flags.forwarded {
-                    solana_packet.meta_mut().flags.insert(PacketFlags::FORWARDED);
-                }
-                if flags.tracer_packet {
-                    solana_packet.meta_mut().flags.insert(PacketFlags::TRACER_PACKET);
-                }
-                if flags.repair {
-                    solana_packet.meta_mut().flags.insert(PacketFlags::REPAIR);
+        let txns = packets.map(|packet| {
+            let mut solana_packet = solana_sdk::packet::Packet::default();
+            solana_packet.buffer_mut().copy_from_slice(&packet.data);
+            if let Some(meta) = &packet.meta {
+                solana_packet.meta_mut().size = meta.size as usize;
+                solana_packet.meta_mut().addr = meta.addr.parse().ok()?;
+                solana_packet.meta_mut().port = meta.port as u16;
+                if let Some(flags) = &meta.flags {
+                    if flags.simple_vote_tx {
+                        solana_packet.meta_mut().flags.insert(PacketFlags::SIMPLE_VOTE_TX);
+                    }
+                    if flags.forwarded {
+                        solana_packet.meta_mut().flags.insert(PacketFlags::FORWARDED);
+                    }
+                    if flags.tracer_packet {
+                        solana_packet.meta_mut().flags.insert(PacketFlags::TRACER_PACKET);
+                    }
+                    if flags.repair {
+                        solana_packet.meta_mut().flags.insert(PacketFlags::REPAIR);
+                    }
                 }
             }
+            let packet = ImmutableDeserializedPacket::new(solana_packet).ok()?;
+            let sanitized_transaction = packet.build_sanitized_transaction(
+                false,
+                bank,
+                bank.get_reserved_account_keys())?;
+            Some(sanitized_transaction)
+        }).collect_vec();
+        if txns.iter().any(Option::is_none) {
+            return None;
         }
-        let packet = ImmutableDeserializedPacket::new(solana_packet).ok()?;
-        let sanitized_transaction = packet.build_sanitized_transaction(
-            false,
-            bank,
-            bank.get_reserved_account_keys())?;
+        let txns = txns.into_iter().map(|x| x.unwrap()).collect_vec();
 
         // 2. Lock
-        let txns = vec![sanitized_transaction];
         let batch = bank.prepare_owned_sanitized_batch(txns);
 
         // 2. Execute
@@ -110,14 +111,18 @@ impl JdsActuator {
 
             match packet {
                 Data::Bundle(bundle) => {
-                    Self::parse_validate_execute_bundle(bundle);
-                }
-                Data::Packet(packet) => {
-                    let Some(result) = Self::parse_validate_execute_transaction(&bank, packet) else {
+                    let Some(result) = Self::parse_validate_execute_transactions(&bank, bundle.packets.iter()) else {
                         results.push(ExecutionResult::Failure);
                         continue;
                     };
-                    results.push(ExecutionResult::TransactionSuccess(result));
+                    results.push(ExecutionResult::Bundle(result));
+                }
+                Data::Packet(packet) => {
+                    let Some(result) = Self::parse_validate_execute_transactions(&bank, std::iter::once(&packet)) else {
+                        results.push(ExecutionResult::Failure);
+                        continue;
+                    };
+                    results.push(ExecutionResult::Transaction(result));
                 }
             }
         }
@@ -127,7 +132,7 @@ impl JdsActuator {
         let _freeze_lock = bank.freeze_lock();
         for result in results {
             match result {
-                ExecutionResult::TransactionSuccess(TransactionExecutionResult{ execute_output, batch} ) => {
+                ExecutionResult::Transaction(TransactionExecutionResult{ execute_output, batch} ) => {
                     let LoadAndExecuteTransactionsOutput {
                         mut loaded_transactions,
                         execution_results,
@@ -179,6 +184,62 @@ impl JdsActuator {
                         executed_non_vote_transactions_count,
                         executed_with_successful_result_count);
                 }
+                ExecutionResult::Bundle(TransactionExecutionResult{ execute_output, batch} ) => {
+                    let LoadAndExecuteTransactionsOutput {
+                        mut loaded_transactions,
+                        execution_results,
+                        mut retryable_transaction_indexes,
+                        executed_transactions_count,
+                        executed_non_vote_transactions_count,
+                        executed_with_successful_result_count,
+                        signature_count,
+                        error_counters,
+                        ..
+                    } = execute_output;
+                    let (last_blockhash, lamports_per_signature) = bank.last_blockhash_and_lamports_per_signature();
+                    if !execution_results.first().unwrap().was_executed() {
+                        continue;
+                    }
+                    let executed_transactions = execution_results
+                        .iter()
+                        .zip(batch.sanitized_transactions())
+                        .filter_map(|(execution_result, tx)| {
+                            if execution_result.was_executed() {
+                                Some(tx.to_versioned_transaction())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect_vec();
+                    if executed_with_successful_result_count != batch.sanitized_transactions().len() {
+                        continue;
+                    }
+                    
+                    let record_transactions_summary =
+                        transaction_recorder.record_transactions(bank.slot(), vec![executed_transactions]);
+
+                    let RecordTransactionsSummary {
+                            result: _,
+                            record_transactions_timings: _,
+                            starting_transaction_index,
+                        } = record_transactions_summary;
+                    let mut pre_balance_info = PreBalanceInfo::default();
+                    let mut execute_and_commit_timings = LeaderExecuteAndCommitTimings::default();
+                    self.transaction_committer.commit_transactions(
+                        &batch,
+                        &mut loaded_transactions,
+                        execution_results,
+                        last_blockhash,
+                        lamports_per_signature,
+                        starting_transaction_index,
+                        &bank,
+                        &mut pre_balance_info,
+                        &mut execute_and_commit_timings,
+                        signature_count,
+                        executed_transactions_count,
+                        executed_non_vote_transactions_count,
+                        executed_with_successful_result_count);
+                }
                 ExecutionResult::Failure => {}
             }
         }
@@ -191,6 +252,7 @@ struct TransactionExecutionResult<'a, 'b> {
 }
 
 enum ExecutionResult<'a, 'b> {
-    TransactionSuccess(TransactionExecutionResult<'a, 'b>),
+    Transaction(TransactionExecutionResult<'a, 'b>),
+    Bundle(TransactionExecutionResult<'a, 'b>),
     Failure,
 }
