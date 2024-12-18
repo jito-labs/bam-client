@@ -3,11 +3,12 @@ use std::{borrow::Cow, sync::{Arc, RwLock}};
 use itertools::Itertools;
 /// Receives pre-scheduled microblocks and attempts to 'actuate' them by applying the transactions to the state.
 
+use solana_svm::transaction_results::TransactionExecutionResult;
 use jito_protos::proto::jds_types::{micro_block_packet::Data, Bundle, MicroBlock, Packet};
 use solana_poh::poh_recorder::{PohRecorder, RecordTransactionsSummary};
 use solana_runtime::{bank::{Bank, ExecutedTransactionCounts, LoadAndExecuteTransactionsOutput}, prioritization_fee_cache::PrioritizationFeeCache, transaction_batch::TransactionBatch, vote_sender_types::ReplayVoteSender};
-use solana_sdk::{clock::MAX_PROCESSING_AGE, packet::{Meta, PacketFlags}, transaction::{MessageHash, SanitizedTransaction, VersionedTransaction}};
-use solana_svm::transaction_processor::{ExecutionRecordingConfig, TransactionProcessingConfig};
+use solana_sdk::{clock::MAX_PROCESSING_AGE, packet::{Meta, PacketFlags}, transaction::{MessageHash, SanitizedTransaction, TransactionError, VersionedTransaction}};
+use solana_svm::{account_loader::LoadedTransaction, transaction_processor::{ExecutionRecordingConfig, TransactionProcessingConfig}};
 use solana_transaction_status::PreBalanceInfo;
 
 use crate::banking_stage::{committer::Committer, immutable_deserialized_packet::ImmutableDeserializedPacket, leader_slot_timing_metrics::LeaderExecuteAndCommitTimings};
@@ -35,7 +36,7 @@ impl JdsActuator {
     fn parse_validate_execute_transactions<'a>(
         bank: &Bank,
         packets: impl Iterator<Item = &'a Packet>,
-    ) -> Option<TransactionExecutionResult>
+    ) -> Option<JdsTransactionExecutionResult>
     {
         let txns = packets.map(|packet| {
             let mut solana_packet = solana_sdk::packet::Packet::default();
@@ -93,10 +94,65 @@ impl JdsActuator {
                     transaction_account_lock_limit: Some(bank.get_transaction_account_lock_limit()),
                 }
             );
-        Some(TransactionExecutionResult{
+        Some(JdsTransactionExecutionResult{
             execute_output,
             batch,
         })
+    }
+
+    fn record_and_commit(
+        &mut self,
+        batch: &TransactionBatch,
+        loaded_transactions: &mut Vec<Result<LoadedTransaction, TransactionError>>,
+        execution_results: Vec<TransactionExecutionResult>,
+        last_blockhash: solana_sdk::hash::Hash,
+        lamports_per_signature: u64,
+        transaction_recorder: &solana_poh::poh_recorder::TransactionRecorder,
+        bank: &Arc<solana_runtime::bank::Bank>,
+        executed_transactions_count: usize,
+        executed_non_vote_transactions_count: usize,
+        executed_with_successful_result_count: usize,
+        signature_count: u64,
+    ) {
+        let executed_transactions = execution_results
+            .iter()
+            .zip(batch.sanitized_transactions())
+            .filter_map(|(execution_result, tx)| {
+                if execution_result.was_executed() {
+                    Some(tx.to_versioned_transaction())
+                } else {
+                    None
+                }
+            })
+            .collect_vec();
+        let record_transactions_summary =
+            transaction_recorder.record_transactions(bank.slot(), vec![executed_transactions]);
+
+        let RecordTransactionsSummary {
+                result,
+                record_transactions_timings: _,
+                starting_transaction_index,
+            } = record_transactions_summary;
+        if result.is_err() {
+            return;
+        }
+
+        let mut pre_balance_info = PreBalanceInfo::default();
+        let mut execute_and_commit_timings = LeaderExecuteAndCommitTimings::default();
+        self.transaction_committer.commit_transactions(
+            &batch,
+            loaded_transactions,
+            execution_results,
+            last_blockhash,
+            lamports_per_signature,
+            starting_transaction_index,
+            bank,
+            &mut pre_balance_info,
+            &mut execute_and_commit_timings,
+            signature_count,
+            executed_transactions_count,
+            executed_non_vote_transactions_count,
+            executed_with_successful_result_count);
     }
 
     pub fn execute_and_commit_micro_block(&mut self, micro_block: MicroBlock) {
@@ -132,7 +188,7 @@ impl JdsActuator {
         let _freeze_lock = bank.freeze_lock();
         for result in results {
             match result {
-                ExecutionResult::Maybe(TransactionExecutionResult{ execute_output, batch} ) => {
+                ExecutionResult::Maybe(JdsTransactionExecutionResult{ execute_output, batch} ) => {
                     let LoadAndExecuteTransactionsOutput {
                         mut loaded_transactions,
                         execution_results,
@@ -150,45 +206,19 @@ impl JdsActuator {
                         continue;
                     }
 
-                    let executed_transactions = execution_results
-                        .iter()
-                        .zip(batch.sanitized_transactions())
-                        .filter_map(|(execution_result, tx)| {
-                            if execution_result.was_executed() {
-                                Some(tx.to_versioned_transaction())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect_vec();
-                    let record_transactions_summary =
-                        transaction_recorder.record_transactions(bank.slot(), vec![executed_transactions]);
-
-                    let RecordTransactionsSummary {
-                            result,
-                            record_transactions_timings: _,
-                            starting_transaction_index,
-                        } = record_transactions_summary;
-                    if result.is_err() {
-                        continue;
-                    }
-
-                    let mut pre_balance_info = PreBalanceInfo::default();
-                    let mut execute_and_commit_timings = LeaderExecuteAndCommitTimings::default();
-                    self.transaction_committer.commit_transactions(
+                    self.record_and_commit(
                         &batch,
                         &mut loaded_transactions,
                         execution_results,
                         last_blockhash,
                         lamports_per_signature,
-                        starting_transaction_index,
+                        &transaction_recorder,
                         &bank,
-                        &mut pre_balance_info,
-                        &mut execute_and_commit_timings,
-                        signature_count,
                         executed_transactions_count,
                         executed_non_vote_transactions_count,
-                        executed_with_successful_result_count);
+                        executed_with_successful_result_count,
+                        signature_count,
+                    );
                 }
                 ExecutionResult::Failure => {}
             }
@@ -196,12 +226,12 @@ impl JdsActuator {
     }
 }
 
-struct TransactionExecutionResult<'a, 'b> {
+struct JdsTransactionExecutionResult<'a, 'b> {
     execute_output: LoadAndExecuteTransactionsOutput,
     batch: TransactionBatch<'a, 'b>,
 }
 
 enum ExecutionResult<'a, 'b> {
-    Maybe(TransactionExecutionResult<'a, 'b>),
+    Maybe(JdsTransactionExecutionResult<'a, 'b>),
     Failure,
 }
