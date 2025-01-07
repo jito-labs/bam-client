@@ -33,11 +33,10 @@ impl JdsActuator {
         }
     }
 
-    fn parse_validate_execute_transactions<'a>(
+    fn parse_transactions<'a>(
         bank: &Bank,
         packets: impl Iterator<Item = &'a Packet>,
-    ) -> Option<JdsTransactionExecutionResult>
-    {
+    ) -> Vec<SanitizedTransaction> {
         let txns = packets.map(|packet| {
             let mut solana_packet = solana_sdk::packet::Packet::default();
             solana_packet.buffer_mut().copy_from_slice(&packet.data);
@@ -68,14 +67,17 @@ impl JdsActuator {
             Some(sanitized_transaction)
         }).collect_vec();
         if txns.iter().any(Option::is_none) {
-            return None;
+            return vec![];
         }
-        let txns = txns.into_iter().map(|x| x.unwrap()).collect_vec();
+        txns.into_iter().map(|x| x.unwrap()).collect_vec()
+    }
 
-        // 2. Lock
+    fn parse_validate_execute_transactions<'a>(
+        bank: &Bank,
+        txns: Vec<SanitizedTransaction>,
+    ) -> Option<JdsTransactionExecutionResult>
+    {
         let batch = bank.prepare_owned_sanitized_batch(txns);
-
-        // 2. Execute
         let mut execute_and_commit_timings = LeaderExecuteAndCommitTimings::default();
         let execute_output = bank
             .load_and_execute_transactions(
@@ -98,6 +100,48 @@ impl JdsActuator {
             execute_output,
             batch,
         })
+    }
+
+    fn record_and_commit_result<'a, 'b>(
+        &mut self,
+        result: JdsTransactionExecutionResult<'a, 'b>,
+        bank: &Arc<Bank>,
+        transaction_recorder: &solana_poh::poh_recorder::TransactionRecorder,
+    ) -> bool {
+        let JdsTransactionExecutionResult{ execute_output, batch} = result;
+        let LoadAndExecuteTransactionsOutput {
+            mut loaded_transactions,
+            execution_results,
+            retryable_transaction_indexes: _,
+            executed_transactions_count,
+            executed_non_vote_transactions_count,
+            executed_with_successful_result_count,
+            signature_count,
+            error_counters: _,
+            ..
+        } = execute_output;
+        let _freeze_lock = bank.freeze_lock();
+        let (last_blockhash, lamports_per_signature) = bank.last_blockhash_and_lamports_per_signature();
+
+        if executed_with_successful_result_count != batch.sanitized_transactions().len() {
+            return false;
+        }
+
+        self.record_and_commit(
+            &batch,
+            &mut loaded_transactions,
+            execution_results,
+            last_blockhash,
+            lamports_per_signature,
+            &transaction_recorder,
+            &bank,
+            executed_transactions_count,
+            executed_non_vote_transactions_count,
+            executed_with_successful_result_count,
+            signature_count,
+        );
+
+        true
     }
 
     fn record_and_commit(
@@ -125,6 +169,7 @@ impl JdsActuator {
                 }
             })
             .collect_vec();
+
         let record_transactions_summary =
             transaction_recorder.record_transactions(bank.slot(), vec![executed_transactions]);
 
@@ -158,9 +203,9 @@ impl JdsActuator {
 
     pub fn execute_and_commit_micro_block(&mut self, micro_block: MicroBlock) {
         let bank = self.poh_recorder.read().unwrap().bank().unwrap();
+        let transaction_recorder = self.poh_recorder.read().unwrap().new_recorder();
 
         // Try to execute everything in the block
-        let mut results = vec![];
         for packet in micro_block.packets {
             let Some(packet) = packet.data else {
                 continue;
@@ -168,60 +213,22 @@ impl JdsActuator {
 
             match packet {
                 Data::Bundle(bundle) => {
-                    let Some(result) = Self::parse_validate_execute_transactions(&bank, bundle.packets.iter()) else {
-                        results.push(ExecutionResult::Failure);
-                        continue;
-                    };
-                    results.push(ExecutionResult::Maybe(result));
-                }
-                Data::Packet(packet) => {
-                    let Some(result) = Self::parse_validate_execute_transactions(&bank, std::iter::once(&packet)) else {
-                        results.push(ExecutionResult::Failure);
-                        continue;
-                    };
-                    results.push(ExecutionResult::Maybe(result));
-                }
-            }
-        }
-
-        // Record and commit successes
-        let transaction_recorder = self.poh_recorder.read().unwrap().new_recorder();
-        let _freeze_lock = bank.freeze_lock();
-        for result in results {
-            match result {
-                ExecutionResult::Maybe(JdsTransactionExecutionResult{ execute_output, batch} ) => {
-                    let LoadAndExecuteTransactionsOutput {
-                        mut loaded_transactions,
-                        execution_results,
-                        retryable_transaction_indexes: _,
-                        executed_transactions_count,
-                        executed_non_vote_transactions_count,
-                        executed_with_successful_result_count,
-                        signature_count,
-                        error_counters: _,
-                        ..
-                    } = execute_output;
-                    let (last_blockhash, lamports_per_signature) = bank.last_blockhash_and_lamports_per_signature();
-
-                    if executed_with_successful_result_count != batch.sanitized_transactions().len() {
+                    let txns = Self::parse_transactions(&bank, bundle.packets.iter());
+                    if txns.is_empty() {
                         continue;
                     }
-
-                    self.record_and_commit(
-                        &batch,
-                        &mut loaded_transactions,
-                        execution_results,
-                        last_blockhash,
-                        lamports_per_signature,
-                        &transaction_recorder,
-                        &bank,
-                        executed_transactions_count,
-                        executed_non_vote_transactions_count,
-                        executed_with_successful_result_count,
-                        signature_count,
-                    );
+                    let Some(result) = Self::parse_validate_execute_transactions(&bank, txns) else {
+                        continue;
+                    };
+                    self.record_and_commit_result(result, &bank, &transaction_recorder);
                 }
-                ExecutionResult::Failure => {}
+                Data::Packet(packet) => {
+                    let txns = Self::parse_transactions(&bank, std::iter::once(&packet));
+                    let Some(result) = Self::parse_validate_execute_transactions(&bank, txns) else {
+                        continue;
+                    };
+                    self.record_and_commit_result(result, &bank, &transaction_recorder);
+                }
             }
         }
     }
