@@ -110,14 +110,14 @@ impl JssActuator {
                 continue;
             }
 
-            let (executed_batches, execution_results_to_transactions_us) =
+            let (executed_batches, _execution_results_to_transactions_us) =
                 measure_us!(bundle_execution_results.executed_transaction_batches());
 
-            let freeze_lock = bank.freeze_lock();
+            let _freeze_lock = bank.freeze_lock();
             let (last_blockhash, lamports_per_signature) = bank.last_blockhash_and_lamports_per_signature();
             let RecordTransactionsSummary {
                     result: record_transactions_result,
-                    record_transactions_timings,
+                    record_transactions_timings: _,
                     starting_transaction_index,
                 } =  transaction_recorder.record_transactions(bank.slot(), executed_batches);
             if record_transactions_result.is_err() {

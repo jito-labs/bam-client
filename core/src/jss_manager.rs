@@ -244,7 +244,7 @@ impl JssConnection {
     }
 
     // Send a signed slot tick to the JSS instance
-    fn send_signed_tick(&mut self, signed_slot_tick: SignedSlotTick) {
+    fn send_signed_tick(&mut self, _signed_slot_tick: SignedSlotTick) {
         let _ = self.outbound_sender.unbounded_send(StartSchedulerMessage {
             msg: Some(Msg::SchedulerTick(todo!())),
         });
