@@ -15,15 +15,15 @@ use solana_runtime::{bank_forks::BankForks, vote_sender_types::ReplayVoteSender}
 use solana_sdk::signer::Signer;
 use tokio::{task::spawn_blocking, time::timeout};
 
-use crate::jds_actuator::JdsActuator;
+use crate::jds_actuator::JssActuator;
 
-pub(crate) struct JdsManager {
+pub(crate) struct JssManager {
     threads: Vec<std::thread::JoinHandle<()>>,
 }
 
 // The (woah)man of the hour; the JDS Manager
 // Run based on timeouts and messages received from the JDS block engine
-impl JdsManager {
+impl JssManager {
     // Create and run a new instance of the JDS Manager
     pub fn new(
         jds_url: String,
@@ -74,14 +74,14 @@ impl JdsManager {
         replay_vote_sender: ReplayVoteSender,
     ) {
         let mut jds_connection = None;
-        let mut jds_actuator = JdsActuator::new(poh_recorder.clone(), replay_vote_sender);
+        let mut jds_actuator = JssActuator::new(poh_recorder.clone(), replay_vote_sender);
 
         // Run until (our) world ends
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
 
             // If no connection exists; create one
             let Some(current_jds_connection) = jds_connection.as_mut() else {
-                jds_connection = JdsConnection::try_init(jds_url.clone()).await;
+                jds_connection = JssConnection::try_init(jds_url.clone()).await;
                 if jds_connection.is_none() {
                     jds_enabled.store(false, std::sync::atomic::Ordering::Relaxed);
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -134,7 +134,7 @@ impl JdsManager {
                 }
                 jds_is_actuating.store(true, std::sync::atomic::Ordering::Relaxed);
                 jds_actuator = spawn_blocking(move || {
-                    jds_actuator.execute_and_commit_micro_block(micro_block.unwrap());
+                    jds_actuator.execute_and_commit_and_record_micro_block(micro_block.unwrap());
                     jds_actuator
                 }).await.unwrap();
                 jds_is_actuating.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -186,14 +186,14 @@ impl JdsManager {
 
 // Maintains a connection to the JDS block engine and handles sending and receiving messages
 // Keeps track of last received heartbeat 'behind the scenes' and will mark itself as unhealthy if no heartbeat is received
-struct JdsConnection {
+struct JssConnection {
     inbound_stream: tonic::Streaming<jito_protos::proto::jds_api::StartSchedulerResponse>,
     outbound_sender: mpsc::UnboundedSender<StartSchedulerMessage>,
     its_over: bool,
     last_heartbeat: Option<std::time::Instant>,
 }
 
-impl JdsConnection {
+impl JssConnection {
     async fn try_init(url: String) -> Option<Self> {
         let backend_endpoint = tonic::transport::Endpoint::from_shared(url).ok()?;
         let connection_timeout = std::time::Duration::from_secs(5);

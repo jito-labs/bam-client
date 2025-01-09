@@ -15,12 +15,12 @@ use solana_transaction_status::PreBalanceInfo;
 
 use crate::{banking_stage::{committer::Committer, immutable_deserialized_packet::ImmutableDeserializedPacket, leader_slot_timing_metrics::LeaderExecuteAndCommitTimings}, bundle_stage};
 
-pub struct JdsActuator {
+pub struct JssActuator {
     poh_recorder: Arc<RwLock<PohRecorder>>,
     committer: bundle_stage::committer::Committer,
 }
 
-impl JdsActuator {
+impl JssActuator {
     pub fn new(
         poh_recorder: Arc<RwLock<PohRecorder>>,
         replay_vote_sender: ReplayVoteSender,
@@ -81,7 +81,7 @@ impl JdsActuator {
     //fn parse_validate_execute_transactions<'a>(
     //    bank: &Bank,
     //    txns: Vec<SanitizedTransaction>,
-    //) -> Option<JdsTransactionExecutionResult>
+    //) -> Option<JssTransactionExecutionResult>
     //{
     //    let batch = bank.prepare_owned_sanitized_batch(txns);
     //    let mut execute_and_commit_timings = LeaderExecuteAndCommitTimings::default();
@@ -102,7 +102,7 @@ impl JdsActuator {
     //                transaction_account_lock_limit: Some(bank.get_transaction_account_lock_limit()),
     //            }
     //        );
-    //    Some(JdsTransactionExecutionResult{
+    //    Some(JssTransactionExecutionResult{
     //        execute_output,
     //        batch,
     //    })
@@ -110,11 +110,11 @@ impl JdsActuator {
 //
     //fn record_and_commit_result<'a, 'b>(
     //    &mut self,
-    //    result: JdsTransactionExecutionResult<'a, 'b>,
+    //    result: JssTransactionExecutionResult<'a, 'b>,
     //    bank: &Arc<Bank>,
     //    transaction_recorder: &solana_poh::poh_recorder::TransactionRecorder,
     //) -> bool {
-    //    let JdsTransactionExecutionResult{ execute_output, batch} = result;
+    //    let JssTransactionExecutionResult{ execute_output, batch} = result;
     //    let LoadAndExecuteTransactionsOutput {
     //        mut loaded_transactions,
     //        execution_results,
@@ -207,7 +207,7 @@ impl JdsActuator {
     //    true
     //}
 
-    pub fn execute_and_commit_micro_block(&mut self, micro_block: MicroBlock) {
+    pub fn execute_and_commit_and_record_micro_block(&mut self, micro_block: MicroBlock) {
         let bank = self.poh_recorder.read().unwrap().bank().unwrap();
         let transaction_recorder = self.poh_recorder.read().unwrap().new_recorder();
 
@@ -462,7 +462,7 @@ mod tests {
 
         let (replay_vote_sender, _) = crossbeam_channel::unbounded();
 
-        let mut actuator = super::JdsActuator::new(poh_recorder, replay_vote_sender);
+        let mut actuator = super::JssActuator::new(poh_recorder, replay_vote_sender);
 
         let successful_bundle = Bundle {
             packets: vec![jds_packet_from_versioned_tx(&VersionedTransaction::from(transfer(
@@ -495,12 +495,12 @@ mod tests {
         };
 
         // See if the transaction is executed
-        actuator.execute_and_commit_micro_block(microblock.clone());
+        actuator.execute_and_commit_and_record_micro_block(microblock.clone());
         let txns = get_executed_txns(&entry_receiver, Duration::from_secs(3));
         assert_eq!(txns.len(), 1);
 
         // Make sure if you try the same thing again, it doesn't work
-        actuator.execute_and_commit_micro_block(microblock.clone());
+        actuator.execute_and_commit_and_record_micro_block(microblock.clone());
         let txns = get_executed_txns(&entry_receiver, Duration::from_secs(3));
         assert_eq!(txns.len(), 0);
 
