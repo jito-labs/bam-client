@@ -215,7 +215,6 @@ impl JdsActuator {
         for bundle in micro_block.bundles {
             let transactions = Self::parse_transactions(&bank, bundle.packets.iter());
             if transactions.is_empty() {
-                println!("Error parsing transactions");
                 continue;
             }
 
@@ -240,7 +239,6 @@ impl JdsActuator {
                 &default_accounts);
 
             if let Err(_) = bundle_execution_results.result() {
-                println!("Error executing bundle");
                 continue;
             }
 
@@ -255,7 +253,6 @@ impl JdsActuator {
                     starting_transaction_index,
                 } =  transaction_recorder.record_transactions(bank.slot(), executed_batches);
             if record_transactions_result.is_err() {
-                println!("Error recording transactions");
                 continue;
             }
 
@@ -459,7 +456,7 @@ mod tests {
             bundles: vec![bundle],
         };
         let microblock_len = microblock.bundles.len();
-        actuator.execute_and_commit_micro_block(microblock);
+        actuator.execute_and_commit_micro_block(microblock.clone());
 
         let mut transactions = Vec::new();
         let start = std::time::Instant::now();
@@ -479,23 +476,26 @@ mod tests {
 
         assert_eq!(transactions.len(), 1);
 
-        while let Ok(WorkingBankEntry {
-            bank: wbe_bank,
-            entries_ticks,
-        }) = entry_receiver.try_recv()
-        {
-            assert_eq!(bank.slot(), wbe_bank.slot());
+        // Make sure if you try the same thing again, it doesn't work
+        actuator.execute_and_commit_micro_block(microblock.clone());
+
+        let mut transactions = Vec::new();
+        let start = std::time::Instant::now();
+        while start.elapsed() < Duration::from_secs(3) {
+            let Ok(WorkingBankEntry {
+                bank: wbe_bank,
+                entries_ticks,
+            }) = entry_receiver.try_recv() else {
+                continue;
+            };
             for (entry, _) in entries_ticks {
                 if !entry.transactions.is_empty() {
-                    // transactions in this test are all overlapping, so each entry will contain 1 transaction
-                    assert_eq!(entry.transactions.len(), 1);
                     transactions.extend(entry.transactions);
                 }
             }
-            if transactions.len() == microblock_len {
-                break;
-            }
         }
+
+        assert_eq!(transactions.len(), 0);
 
         actuator.poh_recorder
             .write()
