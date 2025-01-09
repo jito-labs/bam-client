@@ -370,7 +370,7 @@ mod tests {
         let (executed_sender, executed_receiver) = std::sync::mpsc::channel();
 
         // See if the transaction is executed
-        actuator.execute_and_commit_and_record_micro_block(microblock.clone(), executed_sender);
+        actuator.execute_and_commit_and_record_micro_block(microblock.clone(), executed_sender.clone());
         let txns = get_executed_txns(&entry_receiver, Duration::from_secs(3));
         assert_eq!(txns.len(), 1);
 
