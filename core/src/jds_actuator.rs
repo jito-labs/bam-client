@@ -425,6 +425,28 @@ mod tests {
         }
     }
 
+    pub fn get_executed_txns(
+        entry_receiver: &Receiver<WorkingBankEntry>,
+        wait: Duration,
+    ) -> Vec<VersionedTransaction> {
+        let mut transactions = Vec::new();
+        let start = std::time::Instant::now();
+        while start.elapsed() < wait {
+            let Ok(WorkingBankEntry {
+                bank: wbe_bank,
+                entries_ticks,
+            }) = entry_receiver.try_recv() else {
+                continue;
+            };
+            for (entry, _) in entries_ticks {
+                if !entry.transactions.is_empty() {
+                    transactions.extend(entry.transactions);
+                }
+            }
+        }
+        transactions
+    }
+
     #[test]
     fn test_actuation_simple() {
         let TestFixture {
@@ -455,47 +477,16 @@ mod tests {
         let microblock = MicroBlock {
             bundles: vec![bundle],
         };
-        let microblock_len = microblock.bundles.len();
+
+        // See if the transaction is executed
         actuator.execute_and_commit_micro_block(microblock.clone());
-
-        let mut transactions = Vec::new();
-        let start = std::time::Instant::now();
-        while start.elapsed() < Duration::from_secs(3) {
-            let Ok(WorkingBankEntry {
-                bank: wbe_bank,
-                entries_ticks,
-            }) = entry_receiver.try_recv() else {
-                continue;
-            };
-            for (entry, _) in entries_ticks {
-                if !entry.transactions.is_empty() {
-                    transactions.extend(entry.transactions);
-                }
-            }
-        }
-
-        assert_eq!(transactions.len(), 1);
+        let txns = get_executed_txns(&entry_receiver, Duration::from_secs(3));
+        assert_eq!(txns.len(), 1);
 
         // Make sure if you try the same thing again, it doesn't work
         actuator.execute_and_commit_micro_block(microblock.clone());
-
-        let mut transactions = Vec::new();
-        let start = std::time::Instant::now();
-        while start.elapsed() < Duration::from_secs(3) {
-            let Ok(WorkingBankEntry {
-                bank: wbe_bank,
-                entries_ticks,
-            }) = entry_receiver.try_recv() else {
-                continue;
-            };
-            for (entry, _) in entries_ticks {
-                if !entry.transactions.is_empty() {
-                    transactions.extend(entry.transactions);
-                }
-            }
-        }
-
-        assert_eq!(transactions.len(), 0);
+        let txns = get_executed_txns(&entry_receiver, Duration::from_secs(3));
+        assert_eq!(txns.len(), 0);
 
         actuator.poh_recorder
             .write()
