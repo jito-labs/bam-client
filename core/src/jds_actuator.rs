@@ -458,24 +458,40 @@ mod tests {
             poh_simulator,
             entry_receiver,
             bank_forks: _bank_forks,
-        } = create_test_fixture(1_000_000);
+        } = create_test_fixture(1);
 
         let (replay_vote_sender, _) = crossbeam_channel::unbounded();
 
         let mut actuator = super::JdsActuator::new(poh_recorder, replay_vote_sender);
 
-        let txn = VersionedTransaction::from(transfer(
-            &genesis_config_info.mint_keypair,
-            &genesis_config_info.mint_keypair.pubkey(),
-            100000,
-            genesis_config_info.genesis_config.hash(),
-        ));
-
-        let bundle = Bundle {
-            packets: vec![jds_packet_from_versioned_tx(&txn)],
+        let successful_bundle = Bundle {
+            packets: vec![jds_packet_from_versioned_tx(&VersionedTransaction::from(transfer(
+                &genesis_config_info.mint_keypair,
+                &genesis_config_info.mint_keypair.pubkey(),
+                100000,
+                genesis_config_info.genesis_config.hash(),
+            )))],
+        };
+        let failed_bundle = Bundle {
+            packets: vec![
+                // This one would go through
+                jds_packet_from_versioned_tx(&VersionedTransaction::from(transfer(
+                    &genesis_config_info.mint_keypair,
+                    &genesis_config_info.mint_keypair.pubkey(),
+                    1000,
+                    genesis_config_info.genesis_config.hash(),
+                ))),
+                // This one would fail; therefore both should fail
+                jds_packet_from_versioned_tx(&VersionedTransaction::from(transfer(
+                    &genesis_config_info.mint_keypair,
+                    &genesis_config_info.mint_keypair.pubkey(),
+                    1000000000,
+                    genesis_config_info.genesis_config.hash(),
+                ))),
+            ],
         };
         let microblock = MicroBlock {
-            bundles: vec![bundle],
+            bundles: vec![successful_bundle, failed_bundle],
         };
 
         // See if the transaction is executed
