@@ -4,7 +4,7 @@ use itertools::Itertools;
 /// Receives pre-scheduled microblocks and attempts to 'actuate' them by applying the transactions to the state.
 
 use solana_svm::transaction_results::TransactionExecutionResult;
-use jito_protos::proto::jds_types::{micro_block_packet::Data, Bundle, MicroBlock, Packet};
+use jito_protos::proto::jds_types::{Bundle, MicroBlock, Packet};
 use solana_poh::poh_recorder::{PohRecorder, RecordTransactionsSummary};
 use solana_runtime::{bank::{Bank, ExecutedTransactionCounts, LoadAndExecuteTransactionsOutput}, prioritization_fee_cache::PrioritizationFeeCache, transaction_batch::TransactionBatch, vote_sender_types::ReplayVoteSender};
 use solana_sdk::{clock::MAX_PROCESSING_AGE, packet::{Meta, PacketFlags}, transaction::{MessageHash, SanitizedTransaction, TransactionError, VersionedTransaction}};
@@ -206,30 +206,15 @@ impl JdsActuator {
         let transaction_recorder = self.poh_recorder.read().unwrap().new_recorder();
 
         // Try to execute everything in the block
-        for packet in micro_block.packets {
-            let Some(packet) = packet.data else {
+        for bundle in micro_block.bundles {
+            let txns = Self::parse_transactions(&bank, bundle.packets.iter());
+            if txns.is_empty() {
+                continue;
+            }
+            let Some(result) = Self::parse_validate_execute_transactions(&bank, txns) else {
                 continue;
             };
-
-            match packet {
-                Data::Bundle(bundle) => {
-                    let txns = Self::parse_transactions(&bank, bundle.packets.iter());
-                    if txns.is_empty() {
-                        continue;
-                    }
-                    let Some(result) = Self::parse_validate_execute_transactions(&bank, txns) else {
-                        continue;
-                    };
-                    self.record_and_commit_result(result, &bank, &transaction_recorder);
-                }
-                Data::Packet(packet) => {
-                    let txns = Self::parse_transactions(&bank, std::iter::once(&packet));
-                    let Some(result) = Self::parse_validate_execute_transactions(&bank, txns) else {
-                        continue;
-                    };
-                    self.record_and_commit_result(result, &bank, &transaction_recorder);
-                }
-            }
+            self.record_and_commit_result(result, &bank, &transaction_recorder);
         }
     }
 }
