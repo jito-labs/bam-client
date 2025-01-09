@@ -1,19 +1,16 @@
-use std::{borrow::Cow, sync::{mpsc::Sender, Arc, RwLock}, time::Duration};
+use std::{sync::{mpsc::Sender, Arc, RwLock}, time::Duration};
 
 use itertools::Itertools;
 use solana_bundle::bundle_execution::load_and_execute_bundle;
 use solana_measure::measure_us;
 /// Receives pre-scheduled microblocks and attempts to 'actuate' them by applying the transactions to the state.
 
-use solana_svm::transaction_results::TransactionExecutionResult;
-use jito_protos::proto::jds_types::{Bundle, MicroBlock, Packet};
+use jito_protos::proto::jds_types::{MicroBlock, Packet};
 use solana_poh::poh_recorder::{PohRecorder, RecordTransactionsSummary};
-use solana_runtime::{bank::{Bank, ExecutedTransactionCounts, LoadAndExecuteTransactionsOutput}, prioritization_fee_cache::PrioritizationFeeCache, transaction_batch::TransactionBatch, vote_sender_types::ReplayVoteSender};
-use solana_sdk::{bundle::{derive_bundle_id_from_sanitized_transactions, SanitizedBundle}, clock::MAX_PROCESSING_AGE, packet::{Meta, PacketFlags}, transaction::{MessageHash, SanitizedTransaction, TransactionError, VersionedTransaction}};
-use solana_svm::{account_loader::LoadedTransaction, transaction_processor::{ExecutionRecordingConfig, TransactionProcessingConfig}};
-use solana_transaction_status::PreBalanceInfo;
+use solana_runtime::{bank::Bank, prioritization_fee_cache::PrioritizationFeeCache, vote_sender_types::ReplayVoteSender};
+use solana_sdk::{bundle::{derive_bundle_id_from_sanitized_transactions, SanitizedBundle}, packet::PacketFlags, transaction::SanitizedTransaction};
 
-use crate::{banking_stage::{committer::Committer, immutable_deserialized_packet::ImmutableDeserializedPacket, leader_slot_timing_metrics::LeaderExecuteAndCommitTimings}, bundle_stage};
+use crate::{banking_stage::{immutable_deserialized_packet::ImmutableDeserializedPacket, leader_slot_timing_metrics::LeaderExecuteAndCommitTimings}, bundle_stage};
 
 pub struct JssActuator {
     poh_recorder: Arc<RwLock<PohRecorder>>,
