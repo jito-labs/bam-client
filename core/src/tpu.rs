@@ -96,7 +96,7 @@ pub struct Tpu {
     block_engine_stage: BlockEngineStage,
     fetch_stage_manager: FetchStageManager,
     bundle_stage: BundleStage,
-    jds_manager: Option<JssManager>,
+    jss_manager: Option<JssManager>,
 }
 
 impl Tpu {
@@ -142,7 +142,7 @@ impl Tpu {
         tip_manager_config: TipManagerConfig,
         shred_receiver_address: Arc<RwLock<Option<SocketAddr>>>,
         preallocated_bundle_cost: u64,
-        jds_url: Option<String>,
+        jss_url: Option<String>,
     ) -> (Self, Vec<Arc<dyn NotifyKeyUpdate + Sync + Send>>) {
         let TpuSockets {
             transactions: transactions_sockets,
@@ -230,7 +230,7 @@ impl Tpu {
         let (packet_sender, packet_receiver) = unbounded();
         let (bundle_sender, bundle_receiver) = unbounded();
 
-        let jds_enabled = Arc::new(AtomicBool::new(jds_url.is_some()));
+        let jss_enabled = Arc::new(AtomicBool::new(jss_url.is_some()));
 
         let sigverify_stage = {
             let verifier = TransactionSigVerifier::new(non_vote_sender.clone());
@@ -369,17 +369,17 @@ impl Tpu {
             shred_receiver_address,
         );
 
-        let bank_forks_for_jds = bank_forks.clone();
-        let exit_for_jds: Arc<AtomicBool> = exit.clone();
+        let bank_forks_for_jss = bank_forks.clone();
+        let exit_for_jss: Arc<AtomicBool> = exit.clone();
         let jss_is_actuating = Arc::new(AtomicBool::new(false));
-        let jds_manager = jds_enabled.load(std::sync::atomic::Ordering::SeqCst).then(|| {
+        let jss_manager = jss_enabled.load(std::sync::atomic::Ordering::SeqCst).then(|| {
             JssManager::new(
-                jds_url.unwrap(),
-                jds_enabled,
+                jss_url.unwrap(),
+                jss_enabled,
                 jss_is_actuating,
                 poh_recorder.clone(),
-                bank_forks_for_jds,
-                exit_for_jds,
+                bank_forks_for_jss,
+                exit_for_jss,
                 cluster_info.clone(),
                 replay_vote_sender.clone(),
             )
@@ -402,7 +402,7 @@ impl Tpu {
                 relayer_stage,
                 fetch_stage_manager,
                 bundle_stage,
-                jds_manager,
+                jss_manager,
             },
             vec![key_updater, forwards_key_updater],
         )
@@ -430,8 +430,8 @@ impl Tpu {
         if let Some(tpu_entry_notifier) = self.tpu_entry_notifier {
             tpu_entry_notifier.join()?;
         }
-        if let Some(jds_manager) = self.jds_manager {
-            jds_manager.join()?;
+        if let Some(jss_manager) = self.jss_manager {
+            jss_manager.join()?;
         }
         let _ = broadcast_result?;
         if let Some(tracer_thread_hdl) = self.tracer_thread_hdl {

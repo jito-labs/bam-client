@@ -1,8 +1,8 @@
-/// Manages majority of the JDS related functionality:
-/// - Connecting to the JDS block engine via GRPC service
+/// Manages majority of the JSS related functionality:
+/// - Connecting to the JSS block engine via GRPC service
 /// - Sending signed slot ticks + Receive microblocks
 /// - Actuating the received microblocks
-/// - Disabling JDS and re-enabling standard txn processing when health check fails
+/// - Disabling JSS and re-enabling standard txn processing when health check fails
 
 use std::{sync::{atomic::AtomicBool, Arc, RwLock}, thread::Builder};
 
@@ -21,13 +21,13 @@ pub(crate) struct JssManager {
     threads: Vec<std::thread::JoinHandle<()>>,
 }
 
-// The (woah)man of the hour; the JDS Manager
-// Run based on timeouts and messages received from the JDS block engine
+// The (woah)man of the hour; the JSS Manager
+// Run based on timeouts and messages received from the JSS block engine
 impl JssManager {
-    // Create and run a new instance of the JDS Manager
+    // Create and run a new instance of the JSS Manager
     pub fn new(
-        jds_url: String,
-        jds_enabled: Arc<AtomicBool>,
+        jss_url: String,
+        jss_enabled: Arc<AtomicBool>,
         jss_is_actuating: Arc<AtomicBool>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         bank_forks: Arc<RwLock<BankForks>>,
@@ -43,8 +43,8 @@ impl JssManager {
                     .build()
                     .unwrap();
                 rt.block_on(Self::start_manager(
-                    jds_url,
-                    jds_enabled,
+                    jss_url,
+                    jss_enabled,
                     jss_is_actuating,
                     exit,
                     poh_recorder,
@@ -62,10 +62,10 @@ impl JssManager {
         }
     }
 
-    // The main loop for the JDS Manager running inside an async environment
+    // The main loop for the JSS Manager running inside an async environment
     async fn start_manager(
-        jds_url: String,
-        jds_enabled: Arc<AtomicBool>,
+        jss_url: String,
+        jss_enabled: Arc<AtomicBool>,
         jss_is_actuating: Arc<AtomicBool>,
         exit: Arc<AtomicBool>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
@@ -81,18 +81,18 @@ impl JssManager {
 
             // If no connection exists; create one
             let Some(current_jss_connection) = jss_connection.as_mut() else {
-                jss_connection = JssConnection::try_init(jds_url.clone()).await;
+                jss_connection = JssConnection::try_init(jss_url.clone()).await;
                 if jss_connection.is_none() {
-                    jds_enabled.store(false, std::sync::atomic::Ordering::Relaxed);
+                    jss_enabled.store(false, std::sync::atomic::Ordering::Relaxed);
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                     continue;
                 }
                 continue;
             };
 
-            // If the jss_connection is not healthy; disable jds
+            // If the jss_connection is not healthy; disable jss
             if !current_jss_connection.is_healthy() {
-                jds_enabled.store(false, std::sync::atomic::Ordering::Relaxed);
+                jss_enabled.store(false, std::sync::atomic::Ordering::Relaxed);
                 jss_connection = None;
                 continue;
             }
@@ -176,9 +176,9 @@ impl JssManager {
         poh_recorder.would_be_leader(0)
     }
 
-    // Get the special signed slot tick message to send to the JDS block engine
+    // Get the special signed slot tick message to send to the JSS
     // This signed message is used to verify the authenticity of the sender (us)
-    // so that JDS knows we are allowed to receive potentially juicy microblocks
+    // so that JSS knows we are allowed to receive potentially juicy microblocks
     pub fn get_signed_slot_tick(poh_recorder: &PohRecorder, cluster_info: &ClusterInfo) -> Option<SignedSlotTick> {
         let Some(current_slot) = poh_recorder.bank().and_then(|bank| Some(bank.slot())) else {
             return None;
@@ -196,7 +196,7 @@ impl JssManager {
 }
 
 
-// Maintains a connection to the JDS block engine and handles sending and receiving messages
+// Maintains a connection to the JSS Node and handles sending and receiving messages
 // Keeps track of last received heartbeat 'behind the scenes' and will mark itself as unhealthy if no heartbeat is received
 struct JssConnection {
     inbound_stream: tonic::Streaming<jito_protos::proto::jds_api::StartSchedulerResponse>,
