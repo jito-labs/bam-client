@@ -248,6 +248,9 @@ impl JdsActuator {
                     record_transactions_timings,
                     starting_transaction_index,
                 } =  transaction_recorder.record_transactions(bank.slot(), executed_batches);
+            if record_transactions_result.is_err() {
+                continue;
+            }
 
             let mut execute_and_commit_timings = LeaderExecuteAndCommitTimings::default();
             self.committer.commit_bundle(
