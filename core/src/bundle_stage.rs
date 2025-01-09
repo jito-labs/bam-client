@@ -44,7 +44,7 @@ mod bundle_packet_deserializer;
 mod bundle_packet_receiver;
 mod bundle_reserved_space_manager;
 pub(crate) mod bundle_stage_leader_metrics;
-mod committer;
+pub mod committer;
 
 const MAX_BUNDLE_RETRY_DURATION: Duration = Duration::from_millis(40);
 const SLOT_BOUNDARY_CHECK_PERIOD: Duration = Duration::from_millis(10);
