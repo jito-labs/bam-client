@@ -197,7 +197,7 @@ fn test_actuation_simple() {
 
     let (replay_vote_sender, _) = crossbeam_channel::unbounded();
 
-    let mut actuator = JssActuator::new(poh_recorder, replay_vote_sender);
+    let mut actuator = JssActuator::new(poh_recorder.clone(), replay_vote_sender);
 
     let successful_bundle = Bundle {
         packets: vec![jds_packet_from_versioned_tx(&VersionedTransaction::from(transfer(
@@ -241,6 +241,11 @@ fn test_actuation_simple() {
     let txns = get_executed_txns(&entry_receiver, Duration::from_secs(3));
     assert_eq!(txns.len(), 0);
 
+    poh_recorder
+        .write()
+        .unwrap()
+        .is_exited
+        .store(true, Ordering::Relaxed);
     exit.store(true, Ordering::Relaxed);
     poh_simulator.join().unwrap();
 }
