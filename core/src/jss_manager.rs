@@ -15,7 +15,7 @@ use solana_runtime::{bank_forks::BankForks, vote_sender_types::ReplayVoteSender}
 use solana_sdk::signer::Signer;
 use tokio::{task::spawn_blocking, time::timeout};
 
-use crate::jds_actuator::JssActuator;
+use crate::jss_actuator::JssActuator;
 
 pub(crate) struct JssManager {
     threads: Vec<std::thread::JoinHandle<()>>,
@@ -28,7 +28,7 @@ impl JssManager {
     pub fn new(
         jds_url: String,
         jds_enabled: Arc<AtomicBool>,
-        jds_is_actuating: Arc<AtomicBool>,
+        jss_is_actuating: Arc<AtomicBool>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         bank_forks: Arc<RwLock<BankForks>>,
         exit: Arc<AtomicBool>,
@@ -36,7 +36,7 @@ impl JssManager {
         replay_vote_sender: ReplayVoteSender,
     ) -> Self {
         let api_connection_thread = Builder::new()
-            .name("block-engine-stage".to_string())
+            .name("jss-manager".to_string())
             .spawn(move || {
                 let rt = tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
@@ -45,7 +45,7 @@ impl JssManager {
                 rt.block_on(Self::start_manager(
                     jds_url,
                     jds_enabled,
-                    jds_is_actuating,
+                    jss_is_actuating,
                     exit,
                     poh_recorder,
                     bank_forks,
@@ -66,23 +66,23 @@ impl JssManager {
     async fn start_manager(
         jds_url: String,
         jds_enabled: Arc<AtomicBool>,
-        jds_is_actuating: Arc<AtomicBool>,
+        jss_is_actuating: Arc<AtomicBool>,
         exit: Arc<AtomicBool>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         _bank_forks: Arc<RwLock<BankForks>>,
         cluster_info: Arc<ClusterInfo>,
         replay_vote_sender: ReplayVoteSender,
     ) {
-        let mut jds_connection = None;
-        let mut jds_actuator = JssActuator::new(poh_recorder.clone(), replay_vote_sender);
+        let mut jss_connection = None;
+        let mut jss_actuator = JssActuator::new(poh_recorder.clone(), replay_vote_sender);
 
         // Run until (our) world ends
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
 
             // If no connection exists; create one
-            let Some(current_jds_connection) = jds_connection.as_mut() else {
-                jds_connection = JssConnection::try_init(jds_url.clone()).await;
-                if jds_connection.is_none() {
+            let Some(current_jss_connection) = jss_connection.as_mut() else {
+                jss_connection = JssConnection::try_init(jds_url.clone()).await;
+                if jss_connection.is_none() {
                     jds_enabled.store(false, std::sync::atomic::Ordering::Relaxed);
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                     continue;
@@ -90,10 +90,10 @@ impl JssManager {
                 continue;
             };
 
-            // If the jds_connection is not healthy; disable jds
-            if !current_jds_connection.is_healthy() {
+            // If the jss_connection is not healthy; disable jds
+            if !current_jss_connection.is_healthy() {
                 jds_enabled.store(false, std::sync::atomic::Ordering::Relaxed);
-                jds_connection = None;
+                jss_connection = None;
                 continue;
             }
 
@@ -110,7 +110,7 @@ impl JssManager {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 continue;
             };
-            current_jds_connection.send_signed_tick(signed_slot_tick);
+            current_jss_connection.send_signed_tick(signed_slot_tick);
 
             // Wait til in leader slot (TODO: breakout for error)
             while !Self::inside_leader_slot(&poh_recorder.read().unwrap()) {
@@ -127,17 +127,20 @@ impl JssManager {
                 }
 
 
-                let micro_block = current_jds_connection.try_recv();
+                let micro_block = current_jss_connection.try_recv();
                 if micro_block.is_none() {
                     tokio::time::sleep(std::time::Duration::from_micros(100)).await;
                     continue;
                 }
-                jds_is_actuating.store(true, std::sync::atomic::Ordering::Relaxed);
-                jds_actuator = spawn_blocking(move || {
-                    jds_actuator.execute_and_commit_and_record_micro_block(micro_block.unwrap());
-                    jds_actuator
-                }).await.unwrap();
-                jds_is_actuating.store(false, std::sync::atomic::Ordering::Relaxed);
+                jss_is_actuating.store(true, std::sync::atomic::Ordering::Relaxed);
+                let actuation_task = spawn_blocking(move || {
+                    jss_actuator.execute_and_commit_and_record_micro_block(micro_block.unwrap());
+                    jss_actuator
+                });
+                jss_actuator = actuation_task.await.unwrap();
+
+
+                jss_is_actuating.store(false, std::sync::atomic::Ordering::Relaxed);
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
         }

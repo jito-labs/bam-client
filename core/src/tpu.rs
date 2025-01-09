@@ -2,7 +2,7 @@
 //! multi-stage transaction processing pipeline in software.
 
 pub use solana_sdk::net::DEFAULT_TPU_COALESCE;
-use crate::jds_manager::JssManager;
+use crate::jss_manager::JssManager;
 
 use {
     crate::{
@@ -371,12 +371,12 @@ impl Tpu {
 
         let bank_forks_for_jds = bank_forks.clone();
         let exit_for_jds: Arc<AtomicBool> = exit.clone();
-        let jds_is_actuating = Arc::new(AtomicBool::new(false));
+        let jss_is_actuating = Arc::new(AtomicBool::new(false));
         let jds_manager = jds_enabled.load(std::sync::atomic::Ordering::SeqCst).then(|| {
             JssManager::new(
                 jds_url.unwrap(),
                 jds_enabled,
-                jds_is_actuating,
+                jss_is_actuating,
                 poh_recorder.clone(),
                 bank_forks_for_jds,
                 exit_for_jds,
