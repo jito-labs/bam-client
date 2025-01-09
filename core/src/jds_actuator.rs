@@ -428,6 +428,51 @@ mod tests {
         let microblock = MicroBlock {
             bundles: vec![],
         };
+        let microblock_len = microblock.bundles.len();
         actuator.execute_and_commit_micro_block(microblock);
+
+        let mut transactions = Vec::new();
+        let start = std::time::Instant::now();
+        while start.elapsed() < Duration::from_secs(1) {
+            let Ok(WorkingBankEntry {
+                bank: wbe_bank,
+                entries_ticks,
+            }) = entry_receiver.try_recv() else {
+                continue;
+            };
+            for (entry, _) in entries_ticks {
+                if !entry.transactions.is_empty() {
+                    transactions.extend(entry.transactions);
+                }
+            }
+        }
+
+        assert_eq!(transactions.len(), 0);
+
+        while let Ok(WorkingBankEntry {
+            bank: wbe_bank,
+            entries_ticks,
+        }) = entry_receiver.try_recv()
+        {
+            assert_eq!(bank.slot(), wbe_bank.slot());
+            for (entry, _) in entries_ticks {
+                if !entry.transactions.is_empty() {
+                    // transactions in this test are all overlapping, so each entry will contain 1 transaction
+                    assert_eq!(entry.transactions.len(), 1);
+                    transactions.extend(entry.transactions);
+                }
+            }
+            if transactions.len() == microblock_len {
+                break;
+            }
+        }
+
+        actuator.poh_recorder
+            .write()
+            .unwrap()
+            .is_exited
+            .store(true, Ordering::Relaxed);
+        exit.store(true, Ordering::Relaxed);
+        poh_simulator.join().unwrap();
     }
 }
