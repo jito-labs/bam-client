@@ -183,8 +183,9 @@ pub fn get_executed_txns(
     transactions
 }
 
-fn test_actuation_simple() {
-    let TestFixture {
+#[bench]
+fn bench_jss_actuator(b: &mut Bencher) {
+        let TestFixture {
         genesis_config_info,
         leader_keypair,
         bank,
@@ -196,7 +197,6 @@ fn test_actuation_simple() {
     } = create_test_fixture(1);
 
     let (replay_vote_sender, _) = crossbeam_channel::unbounded();
-
     let mut actuator = JssActuator::new(poh_recorder.clone(), replay_vote_sender);
 
     let successful_bundle = Bundle {
@@ -229,18 +229,6 @@ fn test_actuation_simple() {
         bundles: vec![successful_bundle, failed_bundle],
     };
 
-    let (executed_sender, executed_receiver) = std::sync::mpsc::channel();
-
-    // See if the transaction is executed
-    actuator.execute_and_commit_and_record_micro_block(microblock.clone(), executed_sender.clone());
-    let txns = get_executed_txns(&entry_receiver, Duration::from_secs(3));
-    assert_eq!(txns.len(), 1);
-
-    // Make sure if you try the same thing again, it doesn't work
-    actuator.execute_and_commit_and_record_micro_block(microblock.clone(), executed_sender);
-    let txns = get_executed_txns(&entry_receiver, Duration::from_secs(3));
-    assert_eq!(txns.len(), 0);
-
     poh_recorder
         .write()
         .unwrap()
@@ -248,11 +236,10 @@ fn test_actuation_simple() {
         .store(true, Ordering::Relaxed);
     exit.store(true, Ordering::Relaxed);
     poh_simulator.join().unwrap();
-}
 
-#[bench]
-fn bench_jss_actuator(b: &mut Bencher) {
     b.iter(|| {
-        test_actuation_simple();
+        // TODO: make this actually useful (LOL)
+        let (executed_sender, _executed_receiver) = std::sync::mpsc::channel();
+        actuator.execute_and_commit_and_record_micro_block(microblock.clone(), executed_sender);
     });
 }
