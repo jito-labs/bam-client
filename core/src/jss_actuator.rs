@@ -1,4 +1,4 @@
-use std::{borrow::Cow, sync::{Arc, RwLock}, time::Duration};
+use std::{borrow::Cow, sync::{mpsc::Sender, Arc, RwLock}, time::Duration};
 
 use itertools::Itertools;
 use solana_bundle::bundle_execution::load_and_execute_bundle;
@@ -78,7 +78,7 @@ impl JssActuator {
         txns.into_iter().map(|x| x.unwrap()).collect_vec()
     }
 
-    pub fn execute_and_commit_and_record_micro_block(&mut self, micro_block: MicroBlock) {
+    pub fn execute_and_commit_and_record_micro_block(&mut self, micro_block: MicroBlock, executed_sender: Sender<String>) {
         let bank = self.poh_recorder.read().unwrap().bank().unwrap();
         let transaction_recorder = self.poh_recorder.read().unwrap().new_recorder();
 
@@ -93,7 +93,7 @@ impl JssActuator {
             let bundle_id = derive_bundle_id_from_sanitized_transactions(&transactions);
             let sanitized_bundle = SanitizedBundle{
                 transactions,
-                bundle_id,
+                bundle_id: bundle_id.clone(),
             };
 
             let default_accounts = vec![None; len];
@@ -135,6 +135,8 @@ impl JssActuator {
                 starting_transaction_index,
                 &bank,
                 &mut execute_and_commit_timings);
+
+            executed_sender.send(bundle_id).unwrap();
         }
     }
 }
@@ -365,13 +367,15 @@ mod tests {
             bundles: vec![successful_bundle, failed_bundle],
         };
 
+        let (executed_sender, executed_receiver) = std::sync::mpsc::channel();
+
         // See if the transaction is executed
-        actuator.execute_and_commit_and_record_micro_block(microblock.clone());
+        actuator.execute_and_commit_and_record_micro_block(microblock.clone(), executed_sender);
         let txns = get_executed_txns(&entry_receiver, Duration::from_secs(3));
         assert_eq!(txns.len(), 1);
 
         // Make sure if you try the same thing again, it doesn't work
-        actuator.execute_and_commit_and_record_micro_block(microblock.clone());
+        actuator.execute_and_commit_and_record_micro_block(microblock.clone(), executed_sender);
         let txns = get_executed_txns(&entry_receiver, Duration::from_secs(3));
         assert_eq!(txns.len(), 0);
 

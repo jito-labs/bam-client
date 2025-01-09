@@ -8,7 +8,7 @@ use std::{sync::{atomic::AtomicBool, Arc, RwLock}, thread::Builder};
 
 use futures::channel::mpsc;
 use futures::{FutureExt, StreamExt};
-use jito_protos::proto::{jds_api::{jss_node_api_client::JssNodeApiClient, start_scheduler_message::Msg, start_scheduler_response::Resp, StartSchedulerMessage}, jds_types::{MicroBlock, SignedSlotTick, SlotTick}};
+use jito_protos::proto::{jds_api::{jss_node_api_client::JssNodeApiClient, start_scheduler_message::Msg, start_scheduler_response::Resp, StartSchedulerMessage}, jds_types::{ExecutionPreConfirmation, MicroBlock, SignedSlotTick, SlotTick}};
 use solana_gossip::cluster_info::ClusterInfo;
 use solana_poh::poh_recorder::PohRecorder;
 use solana_runtime::{bank_forks::BankForks, vote_sender_types::ReplayVoteSender};
@@ -133,10 +133,19 @@ impl JssManager {
                     continue;
                 }
                 jss_is_actuating.store(true, std::sync::atomic::Ordering::Relaxed);
+                let (executed_sender, executed_receiver) = std::sync::mpsc::channel();
                 let actuation_task = spawn_blocking(move || {
-                    jss_actuator.execute_and_commit_and_record_micro_block(micro_block.unwrap());
+                    jss_actuator.execute_and_commit_and_record_micro_block(micro_block.unwrap(), executed_sender);
                     jss_actuator
                 });
+                while !actuation_task.is_finished() {
+                    if let Ok(executed_bundle_id) = executed_receiver.try_recv() {
+                        current_jss_connection.send_bundle_execution_confirmation(ExecutionPreConfirmation{
+                            bundle_id: executed_bundle_id.bytes().into_iter().collect(),
+                        });
+                    }
+                }
+
                 jss_actuator = actuation_task.await.unwrap();
 
 
@@ -234,10 +243,17 @@ impl JssConnection {
         }
     }
 
-    // Send a signed slot tick to the JDS block engine
+    // Send a signed slot tick to the JSS instance
     fn send_signed_tick(&mut self, signed_slot_tick: SignedSlotTick) {
         let _ = self.outbound_sender.unbounded_send(StartSchedulerMessage {
             msg: Some(Msg::SchedulerTick(todo!())),
+        });
+    }
+
+    // Send a bundle execution confirmation to the JSS instance
+    fn send_bundle_execution_confirmation(&mut self, msg: ExecutionPreConfirmation) {
+        let _ = self.outbound_sender.unbounded_send(StartSchedulerMessage {
+            msg: Some(Msg::ExecutionPreConfirmation(msg)),
         });
     }
 
