@@ -192,9 +192,6 @@ impl JssActuator {
     }
 
     // TODO: optimize this function:
-    // Quick:
-    // - start iteration from the first unprocessed bundle
-    //
     // Otherwise:
     // - Switch to priograph
     pub fn schedule_next_bundles(
@@ -204,12 +201,17 @@ impl JssActuator {
         worker_thread_count: usize,
     ) {
         // Update the first unprocessed bundle index
-        context.first_unprocessed_bundle_index +=
-            context.bundles
-                .iter()
-                .skip(context.first_unprocessed_bundle_index)
-                .position(|b| !matches!(b, QueuedBundle::Scheduled))
-                .unwrap_or(0);
+        let skip_ahead = context.bundles
+            .iter()
+            .skip(context.first_unprocessed_bundle_index)
+            .position(|b| !matches!(b, QueuedBundle::Scheduled));
+
+        if let Some(skip_ahead) = skip_ahead {
+            context.first_unprocessed_bundle_index += skip_ahead;
+        } else {
+            // Everything is scheduled
+            return;
+        }
 
         for queued_bundle in context.bundles.iter_mut().skip(context.first_unprocessed_bundle_index) {
             // If the transaction has already been scheduled, skip it (obviously)
