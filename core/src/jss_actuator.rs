@@ -252,9 +252,12 @@ impl JssActuator {
         executed_sender: Sender<JssActuatorExecutionResult>,
     ) {
         let bank = self.poh_recorder.read().unwrap().bank().unwrap();
-        const WORKER_THREAD_COUNT: usize = 4;
         let exit = Arc::new(AtomicBool::new(false));
+        let mut bundles = micro_block.bundles.iter().map(|bundle| {
+            Self::parse_transactions(&bank, bundle.packets.iter())
+        }).collect_vec();
 
+        const WORKER_THREAD_COUNT: usize = 4;
         let ExecutionWorkers { worker_threads, exit, request_sender, response_receiver } =
             Self::prepare_workers(
                 WORKER_THREAD_COUNT,
@@ -264,10 +267,7 @@ impl JssActuator {
                 exit.clone(),
             );
 
-        let mut bundles = micro_block.bundles.iter().map(|bundle| {
-            Self::parse_transactions(&bank, bundle.packets.iter())
-        }).collect_vec();
-
+        // TODO: check slot to make sure you can continue execution
         let mut execution_context = MicroblockExecutionContext::default();
         while execution_context.completed_bundles_count < micro_block.bundles.len() {
             self.receive_finished_bundles(&response_receiver, &executed_sender, &mut execution_context);
