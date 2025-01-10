@@ -214,7 +214,10 @@ impl JssActuator {
                 break;
             }
 
-            // If these packets haven't been parsed yet, parse them
+            // If these packets haven't been parsed yet, parse them and save them
+            // so that we never have to this again for this bundle
+            // This is kinda sad because I love parsing, re-parsing, serializing, and deserializing
+            // I think CPU registers should hold JSON strings
             if let QueuedBundle::Unparsed(packets) = queued_bundle {
                 let transactions = Self::parse_transactions(&context.bank, packets.iter());
                 *queued_bundle = QueuedBundle::Waiting(transactions.clone());
