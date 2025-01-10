@@ -197,7 +197,7 @@ impl JssActuator {
     // Ideas for optimization:
     // - start iteration from the min(last) completed bundle index
     //   (this allows us to skip bundles that are already scheduled or still blocked)
-    pub fn schedule_next_bundles(
+    fn schedule_next_bundles(
         context: &mut MicroblockExecutionContext,
         request_sender: &crossbeam_channel::Sender<BundleContext>,
         response_receiver: &crossbeam_channel::Receiver<JssActuatorWorkerExecutionResult>,
