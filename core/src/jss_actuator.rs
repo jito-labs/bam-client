@@ -164,7 +164,6 @@ impl JssActuator {
 
     // TODO: optimize this function:
     // Quick:
-    // - don't re-parse transactions each time
     // - start iteration from the first unprocessed bundle
     // - Assign an int id to each bundle for faster check of 'already_scheduled'
     // - Assign Pubkeys -> int for much faster re-hashing
@@ -175,34 +174,25 @@ impl JssActuator {
     // - Switch to priograph
     pub fn schedule_next_bundles(
         &mut self,
-        micro_block: &MicroBlock,
+        bundles: &mut [Vec<SanitizedTransaction>],
         request_sender: &crossbeam_channel::Sender<Vec<SanitizedTransaction>>,
-        already_scheduled: &mut HashSet<String>,
         write_locked: &mut HashSet<Pubkey>,
         read_locked: &mut HashMap<Pubkey, usize>,
         inflight_bundles_count: &mut usize,
         worker_thread_count: usize,
     ) {
-        for bundle in &micro_block.bundles {
+        for transactions in bundles.iter_mut() {
             if *inflight_bundles_count >= worker_thread_count {
                 break;
             }
-            let transactions = Self::parse_transactions(
-                &self.poh_recorder.read().unwrap().bank().unwrap(),
-                bundle.packets.iter());
             if transactions.is_empty() {
-                continue;
-            }
-            let bundle_id = derive_bundle_id_from_sanitized_transactions(&transactions);
-            if already_scheduled.contains(&bundle_id) {
                 continue;
             }
             if Self::is_lock_blocked(&transactions, write_locked, read_locked) {
                 continue;
             }
             Self::lock_accounts(&transactions, write_locked, read_locked);
-            already_scheduled.insert(bundle_id.clone());
-            request_sender.send(transactions).unwrap();
+            request_sender.send(std::mem::take(transactions)).unwrap();
             *inflight_bundles_count += 1;
         }
     }
@@ -256,9 +246,13 @@ impl JssActuator {
 
         let mut write_locked = HashSet::with_capacity(0);
         let mut read_locked = HashMap::new();
-        let mut already_scheduled = HashSet::with_capacity(0);
         let mut inflight_bundles_count = 0;
         let mut completed_bundles_count = 0;
+
+        let mut bundles = micro_block.bundles.iter().map(|bundle| {
+            Self::parse_transactions(&bank, bundle.packets.iter())
+        }).collect_vec();
+
         while completed_bundles_count < micro_block.bundles.len() {
             self.receive_finished_bundles(
                 &response_receiver,
@@ -268,9 +262,8 @@ impl JssActuator {
                 &mut inflight_bundles_count,
                 &mut completed_bundles_count);
             self.schedule_next_bundles(
-                &micro_block,
+                &mut bundles,
                 &request_sender,
-                &mut already_scheduled,
                 &mut write_locked,
                 &mut read_locked,
                 &mut inflight_bundles_count,
