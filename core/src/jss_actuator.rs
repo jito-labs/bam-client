@@ -1,4 +1,4 @@
-use std::{sync::{atomic::AtomicBool, mpsc::Sender, Arc, RwLock}, time::Duration};
+use std::{fs, io::Write, sync::{atomic::AtomicBool, mpsc::Sender, Arc, RwLock}, time::Duration};
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use crossbeam_channel::Receiver;
@@ -203,7 +203,15 @@ impl JssActuator {
         response_receiver: &crossbeam_channel::Receiver<JssActuatorWorkerExecutionResult>,
         worker_thread_count: usize,
     ) {
-        for queued_bundle in context.bundles.iter_mut() {
+        // Update the first unprocessed bundle index
+        context.first_unprocessed_bundle_index +=
+            context.bundles
+                .iter()
+                .skip(context.first_unprocessed_bundle_index)
+                .position(|b| !matches!(b, QueuedBundle::Scheduled))
+                .unwrap_or(0);
+
+        for queued_bundle in context.bundles.iter_mut().skip(context.first_unprocessed_bundle_index) {
             // If the transaction has already been scheduled, skip it (obviously)
             if matches!(queued_bundle, QueuedBundle::Scheduled) {
                 continue;
@@ -272,9 +280,11 @@ impl JssActuator {
         micro_block: MicroBlock,
         executed_sender: Sender<JssActuatorExecutionResult>,
     ) {
+        // Grab bank and create exit signal
         let bank = self.poh_recorder.read().unwrap().bank().unwrap();
         let exit = Arc::new(AtomicBool::new(false));
 
+        // Spawn the worker threads that will be executing the bundles
         const WORKER_THREAD_COUNT: usize = 4;
         let ExecutionWorkers { worker_threads, exit, request_sender, response_receiver } =
             Self::prepare_workers(
@@ -391,6 +401,7 @@ pub struct MicroblockExecutionContext {
     total_bundles_count: usize,
     inflight_bundles_count: usize,
     completed_bundles_count: usize,
+    first_unprocessed_bundle_index: usize,
 }
 
 impl MicroblockExecutionContext {
@@ -406,6 +417,7 @@ impl MicroblockExecutionContext {
             read_locked: HashMap::new(),
             inflight_bundles_count: 0,
             completed_bundles_count: 0,
+            first_unprocessed_bundle_index: 0,
         }
     }
 
