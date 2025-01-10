@@ -191,9 +191,6 @@ impl JssActuator {
         }
     }
 
-    // TODO: optimize this function:
-    // Otherwise:
-    // - Switch to priograph
     pub fn schedule_next_bundles(
         context: &mut MicroblockExecutionContext,
         request_sender: &crossbeam_channel::Sender<Vec<SanitizedTransaction>>,
