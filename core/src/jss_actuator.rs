@@ -3,7 +3,6 @@ use std::{sync::{mpsc::Sender, Arc, RwLock}, time::Duration};
 use itertools::Itertools;
 use solana_bundle::bundle_execution::load_and_execute_bundle;
 use solana_measure::measure_us;
-/// Receives pre-scheduled microblocks and attempts to 'actuate' them by applying the transactions to the state.
 
 use jito_protos::proto::jds_types::{MicroBlock, Packet};
 use solana_poh::poh_recorder::{PohRecorder, RecordTransactionsSummary};
