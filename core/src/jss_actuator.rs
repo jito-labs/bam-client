@@ -191,8 +191,6 @@ impl JssActuator {
         }
     }
 
-
-
     // TODO: optimize this function:
     // Quick:
     // - start iteration from the first unprocessed bundle
