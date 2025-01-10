@@ -197,6 +197,11 @@ impl JssActuator {
         response_receiver: &crossbeam_channel::Receiver<JssActuatorWorkerExecutionResult>,
         worker_thread_count: usize,
     ) {
+        // If we have enough inflight bundles, stop scheduling now
+        if context.inflight_bundles_count >= worker_thread_count {
+            return;
+        }
+
         // Update the first unprocessed bundle index
         let skip_ahead = context.bundles
             .iter()
@@ -214,11 +219,6 @@ impl JssActuator {
             // If the transaction has already been scheduled, skip it (obviously)
             if matches!(queued_bundle, QueuedBundle::Scheduled) {
                 continue;
-            }
-
-            // If we have enough inflight bundles, stop scheduling now
-            if context.inflight_bundles_count >= worker_thread_count {
-                break;
             }
 
             // If we have a completed bundle waiting; terminate the loop
@@ -249,6 +249,9 @@ impl JssActuator {
             request_sender.send(std::mem::take(transactions)).unwrap();
             *queued_bundle = QueuedBundle::Scheduled;
             context.inflight_bundles_count += 1;
+            if context.inflight_bundles_count >= worker_thread_count {
+                break;
+            }
         }
     }
 
