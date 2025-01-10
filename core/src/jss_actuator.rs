@@ -7,7 +7,7 @@ use solana_bundle::bundle_execution::load_and_execute_bundle;
 use solana_measure::measure_us;
 
 use jito_protos::proto::jds_types::{MicroBlock, Packet};
-use solana_poh::poh_recorder::{self, PohRecorder, RecordTransactionsSummary, TransactionRecorder};
+use solana_poh::poh_recorder::{PohRecorder, RecordTransactionsSummary, TransactionRecorder};
 use solana_runtime::{bank::Bank, prioritization_fee_cache::PrioritizationFeeCache, vote_sender_types::ReplayVoteSender};
 use solana_sdk::{bundle::{derive_bundle_id_from_sanitized_transactions, SanitizedBundle}, packet::PacketFlags, pubkey::Pubkey, transaction::SanitizedTransaction};
 
@@ -204,30 +204,42 @@ impl JssActuator {
     // Otherwise:
     // - Switch to priograph
     pub fn schedule_next_bundles(
-        &mut self,
-        bundles: &mut [Vec<SanitizedTransaction>],
-        request_sender: &crossbeam_channel::Sender<Vec<SanitizedTransaction>>,
         context: &mut MicroblockExecutionContext,
+        request_sender: &crossbeam_channel::Sender<Vec<SanitizedTransaction>>,
         worker_thread_count: usize,
     ) {
-        for transactions in bundles.iter_mut() {
+        for queued_bundle in context.bundles.iter_mut() {
+            if matches!(queued_bundle, QueuedBundle::Scheduled) {
+                continue;
+            }
             if context.inflight_bundles_count >= worker_thread_count {
                 break;
             }
-            if transactions.is_empty() || Self::is_lock_blocked(&transactions, &context.write_locked, &context.read_locked) {
+
+            // If these packets haven't been parsed yet, parse them
+            if let QueuedBundle::Unparsed(packets) = queued_bundle {
+                let transactions = Self::parse_transactions(&context.bank, packets.iter());
+                *queued_bundle = QueuedBundle::Waiting(transactions.clone());
+            }
+
+            let transactions = match queued_bundle {
+                QueuedBundle::Waiting(transactions) => transactions,
+                _ => unreachable!(),
+            };
+            if Self::is_lock_blocked(&transactions, &context.write_locked, &context.read_locked) {
                 continue;
             }
             Self::lock_accounts(&transactions, &mut context.write_locked, &mut context.read_locked);
             request_sender.send(std::mem::take(transactions)).unwrap();
+            *queued_bundle = QueuedBundle::Scheduled;
             context.inflight_bundles_count += 1;
         }
     }
 
     pub fn receive_finished_bundles(
-        &mut self,
+        context: &mut MicroblockExecutionContext,
         response_receiver: &crossbeam_channel::Receiver<JssActuatorWorkerExecutionResult>,
         executed_sender: &Sender<JssActuatorExecutionResult>,
-        context: &mut MicroblockExecutionContext,
     ) {
         while let Ok(executed_bundle) = response_receiver.try_recv() {
             Self::unlock_accounts(&executed_bundle.transactions, &mut context.write_locked, &mut context.read_locked);
@@ -253,9 +265,6 @@ impl JssActuator {
     ) {
         let bank = self.poh_recorder.read().unwrap().bank().unwrap();
         let exit = Arc::new(AtomicBool::new(false));
-        let mut bundles = micro_block.bundles.iter().map(|bundle| {
-            Self::parse_transactions(&bank, bundle.packets.iter())
-        }).collect_vec();
 
         const WORKER_THREAD_COUNT: usize = 4;
         let ExecutionWorkers { worker_threads, exit, request_sender, response_receiver } =
@@ -268,10 +277,10 @@ impl JssActuator {
             );
 
         // TODO: check slot to make sure you can continue execution
-        let mut execution_context = MicroblockExecutionContext::default();
-        while execution_context.completed_bundles_count < micro_block.bundles.len() {
-            self.receive_finished_bundles(&response_receiver, &executed_sender, &mut execution_context);
-            self.schedule_next_bundles(&mut bundles, &request_sender, &mut execution_context, WORKER_THREAD_COUNT);
+        let mut execution_context = MicroblockExecutionContext::new(bank, micro_block);
+        while !execution_context.is_done() {
+            Self::receive_finished_bundles(&mut execution_context, &response_receiver, &executed_sender);
+            Self::schedule_next_bundles(&mut execution_context, &request_sender, WORKER_THREAD_COUNT);
         }
 
         exit.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -359,12 +368,41 @@ struct ExecutionWorkers {
     response_receiver: crossbeam_channel::Receiver<JssActuatorWorkerExecutionResult>,
 }
 
-#[derive(Default)]
+enum QueuedBundle {
+    Unparsed(Vec<Packet>),
+    Waiting(Vec<SanitizedTransaction>),
+    Scheduled,
+}
+
 pub struct MicroblockExecutionContext {
+    bank: Arc<Bank>,
+    bundles: Vec<QueuedBundle>,
     write_locked: HashSet<Pubkey>,
     read_locked: HashMap<Pubkey, usize>,
+    total_bundles_count: usize,
     inflight_bundles_count: usize,
     completed_bundles_count: usize,
+}
+
+impl MicroblockExecutionContext {
+    pub fn new(
+        bank: Arc<Bank>,
+        microblock: MicroBlock,
+    ) -> Self {
+        Self {
+            bank,
+            total_bundles_count: microblock.bundles.len(),
+            bundles: microblock.bundles.into_iter().map(|bundle| QueuedBundle::Unparsed(bundle.packets)).collect_vec(),
+            write_locked: HashSet::new(),
+            read_locked: HashMap::new(),
+            inflight_bundles_count: 0,
+            completed_bundles_count: 0,
+        }
+    }
+
+    pub fn is_done(&self) -> bool {
+        self.completed_bundles_count == self.total_bundles_count
+    }
 }
 
 #[cfg(test)]
