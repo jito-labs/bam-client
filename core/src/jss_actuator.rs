@@ -183,9 +183,8 @@ impl JssActuator {
                 poh_recorder.read().unwrap().new_recorder(),
                 committer.clone())
         }).collect_vec();
-
         ExecutionWorkers {
-            workers: worker_threads,
+            worker_threads,
             exit,
             request_sender,
             response_receiver,
@@ -208,35 +207,30 @@ impl JssActuator {
         &mut self,
         bundles: &mut [Vec<SanitizedTransaction>],
         request_sender: &crossbeam_channel::Sender<Vec<SanitizedTransaction>>,
-        write_locked: &mut HashSet<Pubkey>,
-        read_locked: &mut HashMap<Pubkey, usize>,
-        inflight_bundles_count: &mut usize,
+        context: &mut MicroblockExecutionContext,
         worker_thread_count: usize,
     ) {
         for transactions in bundles.iter_mut() {
-            if *inflight_bundles_count >= worker_thread_count {
+            if context.inflight_bundles_count >= worker_thread_count {
                 break;
             }
-            if transactions.is_empty() || Self::is_lock_blocked(&transactions, write_locked, read_locked) {
+            if transactions.is_empty() || Self::is_lock_blocked(&transactions, &context.write_locked, &context.read_locked) {
                 continue;
             }
-            Self::lock_accounts(&transactions, write_locked, read_locked);
+            Self::lock_accounts(&transactions, &mut context.write_locked, &mut context.read_locked);
             request_sender.send(std::mem::take(transactions)).unwrap();
-            *inflight_bundles_count += 1;
+            context.inflight_bundles_count += 1;
         }
     }
 
     pub fn receive_finished_bundles(
         &mut self,
         response_receiver: &crossbeam_channel::Receiver<JssActuatorWorkerExecutionResult>,
-        write_locked: &mut HashSet<Pubkey>,
-        read_locked: &mut HashMap<Pubkey, usize>,
         executed_sender: &Sender<JssActuatorExecutionResult>,
-        inflight_bundles_count: &mut usize,
-        completed_bundles_count: &mut usize,
+        context: &mut MicroblockExecutionContext,
     ) {
         while let Ok(executed_bundle) = response_receiver.try_recv() {
-            Self::unlock_accounts(&executed_bundle.transactions, write_locked, read_locked);
+            Self::unlock_accounts(&executed_bundle.transactions, &mut context.write_locked, &mut context.read_locked);
             let msg = if executed_bundle.success {
                 JssActuatorExecutionResult::Success(
                     derive_bundle_id_from_sanitized_transactions(&executed_bundle.transactions))
@@ -247,12 +241,12 @@ impl JssActuator {
                 }
             };
             executed_sender.send(msg).unwrap();
-            *inflight_bundles_count -= 1;
-            *completed_bundles_count += 1;
+            context.inflight_bundles_count -= 1;
+            context.completed_bundles_count += 1;
         }
     }
 
-    pub fn execute_and_commit_and_record_micro_block_multi_threaded(
+    pub fn schedule_microblock(
         &mut self,
         micro_block: MicroBlock,
         executed_sender: Sender<JssActuatorExecutionResult>,
@@ -261,43 +255,23 @@ impl JssActuator {
         const WORKER_THREAD_COUNT: usize = 4;
         let exit = Arc::new(AtomicBool::new(false));
 
-        let ExecutionWorkers {
-            workers: worker_threads,
-            exit,
-            request_sender,
-            response_receiver,
-        } = Self::prepare_workers(
-            WORKER_THREAD_COUNT,
-            bank.clone(),
-            self.poh_recorder.clone(),
-            self.committer.clone(),
-            exit.clone(),
-        );
-
-        let mut write_locked = HashSet::with_capacity(0);
-        let mut read_locked = HashMap::new();
-        let mut inflight_bundles_count = 0;
-        let mut completed_bundles_count = 0;
+        let ExecutionWorkers { worker_threads, exit, request_sender, response_receiver } =
+            Self::prepare_workers(
+                WORKER_THREAD_COUNT,
+                bank.clone(),
+                self.poh_recorder.clone(),
+                self.committer.clone(),
+                exit.clone(),
+            );
 
         let mut bundles = micro_block.bundles.iter().map(|bundle| {
             Self::parse_transactions(&bank, bundle.packets.iter())
         }).collect_vec();
 
-        while completed_bundles_count < micro_block.bundles.len() {
-            self.receive_finished_bundles(
-                &response_receiver,
-                &mut write_locked,
-                &mut read_locked,
-                &executed_sender,
-                &mut inflight_bundles_count,
-                &mut completed_bundles_count);
-            self.schedule_next_bundles(
-                &mut bundles,
-                &request_sender,
-                &mut write_locked,
-                &mut read_locked,
-                &mut inflight_bundles_count,
-                WORKER_THREAD_COUNT);
+        let mut execution_context = MicroblockExecutionContext::default();
+        while execution_context.completed_bundles_count < micro_block.bundles.len() {
+            self.receive_finished_bundles(&response_receiver, &executed_sender, &mut execution_context);
+            self.schedule_next_bundles(&mut bundles, &request_sender, &mut execution_context, WORKER_THREAD_COUNT);
         }
 
         exit.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -305,7 +279,7 @@ impl JssActuator {
     }
 
     pub fn execute_and_commit_and_record_micro_block(&mut self, micro_block: MicroBlock, executed_sender: Sender<JssActuatorExecutionResult>) {
-        return self.execute_and_commit_and_record_micro_block_multi_threaded(micro_block, executed_sender);
+        return self.schedule_microblock(micro_block, executed_sender);
     }
 
     pub fn execute_commit_record_bundle(
@@ -379,10 +353,18 @@ pub enum JssActuatorExecutionResult {
 }
 
 struct ExecutionWorkers {
-    workers: Vec<std::thread::JoinHandle<()>>,
+    worker_threads: Vec<std::thread::JoinHandle<()>>,
     exit: Arc<AtomicBool>,
     request_sender: crossbeam_channel::Sender<Vec<SanitizedTransaction>>,
     response_receiver: crossbeam_channel::Receiver<JssActuatorWorkerExecutionResult>,
+}
+
+#[derive(Default)]
+pub struct MicroblockExecutionContext {
+    write_locked: HashSet<Pubkey>,
+    read_locked: HashMap<Pubkey, usize>,
+    inflight_bundles_count: usize,
+    completed_bundles_count: usize,
 }
 
 #[cfg(test)]
@@ -611,7 +593,7 @@ mod tests {
             bundles: vec![successful_bundle, failed_bundle],
         };
 
-        let (executed_sender, executed_receiver) = std::sync::mpsc::channel();
+        let (executed_sender, _executed_receiver) = std::sync::mpsc::channel();
 
         // See if the transaction is executed
         actuator.execute_and_commit_and_record_micro_block(microblock.clone(), executed_sender.clone());
