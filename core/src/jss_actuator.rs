@@ -137,7 +137,7 @@ impl JssActuator {
     pub fn spawn_worker_thread(
         exit: Arc<AtomicBool>,
         request_receiver: Receiver<Vec<SanitizedTransaction>>,
-        response_sender: crossbeam_channel::Sender<Vec<SanitizedTransaction>>,
+        response_sender: crossbeam_channel::Sender<JssActuatorWorkerExecutionResult>,
         bank: Arc<Bank>,
         recorder: TransactionRecorder,
         mut committer: bundle_stage::committer::Committer,
@@ -147,9 +147,17 @@ impl JssActuator {
                 let Ok(transactions) = request_receiver.try_recv() else {
                     continue;
                 };
-                Self::execute_commit_record_bundle(&bank, &recorder, &mut committer, transactions.clone());
-                // TODO: send success or failure
-                response_sender.send(transactions).unwrap();
+                if Self::execute_commit_record_bundle(&bank, &recorder, &mut committer, transactions.clone()) {
+                    response_sender.send(JssActuatorWorkerExecutionResult{
+                        transactions,
+                        success: true,
+                    }).unwrap();
+                } else {
+                    response_sender.send(JssActuatorWorkerExecutionResult{
+                        transactions,
+                        success: false,
+                    }).unwrap();
+                }
             }
         })
     }
@@ -190,7 +198,7 @@ impl JssActuator {
 
     pub fn receive_finished_bundles(
         &mut self,
-        response_receiver: &crossbeam_channel::Receiver<Vec<SanitizedTransaction>>,
+        response_receiver: &crossbeam_channel::Receiver<JssActuatorWorkerExecutionResult>,
         write_locked: &mut HashSet<Pubkey>,
         read_locked: &mut HashMap<Pubkey, usize>,
         executed_sender: &Sender<JssActuatorExecutionResult>,
@@ -198,11 +206,18 @@ impl JssActuator {
         completed_bundles_count: &mut usize,
     ) {
         while let Ok(executed_bundle) = response_receiver.try_recv() {
+            Self::unlock_accounts(&executed_bundle.transactions, write_locked, read_locked);
+            if executed_bundle.success {
+                executed_sender.send(JssActuatorExecutionResult::Success(
+                    derive_bundle_id_from_sanitized_transactions(&executed_bundle.transactions))).unwrap();
+            } else {
+                executed_sender.send(JssActuatorExecutionResult::Failure{
+                    bundle_id: derive_bundle_id_from_sanitized_transactions(&executed_bundle.transactions),
+                    cus: 0, // TODO
+                }).unwrap();
+            }
             *inflight_bundles_count -= 1;
             *completed_bundles_count += 1;
-            Self::unlock_accounts(&executed_bundle, write_locked, read_locked);
-            let bundle_id = derive_bundle_id_from_sanitized_transactions(&executed_bundle);
-            executed_sender.send(JssActuatorExecutionResult::Success(bundle_id)).unwrap(); // TODO: handle failure
         }
     }
 
@@ -217,7 +232,7 @@ impl JssActuator {
         let (request_sender, request_receiver) =
             crossbeam_channel::bounded::<Vec<SanitizedTransaction>>(WORKER_THREAD_COUNT);
         let (response_sender, response_receiver) =
-            crossbeam_channel::bounded::<Vec<SanitizedTransaction>>(WORKER_THREAD_COUNT);
+            crossbeam_channel::bounded::<JssActuatorWorkerExecutionResult>(WORKER_THREAD_COUNT);
         let worker_threads = (0..WORKER_THREAD_COUNT).into_iter().map(|_| {
             Self::spawn_worker_thread(
                 exit.clone(),
@@ -314,6 +329,11 @@ impl JssActuator {
 
         true
     }
+}
+
+pub struct JssActuatorWorkerExecutionResult {
+    transactions: Vec<SanitizedTransaction>,
+    success: bool,
 }
 
 pub enum JssActuatorExecutionResult {
