@@ -185,10 +185,7 @@ impl JssActuator {
             if *inflight_bundles_count >= worker_thread_count {
                 break;
             }
-            if transactions.is_empty() {
-                continue;
-            }
-            if Self::is_lock_blocked(&transactions, write_locked, read_locked) {
+            if transactions.is_empty() || Self::is_lock_blocked(&transactions, write_locked, read_locked) {
                 continue;
             }
             Self::lock_accounts(&transactions, write_locked, read_locked);
@@ -208,15 +205,16 @@ impl JssActuator {
     ) {
         while let Ok(executed_bundle) = response_receiver.try_recv() {
             Self::unlock_accounts(&executed_bundle.transactions, write_locked, read_locked);
-            if executed_bundle.success {
-                executed_sender.send(JssActuatorExecutionResult::Success(
-                    derive_bundle_id_from_sanitized_transactions(&executed_bundle.transactions))).unwrap();
+            let msg = if executed_bundle.success {
+                JssActuatorExecutionResult::Success(
+                    derive_bundle_id_from_sanitized_transactions(&executed_bundle.transactions))
             } else {
-                executed_sender.send(JssActuatorExecutionResult::Failure{
+                JssActuatorExecutionResult::Failure { 
                     bundle_id: derive_bundle_id_from_sanitized_transactions(&executed_bundle.transactions),
-                    cus: 0, // TODO
-                }).unwrap();
-            }
+                    cus: 0,
+                }
+            };
+            executed_sender.send(msg).unwrap();
             *inflight_bundles_count -= 1;
             *completed_bundles_count += 1;
         }
