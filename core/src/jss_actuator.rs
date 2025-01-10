@@ -162,6 +162,17 @@ impl JssActuator {
         })
     }
 
+    // TODO: optimize this function:
+    // Quick:
+    // - don't re-parse transactions each time
+    // - start iteration from the first unprocessed bundle
+    // - Assign an int id to each bundle for faster check of 'already_scheduled'
+    // - Assign Pubkeys -> int for much faster re-hashing
+    // - Check if scheduled txns completed during iteration to break out sooner
+    //   and unblock better bundles sooner
+    //
+    // Otherwise:
+    // - Switch to priograph
     pub fn schedule_next_bundles(
         &mut self,
         micro_block: &MicroBlock,
