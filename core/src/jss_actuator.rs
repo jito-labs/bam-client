@@ -276,9 +276,9 @@ impl JssActuator {
                 exit.clone(),
             );
 
-        // TODO: check slot to make sure you can continue execution
+        // TODO: check slot to make sure you can continue execution (use BankStart too)
         let mut execution_context = MicroblockExecutionContext::new(bank, micro_block);
-        while !execution_context.is_done() {
+        while execution_context.keep_going() {
             Self::receive_finished_bundles(&mut execution_context, &response_receiver, &executed_sender);
             Self::schedule_next_bundles(&mut execution_context, &request_sender, WORKER_THREAD_COUNT);
         }
@@ -400,8 +400,8 @@ impl MicroblockExecutionContext {
         }
     }
 
-    pub fn is_done(&self) -> bool {
-        self.completed_bundles_count == self.total_bundles_count
+    pub fn keep_going(&self) -> bool {
+        self.completed_bundles_count < self.total_bundles_count
     }
 }
 
