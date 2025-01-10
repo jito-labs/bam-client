@@ -75,7 +75,7 @@ impl JssActuator {
         txns.into_iter().map(|x| x.unwrap()).collect_vec()
     }
 
-    pub fn execute_and_commit_and_record_micro_block(&mut self, micro_block: MicroBlock, executed_sender: Sender<String>) {
+    pub fn execute_and_commit_and_record_micro_block(&mut self, micro_block: MicroBlock, executed_sender: Sender<JssActuatorExecutionResult>) {
         let bank = self.poh_recorder.read().unwrap().bank().unwrap();
         let transaction_recorder = self.poh_recorder.read().unwrap().new_recorder();
 
@@ -133,9 +133,17 @@ impl JssActuator {
                 &bank,
                 &mut execute_and_commit_timings);
 
-            executed_sender.send(bundle_id).unwrap();
+            executed_sender.send(JssActuatorExecutionResult::Success(bundle_id)).unwrap();
         }
     }
+}
+
+pub enum JssActuatorExecutionResult {
+    Success(String /*BundleId*/),
+    Failure{
+        bundle_id: String,
+        cus: u64,
+    },
 }
 
 #[cfg(test)]

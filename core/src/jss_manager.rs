@@ -15,7 +15,7 @@ use solana_runtime::{bank_forks::BankForks, vote_sender_types::ReplayVoteSender}
 use solana_sdk::signer::Signer;
 use tokio::{task::spawn_blocking, time::timeout};
 
-use crate::jss_actuator::JssActuator;
+use crate::jss_actuator::{JssActuator, JssActuatorExecutionResult};
 
 pub(crate) struct JssManager {
     threads: Vec<std::thread::JoinHandle<()>>,
@@ -139,10 +139,18 @@ impl JssManager {
                     jss_actuator
                 });
                 while !actuation_task.is_finished() {
-                    if let Ok(executed_bundle_id) = executed_receiver.try_recv() {
-                        current_jss_connection.send_bundle_execution_confirmation(ExecutionPreConfirmation{
-                            bundle_id: executed_bundle_id.bytes().into_iter().collect(),
-                        });
+                    if let Ok(execution_result) = executed_receiver.try_recv() {
+                        match execution_result {
+                            JssActuatorExecutionResult::Success(bundle_id) => {
+                                current_jss_connection.send_bundle_execution_confirmation(ExecutionPreConfirmation{
+                                    bundle_id: bundle_id.bytes().into_iter().collect(),
+                                });
+                            },
+                            JssActuatorExecutionResult::Failure { bundle_id, cus } => {
+                                // TODO: collect the amount of failed CUS to potentially request another block
+                                todo!();
+                            }
+                        }
                     }
                 }
 
