@@ -221,11 +221,10 @@ impl JssActuator {
                 let transactions = Self::parse_transactions(&context.bank, packets.iter());
                 *queued_bundle = QueuedBundle::Waiting(transactions.clone());
             }
-
-            let transactions = match queued_bundle {
-                QueuedBundle::Waiting(transactions) => transactions,
-                _ => unreachable!(),
+            let QueuedBundle::Waiting(transactions) = queued_bundle else {
+                panic!("QueuedBundle::Waiting expected");
             };
+
             if Self::is_lock_blocked(&transactions, &context.write_locked, &context.read_locked) {
                 continue;
             }
