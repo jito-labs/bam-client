@@ -26,6 +26,7 @@ pub struct CommitBundleDetails {
     pub commit_transaction_details: Vec<Vec<CommitTransactionDetails>>,
 }
 
+#[derive(Clone)]
 pub struct Committer {
     transaction_status_sender: Option<TransactionStatusSender>,
     replay_vote_sender: ReplayVoteSender,

@@ -1,13 +1,15 @@
-use std::{sync::{mpsc::Sender, Arc, RwLock}, time::Duration};
+use std::{sync::{atomic::AtomicBool, mpsc::Sender, Arc, RwLock}, time::Duration};
 
+use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
+use crossbeam_channel::Receiver;
 use itertools::Itertools;
 use solana_bundle::bundle_execution::load_and_execute_bundle;
 use solana_measure::measure_us;
 
 use jito_protos::proto::jds_types::{MicroBlock, Packet};
-use solana_poh::poh_recorder::{PohRecorder, RecordTransactionsSummary};
+use solana_poh::poh_recorder::{self, PohRecorder, RecordTransactionsSummary, TransactionRecorder};
 use solana_runtime::{bank::Bank, prioritization_fee_cache::PrioritizationFeeCache, vote_sender_types::ReplayVoteSender};
-use solana_sdk::{bundle::{derive_bundle_id_from_sanitized_transactions, SanitizedBundle}, packet::PacketFlags, transaction::SanitizedTransaction};
+use solana_sdk::{bundle::{derive_bundle_id_from_sanitized_transactions, SanitizedBundle}, packet::PacketFlags, pubkey::Pubkey, transaction::SanitizedTransaction};
 
 use crate::{banking_stage::{immutable_deserialized_packet::ImmutableDeserializedPacket, leader_slot_timing_metrics::LeaderExecuteAndCommitTimings}, bundle_stage};
 
@@ -74,66 +76,243 @@ impl JssActuator {
         txns.into_iter().map(|x| x.unwrap()).collect_vec()
     }
 
-    pub fn execute_and_commit_and_record_micro_block(&mut self, micro_block: MicroBlock, executed_sender: Sender<JssActuatorExecutionResult>) {
-        let bank = self.poh_recorder.read().unwrap().bank().unwrap();
-        let transaction_recorder = self.poh_recorder.read().unwrap().new_recorder();
+    fn is_lock_blocked(
+        transactions: &[SanitizedTransaction],
+        write_locked: &HashSet<Pubkey>,
+        read_locked: &HashMap<Pubkey, usize>,
+    ) -> bool {
+        for txn in transactions {
+            for (index, account) in txn.message().account_keys().iter().enumerate() {
+                if txn.message().is_writable(index) {
+                    if write_locked.contains(account) || read_locked.contains_key(account) {
+                        return true;
+                    }
+                } else {
+                    if write_locked.contains(account) {
+                        return true;
+                    }
+                }
+            }
+        }
 
-        // Try to execute everything in the block
-        for bundle in micro_block.bundles {
-            let transactions = Self::parse_transactions(&bank, bundle.packets.iter());
+        false
+    }
+
+    fn lock_accounts(
+        transactions: &[SanitizedTransaction],
+        write_locked: &mut HashSet<Pubkey>,
+        read_locked: &mut HashMap<Pubkey, usize>,
+    ) {
+        for txn in transactions {
+            for (index, account) in txn.message().account_keys().iter().enumerate() {
+                if txn.message().is_writable(index) {
+                    write_locked.insert(*account);
+                } else {
+                    read_locked.entry(*account).and_modify(|e| *e += 1).or_insert(1);
+                }
+            }
+        }
+    }
+
+    fn unlock_accounts(
+        transactions: &[SanitizedTransaction],
+        write_locked: &mut HashSet<Pubkey>,
+        read_locked: &mut HashMap<Pubkey, usize>,
+    ) {
+        for txn in transactions {
+            for (index, account) in txn.message().account_keys().iter().enumerate() {
+                if txn.message().is_writable(index) {
+                    write_locked.remove(account);
+                } else {
+                    let count = read_locked.get_mut(account).unwrap();
+                    *count -= 1;
+                    if *count == 0 {
+                        read_locked.remove(account);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn spawn_worker_thread(
+        exit: Arc<AtomicBool>,
+        request_receiver: Receiver<Vec<SanitizedTransaction>>,
+        response_sender: crossbeam_channel::Sender<Vec<SanitizedTransaction>>,
+        bank: Arc<Bank>,
+        recorder: TransactionRecorder,
+        mut committer: bundle_stage::committer::Committer,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            while !exit.load(std::sync::atomic::Ordering::Relaxed) {
+                let Ok(transactions) = request_receiver.try_recv() else {
+                    continue;
+                };
+                Self::execute_commit_record_bundle(&bank, &recorder, &mut committer, transactions.clone());
+                // TODO: send success or failure
+                response_sender.send(transactions).unwrap();
+            }
+        })
+    }
+
+    pub fn schedule_next_bundles(
+        &mut self,
+        micro_block: &MicroBlock,
+        request_sender: &crossbeam_channel::Sender<Vec<SanitizedTransaction>>,
+        already_scheduled: &mut HashSet<String>,
+        write_locked: &mut HashSet<Pubkey>,
+        read_locked: &mut HashMap<Pubkey, usize>,
+        inflight_bundles_count: &mut usize,
+        worker_thread_count: usize,
+    ) {
+        for bundle in &micro_block.bundles {
+            if *inflight_bundles_count >= worker_thread_count {
+                break;
+            }
+            let transactions = Self::parse_transactions(
+                &self.poh_recorder.read().unwrap().bank().unwrap(),
+                bundle.packets.iter());
             if transactions.is_empty() {
                 continue;
             }
-
-            let len = transactions.len();
             let bundle_id = derive_bundle_id_from_sanitized_transactions(&transactions);
-            let sanitized_bundle = SanitizedBundle{
-                transactions,
-                bundle_id: bundle_id.clone(),
-            };
-
-            let default_accounts = vec![None; len];
-            let mut bundle_execution_results = load_and_execute_bundle(
-                &bank,
-                &sanitized_bundle,
-                20,
-                &Duration::from_secs(1),
-                false,
-                &None,
-                false,
-                None,
-                &default_accounts,
-                &default_accounts);
-
-            if let Err(_) = bundle_execution_results.result() {
+            if already_scheduled.contains(&bundle_id) {
                 continue;
             }
-
-            let (executed_batches, _execution_results_to_transactions_us) =
-                measure_us!(bundle_execution_results.executed_transaction_batches());
-
-            let _freeze_lock = bank.freeze_lock();
-            let (last_blockhash, lamports_per_signature) = bank.last_blockhash_and_lamports_per_signature();
-            let RecordTransactionsSummary {
-                    result: record_transactions_result,
-                    record_transactions_timings: _,
-                    starting_transaction_index,
-                } =  transaction_recorder.record_transactions(bank.slot(), executed_batches);
-            if record_transactions_result.is_err() {
+            if Self::is_lock_blocked(&transactions, write_locked, read_locked) {
                 continue;
             }
-
-            let mut execute_and_commit_timings = LeaderExecuteAndCommitTimings::default();
-            self.committer.commit_bundle(
-                &mut bundle_execution_results,
-                last_blockhash,
-                lamports_per_signature,
-                starting_transaction_index,
-                &bank,
-                &mut execute_and_commit_timings);
-
-            executed_sender.send(JssActuatorExecutionResult::Success(bundle_id)).unwrap();
+            Self::lock_accounts(&transactions, write_locked, read_locked);
+            already_scheduled.insert(bundle_id.clone());
+            request_sender.send(transactions).unwrap();
+            *inflight_bundles_count += 1;
         }
+    }
+
+    pub fn receive_finished_bundles(
+        &mut self,
+        response_receiver: &crossbeam_channel::Receiver<Vec<SanitizedTransaction>>,
+        write_locked: &mut HashSet<Pubkey>,
+        read_locked: &mut HashMap<Pubkey, usize>,
+        executed_sender: &Sender<JssActuatorExecutionResult>,
+        inflight_bundles_count: &mut usize,
+        completed_bundles_count: &mut usize,
+    ) {
+        while let Ok(executed_bundle) = response_receiver.try_recv() {
+            *inflight_bundles_count -= 1;
+            *completed_bundles_count += 1;
+            Self::unlock_accounts(&executed_bundle, write_locked, read_locked);
+            let bundle_id = derive_bundle_id_from_sanitized_transactions(&executed_bundle);
+            executed_sender.send(JssActuatorExecutionResult::Success(bundle_id)).unwrap(); // TODO: handle failure
+        }
+    }
+
+    pub fn execute_and_commit_and_record_micro_block_multi_threaded(
+        &mut self,
+        micro_block: MicroBlock,
+        executed_sender: Sender<JssActuatorExecutionResult>,
+    ) {
+        let bank = self.poh_recorder.read().unwrap().bank().unwrap();
+        const WORKER_THREAD_COUNT: usize = 4;
+        let exit = Arc::new(AtomicBool::new(false));
+        let (request_sender, request_receiver) =
+            crossbeam_channel::bounded::<Vec<SanitizedTransaction>>(WORKER_THREAD_COUNT);
+        let (response_sender, response_receiver) =
+            crossbeam_channel::bounded::<Vec<SanitizedTransaction>>(WORKER_THREAD_COUNT);
+        let worker_threads = (0..WORKER_THREAD_COUNT).into_iter().map(|_| {
+            Self::spawn_worker_thread(
+                exit.clone(),
+                request_receiver.clone(),
+                response_sender.clone(),
+                bank.clone(),
+                self.poh_recorder.read().unwrap().new_recorder(),
+                self.committer.clone())
+        }).collect_vec();
+
+        let mut write_locked = HashSet::with_capacity(0);
+        let mut read_locked = HashMap::new();
+        let mut already_scheduled = HashSet::with_capacity(0);
+        let mut inflight_bundles_count = 0;
+        let mut completed_bundles_count = 0;
+        while completed_bundles_count < micro_block.bundles.len() {
+            self.receive_finished_bundles(
+                &response_receiver,
+                &mut write_locked,
+                &mut read_locked,
+                &executed_sender,
+                &mut inflight_bundles_count,
+                &mut completed_bundles_count);
+            self.schedule_next_bundles(
+                &micro_block,
+                &request_sender,
+                &mut already_scheduled,
+                &mut write_locked,
+                &mut read_locked,
+                &mut inflight_bundles_count,
+                WORKER_THREAD_COUNT);
+        }
+
+        exit.store(true, std::sync::atomic::Ordering::Relaxed);
+        worker_threads.into_iter().for_each(|t| t.join().unwrap());
+    }
+
+    pub fn execute_and_commit_and_record_micro_block(&mut self, micro_block: MicroBlock, executed_sender: Sender<JssActuatorExecutionResult>) {
+        return self.execute_and_commit_and_record_micro_block_multi_threaded(micro_block, executed_sender);
+    }
+
+    pub fn execute_commit_record_bundle(
+        bank: &Arc<Bank>,
+        recorder: &TransactionRecorder,
+        committer: &mut bundle_stage::committer::Committer,
+        txns: Vec<SanitizedTransaction>) -> bool
+    {
+        let len = txns.len();
+        let bundle_id = derive_bundle_id_from_sanitized_transactions(&txns);
+        let sanitized_bundle = SanitizedBundle{
+            transactions: txns,
+            bundle_id: bundle_id.clone(),
+        };
+
+        let default_accounts = vec![None; len];
+        let mut bundle_execution_results = load_and_execute_bundle(
+            &bank,
+            &sanitized_bundle,
+            20,
+            &Duration::from_secs(1),
+            false,
+            &None,
+            false,
+            None,
+            &default_accounts,
+            &default_accounts);
+
+        if let Err(_) = bundle_execution_results.result() {
+            return false;
+        }
+
+        let (executed_batches, _execution_results_to_transactions_us) =
+            measure_us!(bundle_execution_results.executed_transaction_batches());
+
+        let _freeze_lock = bank.freeze_lock();
+        let (last_blockhash, lamports_per_signature) = bank.last_blockhash_and_lamports_per_signature();
+        let RecordTransactionsSummary {
+                result: record_transactions_result,
+                record_transactions_timings: _,
+                starting_transaction_index,
+            } =  recorder.record_transactions(bank.slot(), executed_batches);
+        if record_transactions_result.is_err() {
+            return false;
+        }
+
+        let mut execute_and_commit_timings = LeaderExecuteAndCommitTimings::default();
+        committer.commit_bundle(
+            &mut bundle_execution_results,
+            last_blockhash,
+            lamports_per_signature,
+            starting_transaction_index,
+            &bank,
+            &mut execute_and_commit_timings);
+
+        true
     }
 }
 
