@@ -37,6 +37,7 @@ log = { workspace = true }
 lru = { workspace = true }
 min-max-heap = { workspace = true }
 num_enum = { workspace = true }
+nohash = { workspace = true }
 prio-graph = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }

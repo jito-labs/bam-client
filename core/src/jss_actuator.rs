@@ -3,6 +3,7 @@ use std::{fs, io::Write, sync::{atomic::AtomicBool, mpsc::Sender, Arc, RwLock}, 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use crossbeam_channel::Receiver;
 use itertools::Itertools;
+use nohash::{IntMap, IntSet};
 use solana_bundle::bundle_execution::load_and_execute_bundle;
 use solana_measure::measure_us;
 
@@ -77,20 +78,18 @@ impl JssActuator {
     }
 
     fn is_lock_blocked(
-        transactions: &[SanitizedTransaction],
-        write_locked: &HashSet<Pubkey>,
-        read_locked: &HashMap<Pubkey, usize>,
+        locks: &[Lock],
+        write_locked: &IntSet<u32>,
+        read_locked: &IntMap<u32, usize>,
     ) -> bool {
-        for txn in transactions {
-            for (index, account) in txn.message().account_keys().iter().enumerate() {
-                if txn.message().is_writable(index) {
-                    if write_locked.contains(account) || read_locked.contains_key(account) {
-                        return true;
-                    }
-                } else {
-                    if write_locked.contains(account) {
-                        return true;
-                    }
+        for lock in locks {
+            if lock.write {
+                if write_locked.contains(&lock.account_id) {
+                    return true;
+                }
+            } else {
+                if write_locked.contains(&lock.account_id) || read_locked.contains_key(&lock.account_id) {
+                    return true;
                 }
             }
         }
@@ -98,37 +97,47 @@ impl JssActuator {
         false
     }
 
-    fn lock_accounts(
-        transactions: &[SanitizedTransaction],
-        write_locked: &mut HashSet<Pubkey>,
-        read_locked: &mut HashMap<Pubkey, usize>,
-    ) {
+    fn get_locks(transactions: &[SanitizedTransaction], lock_id_assigner: &mut LockIdAssigner) -> Vec<Lock> {
+        let mut result = vec![];
         for txn in transactions {
             for (index, account) in txn.message().account_keys().iter().enumerate() {
-                if txn.message().is_writable(index) {
-                    write_locked.insert(*account);
-                } else {
-                    read_locked.entry(*account).and_modify(|e| *e += 1).or_insert(1);
-                }
+                let account_id = lock_id_assigner.assign_or_get_id(*account);
+                result.push(Lock {
+                    account_id,
+                    write: txn.message().is_writable(index),
+                });
+            }
+        }
+        result
+    }
+
+    fn lock_accounts(
+        locks: &[Lock],
+        write_locked: &mut IntSet<u32>,
+        read_locked: &mut IntMap<u32, usize>,
+    ) {
+        for lock in locks {
+            if lock.write {
+                write_locked.insert(lock.account_id);
+            } else {
+                read_locked.entry(lock.account_id).and_modify(|e| *e += 1).or_insert(1);
             }
         }
     }
 
     fn unlock_accounts(
-        transactions: &[SanitizedTransaction],
-        write_locked: &mut HashSet<Pubkey>,
-        read_locked: &mut HashMap<Pubkey, usize>,
+        locks: &[Lock],
+        write_locked: &mut IntSet<u32>,
+        read_locked: &mut IntMap<u32, usize>,
     ) {
-        for txn in transactions {
-            for (index, account) in txn.message().account_keys().iter().enumerate() {
-                if txn.message().is_writable(index) {
-                    write_locked.remove(account);
-                } else {
-                    let count = read_locked.get_mut(account).unwrap();
-                    *count -= 1;
-                    if *count == 0 {
-                        read_locked.remove(account);
-                    }
+        for lock in locks {
+            if lock.write {
+                write_locked.remove(&lock.account_id);
+            } else {
+                let count = read_locked.get_mut(&lock.account_id).unwrap();
+                *count -= 1;
+                if *count == 0 {
+                    read_locked.remove(&lock.account_id);
                 }
             }
         }
@@ -136,7 +145,7 @@ impl JssActuator {
 
     fn spawn_worker_thread(
         exit: Arc<AtomicBool>,
-        request_receiver: Receiver<Vec<SanitizedTransaction>>,
+        request_receiver: Receiver<BundleContext>,
         response_sender: crossbeam_channel::Sender<JssActuatorWorkerExecutionResult>,
         bank: Arc<Bank>,
         recorder: TransactionRecorder,
@@ -144,17 +153,17 @@ impl JssActuator {
     ) -> std::thread::JoinHandle<()> {
         std::thread::spawn(move || {
             while !exit.load(std::sync::atomic::Ordering::Relaxed) {
-                let Ok(transactions) = request_receiver.try_recv() else {
+                let Ok(context) = request_receiver.try_recv() else {
                     continue;
                 };
-                if Self::execute_commit_record_bundle(&bank, &recorder, &mut committer, transactions.clone()) {
+                if Self::execute_commit_record_bundle(&bank, &recorder, &mut committer, context.transactions.clone()) {
                     response_sender.send(JssActuatorWorkerExecutionResult{
-                        transactions,
+                        context,
                         success: true,
                     }).unwrap();
                 } else {
                     response_sender.send(JssActuatorWorkerExecutionResult{
-                        transactions,
+                        context,
                         success: false,
                     }).unwrap();
                 }
@@ -171,7 +180,7 @@ impl JssActuator {
         -> ExecutionWorkers
     {
         let (request_sender, request_receiver) =
-        crossbeam_channel::bounded::<Vec<SanitizedTransaction>>(num_workers);
+        crossbeam_channel::bounded::<BundleContext>(num_workers);
         let (response_sender, response_receiver) =
             crossbeam_channel::bounded::<JssActuatorWorkerExecutionResult>(num_workers);
         let worker_threads = (0..num_workers).into_iter().map(|_| {
@@ -193,7 +202,7 @@ impl JssActuator {
 
     pub fn schedule_next_bundles(
         context: &mut MicroblockExecutionContext,
-        request_sender: &crossbeam_channel::Sender<Vec<SanitizedTransaction>>,
+        request_sender: &crossbeam_channel::Sender<BundleContext>,
         response_receiver: &crossbeam_channel::Receiver<JssActuatorWorkerExecutionResult>,
         worker_thread_count: usize,
     ) {
@@ -229,24 +238,29 @@ impl JssActuator {
 
             // If these packets haven't been parsed yet, parse them and save them
             // so that we never have to this again for this bundle
+            // Also hash all the locks and assign int ids to them
             // This is kinda sad because I love parsing, re-parsing, serializing, and deserializing
             // I think CPU registers should hold JSON strings
             if let QueuedBundle::Unparsed(packets) = queued_bundle {
                 let transactions = Self::parse_transactions(&context.bank, packets.iter());
-                *queued_bundle = QueuedBundle::Waiting(transactions.clone());
+                let locks = Self::get_locks(&transactions, &mut context.lock_assigner);
+                *queued_bundle = QueuedBundle::Waiting{ transactions, locks };
             }
-            let QueuedBundle::Waiting(transactions) = queued_bundle else {
+            let QueuedBundle::Waiting{ transactions, locks } = queued_bundle else {
                 panic!("QueuedBundle::Waiting expected");
             };
 
             // Check if this bundle is blocked by any locks
-            if Self::is_lock_blocked(&transactions, &context.write_locked, &context.read_locked) {
+            if Self::is_lock_blocked(&locks, &context.write_locked, &context.read_locked) {
                 continue;
             }
 
             // Finally: lock the accounts, send the bundle, and mark it as scheduled
-            Self::lock_accounts(&transactions, &mut context.write_locked, &mut context.read_locked);
-            request_sender.send(std::mem::take(transactions)).unwrap();
+            Self::lock_accounts(&locks, &mut context.write_locked, &mut context.read_locked);
+            request_sender.send(BundleContext{ 
+                transactions: std::mem::take(transactions),
+                locks: std::mem::take(locks)
+            }).unwrap();
             *queued_bundle = QueuedBundle::Scheduled;
             context.inflight_bundles_count += 1;
             if context.inflight_bundles_count >= worker_thread_count {
@@ -261,13 +275,13 @@ impl JssActuator {
         executed_sender: &Sender<JssActuatorExecutionResult>,
     ) {
         while let Ok(executed_bundle) = response_receiver.try_recv() {
-            Self::unlock_accounts(&executed_bundle.transactions, &mut context.write_locked, &mut context.read_locked);
+            Self::unlock_accounts(&executed_bundle.context.locks, &mut context.write_locked, &mut context.read_locked);
             let msg = if executed_bundle.success {
                 JssActuatorExecutionResult::Success(
-                    derive_bundle_id_from_sanitized_transactions(&executed_bundle.transactions))
+                    derive_bundle_id_from_sanitized_transactions(&executed_bundle.context.transactions))
             } else {
                 JssActuatorExecutionResult::Failure { 
-                    bundle_id: derive_bundle_id_from_sanitized_transactions(&executed_bundle.transactions),
+                    bundle_id: derive_bundle_id_from_sanitized_transactions(&executed_bundle.context.transactions),
                     cus: 0,
                 }
             };
@@ -369,7 +383,7 @@ impl JssActuator {
 }
 
 pub struct JssActuatorWorkerExecutionResult {
-    transactions: Vec<SanitizedTransaction>,
+    context: BundleContext,
     success: bool,
 }
 
@@ -384,21 +398,35 @@ pub enum JssActuatorExecutionResult {
 struct ExecutionWorkers {
     worker_threads: Vec<std::thread::JoinHandle<()>>,
     exit: Arc<AtomicBool>,
-    request_sender: crossbeam_channel::Sender<Vec<SanitizedTransaction>>,
+    request_sender: crossbeam_channel::Sender<BundleContext>,
     response_receiver: crossbeam_channel::Receiver<JssActuatorWorkerExecutionResult>,
+}
+
+struct Lock {
+    account_id: u32,
+    write: bool,
 }
 
 enum QueuedBundle {
     Unparsed(Vec<Packet>),
-    Waiting(Vec<SanitizedTransaction>),
+    Waiting{
+        transactions: Vec<SanitizedTransaction>,
+        locks: Vec<Lock>,
+    },
     Scheduled,
+}
+
+struct BundleContext {
+    transactions: Vec<SanitizedTransaction>,
+    locks: Vec<Lock>,
 }
 
 pub struct MicroblockExecutionContext {
     bank: Arc<Bank>,
     bundles: Vec<QueuedBundle>,
-    write_locked: HashSet<Pubkey>,
-    read_locked: HashMap<Pubkey, usize>,
+    lock_assigner: LockIdAssigner,
+    write_locked: IntSet<u32>,
+    read_locked: IntMap<u32, usize>,
     total_bundles_count: usize,
     inflight_bundles_count: usize,
     completed_bundles_count: usize,
@@ -412,10 +440,11 @@ impl MicroblockExecutionContext {
     ) -> Self {
         Self {
             bank,
+            lock_assigner: LockIdAssigner::new(),
             total_bundles_count: microblock.bundles.len(),
             bundles: microblock.bundles.into_iter().map(|bundle| QueuedBundle::Unparsed(bundle.packets)).collect_vec(),
-            write_locked: HashSet::new(),
-            read_locked: HashMap::new(),
+            write_locked: IntSet::new(),
+            read_locked: IntMap::new(),
             inflight_bundles_count: 0,
             completed_bundles_count: 0,
             first_unprocessed_bundle_index: 0,
@@ -424,6 +453,30 @@ impl MicroblockExecutionContext {
 
     pub fn keep_going(&self) -> bool {
         self.completed_bundles_count < self.total_bundles_count
+    }
+}
+
+struct LockIdAssigner {
+    next_id: u32,
+    mapping: HashMap<Pubkey, u32>,
+}
+
+impl LockIdAssigner {
+    pub fn new() -> Self {
+        Self {
+            next_id: 0,
+            mapping: HashMap::new(),
+        }
+    }
+
+    pub fn assign_or_get_id(&mut self, pubkey: Pubkey) -> u32 {
+        if let Some(id) = self.mapping.get(&pubkey) {
+            return *id;
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        self.mapping.insert(pubkey, id);
+        id
     }
 }
 
