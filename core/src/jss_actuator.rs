@@ -156,17 +156,11 @@ impl JssActuator {
                 let Ok(context) = request_receiver.try_recv() else {
                     continue;
                 };
-                if Self::execute_commit_record_bundle(&bank, &recorder, &mut committer, context.transactions.clone()) {
-                    response_sender.send(JssActuatorWorkerExecutionResult{
-                        context,
-                        success: true,
-                    }).unwrap();
-                } else {
-                    response_sender.send(JssActuatorWorkerExecutionResult{
-                        context,
-                        success: false,
-                    }).unwrap();
-                }
+                let success = Self::execute_commit_record_bundle(&bank, &recorder, &mut committer, context.transactions.clone());
+                response_sender.send(JssActuatorWorkerExecutionResult{
+                    context,
+                    success,
+                }).unwrap();
             }
         })
     }
