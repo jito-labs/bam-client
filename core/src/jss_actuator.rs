@@ -202,13 +202,23 @@ impl JssActuator {
     pub fn schedule_next_bundles(
         context: &mut MicroblockExecutionContext,
         request_sender: &crossbeam_channel::Sender<Vec<SanitizedTransaction>>,
+        response_receiver: &crossbeam_channel::Receiver<JssActuatorWorkerExecutionResult>,
         worker_thread_count: usize,
     ) {
         for queued_bundle in context.bundles.iter_mut() {
+            // If the transaction has already been scheduled, skip it (obviously)
             if matches!(queued_bundle, QueuedBundle::Scheduled) {
                 continue;
             }
+
+            // If we have enough inflight bundles, stop scheduling now
             if context.inflight_bundles_count >= worker_thread_count {
+                break;
+            }
+
+            // If we have a completed bundle waiting; terminate the loop
+            // because there might be better bundles to schedule
+            if !response_receiver.is_empty() {
                 break;
             }
 
@@ -224,9 +234,12 @@ impl JssActuator {
                 panic!("QueuedBundle::Waiting expected");
             };
 
+            // Check if this bundle is blocked by any locks
             if Self::is_lock_blocked(&transactions, &context.write_locked, &context.read_locked) {
                 continue;
             }
+
+            // Finally: lock the accounts, send the bundle, and mark it as scheduled
             Self::lock_accounts(&transactions, &mut context.write_locked, &mut context.read_locked);
             request_sender.send(std::mem::take(transactions)).unwrap();
             *queued_bundle = QueuedBundle::Scheduled;
@@ -278,7 +291,7 @@ impl JssActuator {
         let mut execution_context = MicroblockExecutionContext::new(bank, micro_block);
         while execution_context.keep_going() {
             Self::receive_finished_bundles(&mut execution_context, &response_receiver, &executed_sender);
-            Self::schedule_next_bundles(&mut execution_context, &request_sender, WORKER_THREAD_COUNT);
+            Self::schedule_next_bundles(&mut execution_context, &request_sender, &response_receiver, WORKER_THREAD_COUNT);
         }
 
         exit.store(true, std::sync::atomic::Ordering::Relaxed);
