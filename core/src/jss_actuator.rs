@@ -134,7 +134,7 @@ impl JssActuator {
         }
     }
 
-    pub fn spawn_worker_thread(
+    fn spawn_worker_thread(
         exit: Arc<AtomicBool>,
         request_receiver: Receiver<Vec<SanitizedTransaction>>,
         response_sender: crossbeam_channel::Sender<JssActuatorWorkerExecutionResult>,
@@ -161,6 +161,38 @@ impl JssActuator {
             }
         })
     }
+
+    fn prepare_workers(
+        num_workers: usize,
+        bank: Arc<Bank>,
+        poh_recorder: Arc<RwLock<PohRecorder>>,
+        committer: bundle_stage::committer::Committer,
+        exit: Arc<AtomicBool>)
+        -> ExecutionWorkers
+    {
+        let (request_sender, request_receiver) =
+        crossbeam_channel::bounded::<Vec<SanitizedTransaction>>(num_workers);
+        let (response_sender, response_receiver) =
+            crossbeam_channel::bounded::<JssActuatorWorkerExecutionResult>(num_workers);
+        let worker_threads = (0..num_workers).into_iter().map(|_| {
+            Self::spawn_worker_thread(
+                exit.clone(),
+                request_receiver.clone(),
+                response_sender.clone(),
+                bank.clone(),
+                poh_recorder.read().unwrap().new_recorder(),
+                committer.clone())
+        }).collect_vec();
+
+        ExecutionWorkers {
+            workers: worker_threads,
+            exit,
+            request_sender,
+            response_receiver,
+        }
+    }
+
+
 
     // TODO: optimize this function:
     // Quick:
@@ -228,19 +260,19 @@ impl JssActuator {
         let bank = self.poh_recorder.read().unwrap().bank().unwrap();
         const WORKER_THREAD_COUNT: usize = 4;
         let exit = Arc::new(AtomicBool::new(false));
-        let (request_sender, request_receiver) =
-            crossbeam_channel::bounded::<Vec<SanitizedTransaction>>(WORKER_THREAD_COUNT);
-        let (response_sender, response_receiver) =
-            crossbeam_channel::bounded::<JssActuatorWorkerExecutionResult>(WORKER_THREAD_COUNT);
-        let worker_threads = (0..WORKER_THREAD_COUNT).into_iter().map(|_| {
-            Self::spawn_worker_thread(
-                exit.clone(),
-                request_receiver.clone(),
-                response_sender.clone(),
-                bank.clone(),
-                self.poh_recorder.read().unwrap().new_recorder(),
-                self.committer.clone())
-        }).collect_vec();
+
+        let ExecutionWorkers {
+            workers: worker_threads,
+            exit,
+            request_sender,
+            response_receiver,
+        } = Self::prepare_workers(
+            WORKER_THREAD_COUNT,
+            bank.clone(),
+            self.poh_recorder.clone(),
+            self.committer.clone(),
+            exit.clone(),
+        );
 
         let mut write_locked = HashSet::with_capacity(0);
         let mut read_locked = HashMap::new();
@@ -344,6 +376,13 @@ pub enum JssActuatorExecutionResult {
         bundle_id: String,
         cus: u64,
     },
+}
+
+struct ExecutionWorkers {
+    workers: Vec<std::thread::JoinHandle<()>>,
+    exit: Arc<AtomicBool>,
+    request_sender: crossbeam_channel::Sender<Vec<SanitizedTransaction>>,
+    response_receiver: crossbeam_channel::Receiver<JssActuatorWorkerExecutionResult>,
 }
 
 #[cfg(test)]
