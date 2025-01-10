@@ -194,8 +194,6 @@ impl JssActuator {
     // TODO: optimize this function:
     // Quick:
     // - start iteration from the first unprocessed bundle
-    // - Check if scheduled txns completed during iteration to break out sooner
-    //   and unblock better bundles sooner
     //
     // Otherwise:
     // - Switch to priograph
