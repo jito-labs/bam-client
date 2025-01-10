@@ -196,8 +196,6 @@ impl JssActuator {
     // TODO: optimize this function:
     // Quick:
     // - start iteration from the first unprocessed bundle
-    // - Assign an int id to each bundle for faster check of 'already_scheduled'
-    // - Assign Pubkeys -> int for much faster re-hashing
     // - Check if scheduled txns completed during iteration to break out sooner
     //   and unblock better bundles sooner
     //
