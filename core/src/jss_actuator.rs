@@ -14,6 +14,7 @@ use solana_sdk::{bundle::{derive_bundle_id_from_sanitized_transactions, Sanitize
 
 use crate::{banking_stage::{immutable_deserialized_packet::ImmutableDeserializedPacket, leader_slot_timing_metrics::LeaderExecuteAndCommitTimings}, bundle_stage};
 
+#[derive(Clone)]
 pub struct JssActuator {
     poh_recorder: Arc<RwLock<PohRecorder>>,
     committer: bundle_stage::committer::Committer,

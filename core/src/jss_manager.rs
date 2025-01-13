@@ -79,88 +79,106 @@ impl JssManager {
         // Run until (our) world ends
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
 
-            // If no connection exists; create one
-            let Some(current_jss_connection) = jss_connection.as_mut() else {
-                jss_connection = JssConnection::try_init(jss_url.clone()).await;
-                if jss_connection.is_none() {
-                    jss_enabled.store(false, std::sync::atomic::Ordering::Relaxed);
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                    continue;
-                }
-                continue;
-            };
-
-            // If the jss_connection is not healthy; disable jss
-            if !current_jss_connection.is_healthy() {
+            // Init and/or check health of connection
+            if !Self::get_or_init_connection(jss_url.clone(), &mut jss_connection).await {
                 jss_enabled.store(false, std::sync::atomic::Ordering::Relaxed);
-                jss_connection = None;
                 continue;
             }
 
-            // If not time for auction; wait and loop again
-            if !Self::time_for_auction(&poh_recorder.read().unwrap()) {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                continue;
-            }
-
-            // Send slot tick
-            let Some(signed_slot_tick) = Self::get_signed_slot_tick(
-                &poh_recorder.read().unwrap(), &cluster_info)
-            else {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                continue;
-            };
-            current_jss_connection.send_signed_tick(signed_slot_tick);
-
-            // Wait til in leader slot (TODO: breakout for error)
-            while !Self::inside_leader_slot(&poh_recorder.read().unwrap()) {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-
-            let poh_recorder = poh_recorder.read().unwrap();
-            let current_slot = poh_recorder.bank().unwrap().slot();
-
-            // Keep receiving microblocks and actuating them as long as within the existing slot
-            while current_slot == poh_recorder.bank().unwrap().slot() {
-                if poh_recorder.tick_height() > 62 &&  poh_recorder.next_slot_leader() == Some(cluster_info.id()) {
-                    break;
-                }
-
-
-                let micro_block = current_jss_connection.try_recv();
-                if micro_block.is_none() {
-                    tokio::time::sleep(std::time::Duration::from_micros(100)).await;
-                    continue;
-                }
-                jss_is_actuating.store(true, std::sync::atomic::Ordering::Relaxed);
-                let (executed_sender, executed_receiver) = std::sync::mpsc::channel();
-                let actuation_task = spawn_blocking(move || {
-                    jss_actuator.execute_and_commit_and_record_micro_block(micro_block.unwrap(), executed_sender);
-                    jss_actuator
-                });
-                while !actuation_task.is_finished() {
-                    if let Ok(execution_result) = executed_receiver.try_recv() {
-                        match execution_result {
-                            JssActuatorExecutionResult::Success(bundle_id) => {
-                                current_jss_connection.send_bundle_execution_confirmation(ExecutionPreConfirmation{
-                                    bundle_id: bundle_id.bytes().into_iter().collect(),
-                                });
-                            },
-                            JssActuatorExecutionResult::Failure { bundle_id, cus } => {
-                                // TODO: collect the amount of failed CUS to potentially request another block
-                                todo!();
-                            }
-                        }
-                    }
-                }
-
-                jss_actuator = actuation_task.await.unwrap();
-
-
-                jss_is_actuating.store(false, std::sync::atomic::Ordering::Relaxed);
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            // If we are within the leader slot, or within lookahead, request and process micro blocks
+            if Self::is_within_leader_slot_with_lookahead(&poh_recorder.read().unwrap()) {
+                Self::request_and_process_microblocks(
+                    jss_connection.as_mut().unwrap(),
+                    &mut jss_actuator,
+                    &jss_is_actuating,
+                    &poh_recorder,
+                    &cluster_info,
+                ).await;
             }
         }
+    }
+
+    // Returns true if connection is created and healthy
+    async fn get_or_init_connection(
+        jss_url: String,
+        jss_connection: &mut Option<JssConnection>,
+    ) -> bool {
+        if jss_connection.is_none() {
+            *jss_connection = JssConnection::try_init(jss_url.clone()).await;
+            if jss_connection.is_none() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                return false;
+            }
+        }
+
+        if !jss_connection.as_mut().unwrap().is_healthy() {
+            *jss_connection = None;
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            return false;
+        }
+
+        true
+    }
+
+    async fn request_and_process_microblocks(
+        jss_connection: &mut JssConnection,
+        jss_actuator: &mut JssActuator,
+        jss_is_actuating: &Arc<AtomicBool>,
+        poh_recorder: &Arc<RwLock<PohRecorder>>,
+        cluster_info: &Arc<ClusterInfo>,
+    ) {
+
+        while Self::is_within_leader_slot_with_lookahead(&poh_recorder.read().unwrap()) {
+            // Send signed slot tick to JSS
+            let Some(signed_slot_tick) = Self::get_signed_slot_tick(
+                &poh_recorder.read().unwrap(), &cluster_info) else {
+                return;
+            };
+            jss_connection.send_signed_tick(signed_slot_tick);
+
+            let Some(micro_block) = jss_connection.recv_with_timeout(std::time::Duration::from_millis(100)).await else {
+                return;
+            };
+
+            Self::execute_micro_block(
+                jss_connection,
+                jss_actuator,
+                jss_is_actuating,
+                micro_block,
+            ).await;
+        }
+    }
+
+    async fn execute_micro_block(
+        jss_connection: &mut JssConnection,
+        jss_actuator: &mut JssActuator,
+        jss_is_actuating: &Arc<AtomicBool>,
+        micro_block: MicroBlock,
+    ) {
+        jss_is_actuating.store(true, std::sync::atomic::Ordering::Relaxed);
+        let (executed_sender, executed_receiver) = std::sync::mpsc::channel();
+        let mut jss_actuator = jss_actuator.clone(); // TODO: clone is bad, fix this
+        let actuation_task = spawn_blocking(move || {
+            jss_actuator.execute_and_commit_and_record_micro_block(micro_block, executed_sender);
+            jss_actuator
+        });
+        while !actuation_task.is_finished() {
+            if let Ok(execution_result) = executed_receiver.try_recv() {
+                match execution_result {
+                    JssActuatorExecutionResult::Success(bundle_id) => {
+                        jss_connection.send_bundle_execution_confirmation(ExecutionPreConfirmation{
+                            bundle_id: bundle_id.bytes().into_iter().collect(),
+                        });
+                    },
+                    JssActuatorExecutionResult::Failure { bundle_id, cus } => {
+                        // TODO: collect the amount of failed CUS to potentially request another block
+                        todo!();
+                    }
+                }
+            }
+        }
+
+        jss_is_actuating.store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     // Join all threads that the manager owns
@@ -173,14 +191,9 @@ impl JssManager {
 
     // Check if it's time for an auction
     // This is decided based on the PohRecorder's current slot and the lookahead
-    pub fn time_for_auction(poh_recorder: &PohRecorder) -> bool {
+    pub fn is_within_leader_slot_with_lookahead(poh_recorder: &PohRecorder) -> bool {
         const TICK_LOOKAHEAD: u64 = 8;
-        poh_recorder.would_be_leader(TICK_LOOKAHEAD)
-    }
-
-    // Check if we are currently inside the leader slot
-    // and therefore can keep waiting for microblocks
-    pub fn inside_leader_slot(poh_recorder: &PohRecorder) -> bool {
+        poh_recorder.would_be_leader(TICK_LOOKAHEAD) ||
         poh_recorder.would_be_leader(0)
     }
 
@@ -234,6 +247,25 @@ impl JssConnection {
 
     fn try_recv(&mut self) -> Option<MicroBlock> {
         let next = self.inbound_stream.next().now_or_never()?;
+        match next {
+            Some(Ok(response)) => {
+                self.last_heartbeat = Some(std::time::Instant::now());
+                if let Some(Resp::MicroBlock(micro_block)) = response.resp {
+                    Some(micro_block)
+                } else {
+                    None
+                }
+            }
+            Some(Err(_)) => {
+                self.its_over = true;
+                None
+            }
+            None => None
+        }
+    }
+
+    async fn recv_with_timeout(&mut self, timeout_duration: std::time::Duration) -> Option<MicroBlock> {
+        let next = timeout(timeout_duration, self.inbound_stream.next()).await.ok()?;
         match next {
             Some(Ok(response)) => {
                 self.last_heartbeat = Some(std::time::Instant::now());
