@@ -13,7 +13,7 @@ use solana_runtime::{bank_forks::BankForks, vote_sender_types::ReplayVoteSender}
 use solana_sdk::signer::Signer;
 use tokio::task::spawn_blocking;
 
-use crate::{jss_actuator::{JssActuator, JssActuatorExecutionResult}, jss_connection::JssConnection};
+use crate::{jss_executor::{JssExecutor, JssExecutorExecutionResult}, jss_connection::JssConnection};
 
 pub(crate) struct JssManager {
     threads: Vec<std::thread::JoinHandle<()>>,
@@ -72,7 +72,7 @@ impl JssManager {
         replay_vote_sender: ReplayVoteSender,
     ) {
         let mut jss_connection = None;
-        let mut jss_actuator = JssActuator::new(poh_recorder.clone(), replay_vote_sender);
+        let mut jss_executor = JssExecutor::new(poh_recorder.clone(), replay_vote_sender);
 
         // Run until (our) world ends
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
@@ -87,7 +87,7 @@ impl JssManager {
             if Self::is_within_leader_slot_with_lookahead(&poh_recorder.read().unwrap()) {
                 Self::request_and_process_microblocks(
                     jss_connection.as_mut().unwrap(),
-                    &mut jss_actuator,
+                    &mut jss_executor,
                     &jss_is_actuating,
                     &poh_recorder,
                     &cluster_info,
@@ -120,7 +120,7 @@ impl JssManager {
 
     async fn request_and_process_microblocks(
         jss_connection: &mut JssConnection,
-        jss_actuator: &mut JssActuator,
+        jss_executor: &mut JssExecutor,
         jss_is_actuating: &Arc<AtomicBool>,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         cluster_info: &Arc<ClusterInfo>,
@@ -140,7 +140,7 @@ impl JssManager {
 
             Self::execute_micro_block(
                 jss_connection,
-                jss_actuator,
+                jss_executor,
                 jss_is_actuating,
                 micro_block,
             ).await;
@@ -149,26 +149,26 @@ impl JssManager {
 
     async fn execute_micro_block(
         jss_connection: &mut JssConnection,
-        jss_actuator: &mut JssActuator,
+        jss_executor: &mut JssExecutor,
         jss_is_actuating: &Arc<AtomicBool>,
         micro_block: MicroBlock,
     ) {
         jss_is_actuating.store(true, std::sync::atomic::Ordering::Relaxed);
         let (executed_sender, executed_receiver) = std::sync::mpsc::channel();
-        let mut jss_actuator = jss_actuator.clone(); // TODO: clone is bad, fix this
+        let mut jss_executor = jss_executor.clone(); // TODO: clone is bad, fix this
         let actuation_task = spawn_blocking(move || {
-            jss_actuator.execute_and_commit_and_record_micro_block(micro_block, executed_sender);
-            jss_actuator
+            jss_executor.execute_and_commit_and_record_micro_block(micro_block, executed_sender);
+            jss_executor
         });
         while !actuation_task.is_finished() {
             if let Ok(execution_result) = executed_receiver.try_recv() {
                 match execution_result {
-                    JssActuatorExecutionResult::Success(bundle_id) => {
+                    JssExecutorExecutionResult::Success(bundle_id) => {
                         jss_connection.send_bundle_execution_confirmation(ExecutionPreConfirmation{
                             bundle_id: bundle_id.bytes().into_iter().collect(),
                         });
                     },
-                    JssActuatorExecutionResult::Failure { bundle_id, cus } => {
+                    JssExecutorExecutionResult::Failure { bundle_id, cus } => {
                         // TODO: collect the amount of failed CUS to potentially request another block
                         todo!();
                     }

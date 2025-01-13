@@ -161,7 +161,7 @@ name = "gen_keys"
 name = "sigverify_stage"
 
 [[bench]]
-name = "jss_actuator"
+name = "jss_executor"
 
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-linux-gnu"]

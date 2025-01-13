@@ -15,12 +15,12 @@ use solana_sdk::{bundle::{derive_bundle_id_from_sanitized_transactions, Sanitize
 use crate::{banking_stage::{immutable_deserialized_packet::ImmutableDeserializedPacket, leader_slot_timing_metrics::LeaderExecuteAndCommitTimings}, bundle_stage};
 
 #[derive(Clone)]
-pub struct JssActuator {
+pub struct JssExecutor {
     poh_recorder: Arc<RwLock<PohRecorder>>,
     committer: bundle_stage::committer::Committer,
 }
 
-impl JssActuator {
+impl JssExecutor {
     pub fn new(
         poh_recorder: Arc<RwLock<PohRecorder>>,
         replay_vote_sender: ReplayVoteSender,
@@ -147,7 +147,7 @@ impl JssActuator {
     fn spawn_worker_thread(
         exit: Arc<AtomicBool>,
         request_receiver: Receiver<BundleContext>,
-        response_sender: crossbeam_channel::Sender<JssActuatorWorkerExecutionResult>,
+        response_sender: crossbeam_channel::Sender<JssExecutorWorkerExecutionResult>,
         bank: Arc<Bank>,
         recorder: TransactionRecorder,
         mut committer: bundle_stage::committer::Committer,
@@ -158,7 +158,7 @@ impl JssActuator {
                     continue;
                 };
                 let success = Self::execute_commit_record_bundle(&bank, &recorder, &mut committer, context.transactions.clone());
-                response_sender.send(JssActuatorWorkerExecutionResult{
+                response_sender.send(JssExecutorWorkerExecutionResult{
                     context,
                     success,
                 }).unwrap();
@@ -177,7 +177,7 @@ impl JssActuator {
         let (request_sender, request_receiver) =
         crossbeam_channel::bounded::<BundleContext>(num_workers);
         let (response_sender, response_receiver) =
-            crossbeam_channel::bounded::<JssActuatorWorkerExecutionResult>(num_workers);
+            crossbeam_channel::bounded::<JssExecutorWorkerExecutionResult>(num_workers);
         let worker_threads = (0..num_workers).into_iter().map(|_| {
             Self::spawn_worker_thread(
                 exit.clone(),
@@ -204,7 +204,7 @@ impl JssActuator {
     fn schedule_next_bundles(
         context: &mut MicroblockExecutionContext,
         request_sender: &crossbeam_channel::Sender<BundleContext>,
-        response_receiver: &crossbeam_channel::Receiver<JssActuatorWorkerExecutionResult>,
+        response_receiver: &crossbeam_channel::Receiver<JssExecutorWorkerExecutionResult>,
         worker_thread_count: usize,
     ) {
         // If we have enough inflight bundles, stop scheduling now
@@ -272,16 +272,16 @@ impl JssActuator {
 
     pub fn receive_finished_bundles(
         context: &mut MicroblockExecutionContext,
-        response_receiver: &crossbeam_channel::Receiver<JssActuatorWorkerExecutionResult>,
-        executed_sender: &Sender<JssActuatorExecutionResult>,
+        response_receiver: &crossbeam_channel::Receiver<JssExecutorWorkerExecutionResult>,
+        executed_sender: &Sender<JssExecutorExecutionResult>,
     ) {
         while let Ok(executed_bundle) = response_receiver.try_recv() {
             Self::unlock_accounts(&executed_bundle.context.locks, &mut context.write_locked, &mut context.read_locked);
             let msg = if executed_bundle.success {
-                JssActuatorExecutionResult::Success(
+                JssExecutorExecutionResult::Success(
                     derive_bundle_id_from_sanitized_transactions(&executed_bundle.context.transactions))
             } else {
-                JssActuatorExecutionResult::Failure { 
+                JssExecutorExecutionResult::Failure { 
                     bundle_id: derive_bundle_id_from_sanitized_transactions(&executed_bundle.context.transactions),
                     cus: 0,
                 }
@@ -295,7 +295,7 @@ impl JssActuator {
     pub fn schedule_microblock(
         &mut self,
         micro_block: MicroBlock,
-        executed_sender: Sender<JssActuatorExecutionResult>,
+        executed_sender: Sender<JssExecutorExecutionResult>,
     ) {
         // Grab bank and create exit signal
         let bank = self.poh_recorder.read().unwrap().bank().unwrap();
@@ -322,7 +322,7 @@ impl JssActuator {
         worker_threads.into_iter().for_each(|t| t.join().unwrap());
     }
 
-    pub fn execute_and_commit_and_record_micro_block(&mut self, micro_block: MicroBlock, executed_sender: Sender<JssActuatorExecutionResult>) {
+    pub fn execute_and_commit_and_record_micro_block(&mut self, micro_block: MicroBlock, executed_sender: Sender<JssExecutorExecutionResult>) {
         return self.schedule_microblock(micro_block, executed_sender);
     }
 
@@ -383,12 +383,12 @@ impl JssActuator {
     }
 }
 
-pub struct JssActuatorWorkerExecutionResult {
+pub struct JssExecutorWorkerExecutionResult {
     context: BundleContext,
     success: bool,
 }
 
-pub enum JssActuatorExecutionResult {
+pub enum JssExecutorExecutionResult {
     Success(String /*BundleId*/),
     Failure{
         bundle_id: String,
@@ -400,7 +400,7 @@ struct ExecutionWorkers {
     worker_threads: Vec<std::thread::JoinHandle<()>>,
     exit: Arc<AtomicBool>,
     request_sender: crossbeam_channel::Sender<BundleContext>,
-    response_receiver: crossbeam_channel::Receiver<JssActuatorWorkerExecutionResult>,
+    response_receiver: crossbeam_channel::Receiver<JssExecutorWorkerExecutionResult>,
 }
 
 struct Lock {
@@ -661,7 +661,7 @@ mod tests {
     }
 
     #[test]
-    fn test_actuation_simple() {
+    fn test_execution_simple() {
         let TestFixture {
             genesis_config_info,
             leader_keypair,
@@ -675,7 +675,7 @@ mod tests {
 
         let (replay_vote_sender, _) = crossbeam_channel::unbounded();
 
-        let mut actuator = super::JssActuator::new(poh_recorder, replay_vote_sender);
+        let mut executor = super::JssExecutor::new(poh_recorder, replay_vote_sender);
 
         let successful_bundle = Bundle {
             packets: vec![jds_packet_from_versioned_tx(&VersionedTransaction::from(transfer(
@@ -710,16 +710,16 @@ mod tests {
         let (executed_sender, _executed_receiver) = std::sync::mpsc::channel();
 
         // See if the transaction is executed
-        actuator.execute_and_commit_and_record_micro_block(microblock.clone(), executed_sender.clone());
+        executor.execute_and_commit_and_record_micro_block(microblock.clone(), executed_sender.clone());
         let txns = get_executed_txns(&entry_receiver, Duration::from_secs(3));
         assert_eq!(txns.len(), 1);
 
         // Make sure if you try the same thing again, it doesn't work
-        actuator.execute_and_commit_and_record_micro_block(microblock.clone(), executed_sender);
+        executor.execute_and_commit_and_record_micro_block(microblock.clone(), executed_sender);
         let txns = get_executed_txns(&entry_receiver, Duration::from_secs(3));
         assert_eq!(txns.len(), 0);
 
-        actuator.poh_recorder
+        executor.poh_recorder
             .write()
             .unwrap()
             .is_exited

@@ -56,7 +56,7 @@ pub mod voting_service;
 pub mod warm_quic_cache_service;
 pub mod window_service;
 pub mod jss_manager;
-pub mod jss_actuator;
+pub mod jss_executor;
 pub mod jss_connection;
 
 #[macro_use]
