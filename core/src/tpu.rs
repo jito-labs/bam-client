@@ -274,6 +274,7 @@ impl Tpu {
             packet_intercept_receiver,
             packet_sender.clone(),
             exit.clone(),
+            jss_enabled.clone(),
         );
 
         let relayer_stage = RelayerStage::new(
