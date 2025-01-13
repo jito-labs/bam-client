@@ -4,9 +4,9 @@
 /// - Actuating the received microblocks
 /// - Disabling JSS and re-enabling standard txn processing when health check fails
 
-use std::{sync::{atomic::AtomicBool, Arc, RwLock}, thread::Builder};
+use std::{net::{Ipv4Addr, SocketAddr, SocketAddrV4}, str::FromStr, sync::{atomic::AtomicBool, Arc, RwLock}, thread::Builder};
 
-use jito_protos::proto::{ jds_types::{ExecutionPreConfirmation, MicroBlock, SignedSlotTick, SlotTick} };
+use jito_protos::proto::{ jds_api::TpuConfigResp, jds_types::{ExecutionPreConfirmation, MicroBlock, SignedSlotTick, SlotTick, Socket} };
 use solana_gossip::cluster_info::ClusterInfo;
 use solana_poh::poh_recorder::PohRecorder;
 use solana_runtime::{bank_forks::BankForks, vote_sender_types::ReplayVoteSender};
@@ -73,6 +73,7 @@ impl JssManager {
     ) {
         let mut jss_connection = None;
         let mut jss_executor = JssExecutor::new(poh_recorder.clone(), replay_vote_sender);
+        let mut tpu_info = None;
 
         // Run until (our) world ends
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
@@ -81,6 +82,13 @@ impl JssManager {
             if !Self::get_or_init_connection(jss_url.clone(), &mut jss_connection).await {
                 jss_enabled.store(false, std::sync::atomic::Ordering::Relaxed);
                 continue;
+            }
+
+            // Update TPU config
+            let new_tpu_info = jss_connection.as_ref().unwrap().get_tpu_config();
+            if new_tpu_info != tpu_info {
+                tpu_info = new_tpu_info;
+                Self::update_tpu_config(tpu_info.as_ref(), &cluster_info).await;
             }
 
             // If we are within the leader slot, or within lookahead, request and process micro blocks
@@ -109,7 +117,7 @@ impl JssManager {
             }
         }
 
-        if !jss_connection.as_mut().unwrap().is_healthy() {
+        if !jss_connection.as_mut().unwrap().is_healthy().await {
             *jss_connection = None;
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             return false;
@@ -134,7 +142,7 @@ impl JssManager {
             };
             jss_connection.send_signed_tick(signed_slot_tick);
 
-            let Some(micro_block) = jss_connection.recv_with_timeout(std::time::Duration::from_millis(100)).await else {
+            let Some(micro_block) = jss_connection.recv_microblock_with_timeout(std::time::Duration::from_millis(100)).await else {
                 return;
             };
 
@@ -177,6 +185,27 @@ impl JssManager {
         }
 
         jss_is_actuating.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn get_sockaddr(info: Option<&Socket>) -> Option<SocketAddr> {
+        let info = info?;
+        let Socket { ip, port } = info;
+        Some(SocketAddr::V4(SocketAddrV4::new(
+            Ipv4Addr::from_str(&ip).ok()?,
+            *port as u16,
+        )))
+    }
+
+    pub async fn update_tpu_config(tpu_info: Option<&TpuConfigResp>, cluster_info: &Arc<ClusterInfo>) {
+        if let Some(tpu_info) = tpu_info {
+            if let Some(tpu) = Self::get_sockaddr(tpu_info.tpu_sock.as_ref()) {
+                let _ = cluster_info.set_tpu(tpu);
+            }
+
+            if let Some(tpu_fwd) = Self::get_sockaddr(tpu_info.tpu_fwd_sock.as_ref()) {
+                let _ = cluster_info.set_tpu_forwards(tpu_fwd);
+            }
+        }
     }
 
     // Join all threads that the manager owns
