@@ -197,6 +197,9 @@ impl JssActuator {
     // Ideas for optimization:
     // - start iteration from the min(last) completed bundle index
     //   (this allows us to skip bundles that are already scheduled or still blocked)
+    // - schedule up to 2 in contention bundles at once (so worker thread is never idle)
+    // - Unblock locks with an 'ack' from the worker thread
+    // - Use prio-graph instead to determine the order of execution
     fn schedule_next_bundles(
         context: &mut MicroblockExecutionContext,
         request_sender: &crossbeam_channel::Sender<BundleContext>,
