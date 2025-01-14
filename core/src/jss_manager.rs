@@ -159,7 +159,11 @@ impl JssManager {
         // - How to find the actual use CUs per account so far?
         //
         // Basically we need to create an algorithm that continues until the slot is over or
-        // CUS are exhausted.
+        // CUS are exhausted. Additionally, this algorithm needs to be pipe-lined so that
+        // we request another micro-block while the previous one is being executed. This potentially has
+        // some issues with JSS re-sending some of the same bundles if it hasn't received a confirmation yet...
+        // So, either on the JSS side or on the client side, we need to keep track of the bundles that have been
+        // sent and received and only send the ones that haven't been confirmed yet.
 
         let slot = poh_recorder
             .read()
