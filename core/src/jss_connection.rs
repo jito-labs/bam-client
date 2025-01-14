@@ -1,5 +1,11 @@
 use futures::{channel::mpsc, FutureExt, StreamExt};
-use jito_protos::proto::{jds_api::{jss_node_api_client::JssNodeApiClient, start_scheduler_message::Msg, start_scheduler_response::Resp, GetTpuConfigRequest, StartSchedulerMessage, TpuConfigResp}, jds_types::{ExecutionPreConfirmation, MicroBlock, MicroBlockRequest}};
+use jito_protos::proto::{
+    jds_api::{
+        jss_node_api_client::JssNodeApiClient, start_scheduler_message::Msg,
+        start_scheduler_response::Resp, GetTpuConfigRequest, StartSchedulerMessage, TpuConfigResp,
+    },
+    jds_types::{ExecutionPreConfirmation, MicroBlock, MicroBlockRequest},
+};
 use tokio::time::timeout;
 
 // Maintains a connection to the JSS Node and handles sending and receiving messages
@@ -19,12 +25,20 @@ impl JssConnection {
     pub async fn try_init(url: String) -> Option<Self> {
         let backend_endpoint = tonic::transport::Endpoint::from_shared(url).ok()?;
         let connection_timeout = std::time::Duration::from_secs(5);
-        let channel = timeout(connection_timeout, backend_endpoint.connect()).await.ok()?.ok()?;
+        let channel = timeout(connection_timeout, backend_endpoint.connect())
+            .await
+            .ok()?
+            .ok()?;
         let mut validator_client = JssNodeApiClient::new(channel);
 
         let (outbound_sender, outbound_receiver) = mpsc::unbounded();
-        let outbound_stream = tonic::Request::new(outbound_receiver.map(|req: StartSchedulerMessage| req));
-        let inbound_stream = validator_client.start_scheduler_stream(outbound_stream).await.ok()?.into_inner();
+        let outbound_stream =
+            tonic::Request::new(outbound_receiver.map(|req: StartSchedulerMessage| req));
+        let inbound_stream = validator_client
+            .start_scheduler_stream(outbound_stream)
+            .await
+            .ok()?
+            .into_inner();
         Some(Self {
             validator_client,
             inbound_stream,
@@ -51,12 +65,17 @@ impl JssConnection {
                 self.its_over = true;
                 None
             }
-            None => None
+            None => None,
         }
     }
 
-    pub async fn recv_microblock_with_timeout(&mut self, timeout_duration: std::time::Duration) -> Option<MicroBlock> {
-        let next = timeout(timeout_duration, self.inbound_stream.next()).await.ok()?;
+    pub async fn recv_microblock_with_timeout(
+        &mut self,
+        timeout_duration: std::time::Duration,
+    ) -> Option<MicroBlock> {
+        let next = timeout(timeout_duration, self.inbound_stream.next())
+            .await
+            .ok()?;
         match next {
             Some(Ok(response)) => {
                 self.last_heartbeat = Some(std::time::Instant::now());
@@ -70,7 +89,7 @@ impl JssConnection {
                 self.its_over = true;
                 None
             }
-            None => None
+            None => None,
         }
     }
 
@@ -94,15 +113,20 @@ impl JssConnection {
         self.housekeeping().await;
 
         !self.its_over
-            && self.last_heartbeat.map_or(true, 
-                |heartbeat| heartbeat.elapsed().as_secs() < 5)
+            && self
+                .last_heartbeat
+                .map_or(true, |heartbeat| heartbeat.elapsed().as_secs() < 5)
     }
 
     async fn housekeeping(&mut self) {
         // Update TPU config
         let now = std::time::Instant::now();
         if now.duration_since(self.last_tpu_update).as_secs() > 5 {
-            if let Ok(tpu_config_response) = self.validator_client.get_tpu_config(GetTpuConfigRequest {}).await {
+            if let Ok(tpu_config_response) = self
+                .validator_client
+                .get_tpu_config(GetTpuConfigRequest {})
+                .await
+            {
                 self.tpu_config = Some(tpu_config_response.into_inner());
             }
             self.last_tpu_update = now;

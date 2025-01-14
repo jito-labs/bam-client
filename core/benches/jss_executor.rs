@@ -5,16 +5,42 @@ extern crate test;
 use solana_core::jss_executor::JssExecutor;
 use test::Bencher;
 
-
-use std::{sync::{atomic::{AtomicBool, Ordering}, Arc, RwLock}, thread::{Builder, JoinHandle}, time::Duration};
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, RwLock,
+    },
+    thread::{Builder, JoinHandle},
+    time::Duration,
+};
 
 use crossbeam_channel::Receiver;
 use jito_protos::proto::jds_types::{self, Bundle, MicroBlock};
-use solana_ledger::{blockstore::Blockstore, genesis_utils::GenesisConfigInfo, get_tmp_ledger_path_auto_delete, leader_schedule_cache::LeaderScheduleCache};
-use solana_poh::{poh_recorder::{PohRecorder, Record, WorkingBankEntry}, poh_service::PohService};
+use solana_ledger::{
+    blockstore::Blockstore, genesis_utils::GenesisConfigInfo, get_tmp_ledger_path_auto_delete,
+    leader_schedule_cache::LeaderScheduleCache,
+};
+use solana_poh::{
+    poh_recorder::{PohRecorder, Record, WorkingBankEntry},
+    poh_service::PohService,
+};
 use solana_program_test::programs::spl_programs;
-use solana_runtime::{bank::Bank, bank_forks::BankForks, genesis_utils::create_genesis_config_with_leader_ex, installed_scheduler_pool::BankWithScheduler};
-use solana_sdk::{fee_calculator::{FeeRateGovernor, DEFAULT_TARGET_LAMPORTS_PER_SIGNATURE}, genesis_config::ClusterType, native_token::sol_to_lamports, poh_config::PohConfig, pubkey::Pubkey, rent::Rent, signature::Keypair, signer::Signer, system_transaction::transfer, transaction::VersionedTransaction};
+use solana_runtime::{
+    bank::Bank, bank_forks::BankForks, genesis_utils::create_genesis_config_with_leader_ex,
+    installed_scheduler_pool::BankWithScheduler,
+};
+use solana_sdk::{
+    fee_calculator::{FeeRateGovernor, DEFAULT_TARGET_LAMPORTS_PER_SIGNATURE},
+    genesis_config::ClusterType,
+    native_token::sol_to_lamports,
+    poh_config::PohConfig,
+    pubkey::Pubkey,
+    rent::Rent,
+    signature::Keypair,
+    signer::Signer,
+    system_transaction::transfer,
+    transaction::VersionedTransaction,
+};
 use solana_vote_program::vote_state::VoteState;
 
 pub(crate) fn simulate_poh(
@@ -123,8 +149,7 @@ fn create_test_fixture(mint_sol: u64) -> TestFixture {
 
     let ledger_path = get_tmp_ledger_path_auto_delete!();
     let blockstore = Arc::new(
-        Blockstore::open(ledger_path.path())
-            .expect("Expected to be able to open database ledger"),
+        Blockstore::open(ledger_path.path()).expect("Expected to be able to open database ledger"),
     );
 
     let (exit, poh_recorder, poh_simulator, entry_receiver) =
@@ -171,7 +196,8 @@ pub fn get_executed_txns(
         let Ok(WorkingBankEntry {
             bank: wbe_bank,
             entries_ticks,
-        }) = entry_receiver.try_recv() else {
+        }) = entry_receiver.try_recv()
+        else {
             continue;
         };
         for (entry, _) in entries_ticks {
@@ -185,7 +211,7 @@ pub fn get_executed_txns(
 
 #[bench]
 fn bench_jss_actuator(b: &mut Bencher) {
-        let TestFixture {
+    let TestFixture {
         genesis_config_info,
         leader_keypair,
         bank,
@@ -200,12 +226,14 @@ fn bench_jss_actuator(b: &mut Bencher) {
     let mut actuator = JssExecutor::new(poh_recorder.clone(), replay_vote_sender);
 
     let successful_bundle = Bundle {
-        packets: vec![jds_packet_from_versioned_tx(&VersionedTransaction::from(transfer(
-            &genesis_config_info.mint_keypair,
-            &genesis_config_info.mint_keypair.pubkey(),
-            100000,
-            genesis_config_info.genesis_config.hash(),
-        )))],
+        packets: vec![jds_packet_from_versioned_tx(&VersionedTransaction::from(
+            transfer(
+                &genesis_config_info.mint_keypair,
+                &genesis_config_info.mint_keypair.pubkey(),
+                100000,
+                genesis_config_info.genesis_config.hash(),
+            ),
+        ))],
     };
     let failed_bundle = Bundle {
         packets: vec![

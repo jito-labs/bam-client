@@ -25,6 +25,9 @@ pub mod drop_bank_service;
 pub mod fetch_stage;
 pub mod gen_keys;
 pub mod immutable_deserialized_bundle;
+pub mod jss_connection;
+pub mod jss_executor;
+pub mod jss_manager;
 pub mod next_leader;
 pub mod optimistic_confirmation_verifier;
 pub mod packet_bundle;
@@ -55,9 +58,6 @@ pub mod vote_simulator;
 pub mod voting_service;
 pub mod warm_quic_cache_service;
 pub mod window_service;
-pub mod jss_manager;
-pub mod jss_executor;
-pub mod jss_connection;
 
 #[macro_use]
 extern crate log;

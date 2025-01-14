@@ -3,18 +3,32 @@
 /// - Sending signed slot ticks + Receive microblocks
 /// - Actuating the received microblocks
 /// - Disabling JSS and re-enabling standard txn processing when health check fails
-
-use std::{net::{Ipv4Addr, SocketAddr, SocketAddrV4}, str::FromStr, sync::{atomic::AtomicBool, Arc, RwLock}, thread::Builder, time::{Instant, SystemTime, UNIX_EPOCH}};
+use std::{
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+    str::FromStr,
+    sync::{atomic::AtomicBool, Arc, RwLock},
+    thread::Builder,
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
 
 use ahash::HashMap;
-use jito_protos::proto::{ jds_api::TpuConfigResp, jds_types::{AccountComputeUnitBudget, ExecutionPreConfirmation, MicroBlock, MicroBlockRequest, SignedSlotTick, SlotTick, Socket} };
+use jito_protos::proto::{
+    jds_api::TpuConfigResp,
+    jds_types::{
+        AccountComputeUnitBudget, ExecutionPreConfirmation, MicroBlock, MicroBlockRequest,
+        SignedSlotTick, SlotTick, Socket,
+    },
+};
 use solana_gossip::cluster_info::ClusterInfo;
 use solana_poh::poh_recorder::PohRecorder;
 use solana_runtime::{bank_forks::BankForks, vote_sender_types::ReplayVoteSender};
 use solana_sdk::{pubkey::Pubkey, signer::Signer};
 use tokio::task::spawn_blocking;
 
-use crate::{jss_executor::{JssExecutor, JssExecutorExecutionResult}, jss_connection::JssConnection};
+use crate::{
+    jss_connection::JssConnection,
+    jss_executor::{JssExecutor, JssExecutorExecutionResult},
+};
 
 pub(crate) struct JssManager {
     threads: Vec<std::thread::JoinHandle<()>>,
@@ -55,9 +69,7 @@ impl JssManager {
             .unwrap();
 
         Self {
-            threads: vec![
-                api_connection_thread
-            ],
+            threads: vec![api_connection_thread],
         }
     }
 
@@ -78,7 +90,6 @@ impl JssManager {
 
         // Run until (our) world ends
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
-
             // Init and/or check health of connection
             if !Self::get_or_init_connection(jss_url.clone(), &mut jss_connection).await {
                 jss_enabled.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -100,7 +111,8 @@ impl JssManager {
                     &jss_is_actuating,
                     &poh_recorder,
                     &cluster_info,
-                ).await;
+                )
+                .await;
             }
         }
     }
@@ -140,12 +152,22 @@ impl JssManager {
         //
         // In addition:
         // - Keep track of CUs used per account and send it in the micro-block request
-        //   so that JSS knows how much more CUS each account can still use 
+        //   so that JSS knows how much more CUS each account can still use
 
-        let slot = poh_recorder.read().unwrap().bank().map(|bank| bank.slot()).unwrap_or_default();
+        let slot = poh_recorder
+            .read()
+            .unwrap()
+            .bank()
+            .map(|bank| bank.slot())
+            .unwrap_or_default();
         let mut failed_cus = 0;
-        let keep_going = ||{
-            slot == poh_recorder.read().unwrap().bank().map(|bank| bank.slot()).unwrap_or_default()
+        let keep_going = || {
+            slot == poh_recorder
+                .read()
+                .unwrap()
+                .bank()
+                .map(|bank| bank.slot())
+                .unwrap_or_default()
         };
         while keep_going() {
             // Send signed slot tick to JSS
@@ -155,14 +177,14 @@ impl JssManager {
                 Instant::now() + std::time::Duration::from_millis(50),
                 12_000_000 + failed_cus,
                 HashMap::default(), // TODO
-            )
-            else {
+            ) else {
                 return;
             };
             jss_connection.send_micro_block_request(micro_block_request);
-            
+
             const TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
-            let Some(micro_block) = jss_connection.recv_microblock_with_timeout(TIMEOUT).await else {
+            let Some(micro_block) = jss_connection.recv_microblock_with_timeout(TIMEOUT).await
+            else {
                 return;
             };
 
@@ -171,7 +193,8 @@ impl JssManager {
                 jss_executor,
                 jss_is_actuating,
                 micro_block,
-            ).await;
+            )
+            .await;
         }
     }
 
@@ -194,10 +217,12 @@ impl JssManager {
             if let Ok(execution_result) = executed_receiver.try_recv() {
                 match execution_result {
                     JssExecutorExecutionResult::Success(bundle_id) => {
-                        jss_connection.send_bundle_execution_confirmation(ExecutionPreConfirmation{
-                            bundle_id: bundle_id.bytes().into_iter().collect(),
-                        });
-                    },
+                        jss_connection.send_bundle_execution_confirmation(
+                            ExecutionPreConfirmation {
+                                bundle_id: bundle_id.bytes().into_iter().collect(),
+                            },
+                        );
+                    }
                     JssExecutorExecutionResult::Failure { bundle_id: _, cus } => {
                         failed_cus += cus;
                     }
@@ -219,7 +244,10 @@ impl JssManager {
         )))
     }
 
-    pub async fn update_tpu_config(tpu_info: Option<&TpuConfigResp>, cluster_info: &Arc<ClusterInfo>) {
+    pub async fn update_tpu_config(
+        tpu_info: Option<&TpuConfigResp>,
+        cluster_info: &Arc<ClusterInfo>,
+    ) {
         if let Some(tpu_info) = tpu_info {
             if let Some(tpu) = Self::get_sockaddr(tpu_info.tpu_sock.as_ref()) {
                 let _ = cluster_info.set_tpu(tpu);
@@ -243,8 +271,7 @@ impl JssManager {
     // This is decided based on the PohRecorder's current slot and the lookahead
     pub fn is_within_leader_slot_with_lookahead(poh_recorder: &PohRecorder) -> bool {
         const TICK_LOOKAHEAD: u64 = 8;
-        poh_recorder.would_be_leader(TICK_LOOKAHEAD) ||
-        poh_recorder.would_be_leader(0)
+        poh_recorder.would_be_leader(TICK_LOOKAHEAD) || poh_recorder.would_be_leader(0)
     }
 
     // Get the special signed slot tick message to send to the JSS
@@ -260,24 +287,41 @@ impl JssManager {
         let Some(current_slot) = poh_recorder.bank().and_then(|bank| Some(bank.slot())) else {
             return None;
         };
-        let Some(parent_slot) = poh_recorder.bank().and_then(|bank| Some(bank.parent_slot())) else {
+        let Some(parent_slot) = poh_recorder
+            .bank()
+            .and_then(|bank| Some(bank.parent_slot()))
+        else {
             return None;
         };
-        let slot_tick = SlotTick{ current_slot, parent_slot };
+        let slot_tick = SlotTick {
+            current_slot,
+            parent_slot,
+        };
         let mut message = Vec::new();
         message.extend_from_slice(&slot_tick.current_slot.to_le_bytes());
         message.extend_from_slice(&slot_tick.parent_slot.to_le_bytes());
-        let signature = cluster_info.keypair().sign_message(&message).to_string().into_bytes();
-        let signed_slot_tick = SignedSlotTick { slot_tick: Some(slot_tick), signature };
+        let signature = cluster_info
+            .keypair()
+            .sign_message(&message)
+            .to_string()
+            .into_bytes();
+        let signed_slot_tick = SignedSlotTick {
+            slot_tick: Some(slot_tick),
+            signature,
+        };
 
-        Some(MicroBlockRequest{
+        Some(MicroBlockRequest {
             leader_identity_pubkey: cluster_info.keypair().pubkey().to_bytes().to_vec(),
             signed_slot_tick: Some(signed_slot_tick),
             deadline: Some(instant_to_prost_timestamp(deadline)),
             requested_compute_units,
-            account_cu_budget: account_cu_budget.into_iter().map(|(pubkey, available_cus)| {
-                AccountComputeUnitBudget{ pubkey: pubkey.to_bytes().to_vec(), available_cus }
-            }).collect(),
+            account_cu_budget: account_cu_budget
+                .into_iter()
+                .map(|(pubkey, available_cus)| AccountComputeUnitBudget {
+                    pubkey: pubkey.to_bytes().to_vec(),
+                    available_cus,
+                })
+                .collect(),
         })
     }
 }

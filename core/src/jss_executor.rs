@@ -1,4 +1,7 @@
-use std::{sync::{atomic::AtomicBool, mpsc::Sender, Arc, RwLock}, time::Duration};
+use std::{
+    sync::{atomic::AtomicBool, mpsc::Sender, Arc, RwLock},
+    time::Duration,
+};
 
 use ahash::{HashMap, HashMapExt, HashSetExt};
 use crossbeam_channel::Receiver;
@@ -9,10 +12,24 @@ use solana_measure::measure_us;
 
 use jito_protos::proto::jds_types::{MicroBlock, Packet};
 use solana_poh::poh_recorder::{PohRecorder, RecordTransactionsSummary, TransactionRecorder};
-use solana_runtime::{bank::Bank, prioritization_fee_cache::PrioritizationFeeCache, vote_sender_types::ReplayVoteSender};
-use solana_sdk::{bundle::{derive_bundle_id_from_sanitized_transactions, SanitizedBundle}, packet::PacketFlags, pubkey::Pubkey, transaction::SanitizedTransaction};
+use solana_runtime::{
+    bank::Bank, prioritization_fee_cache::PrioritizationFeeCache,
+    vote_sender_types::ReplayVoteSender,
+};
+use solana_sdk::{
+    bundle::{derive_bundle_id_from_sanitized_transactions, SanitizedBundle},
+    packet::PacketFlags,
+    pubkey::Pubkey,
+    transaction::SanitizedTransaction,
+};
 
-use crate::{banking_stage::{immutable_deserialized_packet::ImmutableDeserializedPacket, leader_slot_timing_metrics::LeaderExecuteAndCommitTimings}, bundle_stage};
+use crate::{
+    banking_stage::{
+        immutable_deserialized_packet::ImmutableDeserializedPacket,
+        leader_slot_timing_metrics::LeaderExecuteAndCommitTimings,
+    },
+    bundle_stage,
+};
 
 #[derive(Clone)]
 pub struct JssExecutor {
@@ -31,7 +48,7 @@ impl JssExecutor {
                 None, // TODO
                 replay_vote_sender,
                 Arc::new(PrioritizationFeeCache::default()), // TODO
-            )
+            ),
         }
     }
 
@@ -39,39 +56,51 @@ impl JssExecutor {
         bank: &Bank,
         packets: impl Iterator<Item = &'a Packet>,
     ) -> Vec<SanitizedTransaction> {
-        let txns = packets.map(|packet| {
-            let mut solana_packet = solana_sdk::packet::Packet::default();
-            solana_packet.meta_mut().size = packet.data.len() as usize;
-            solana_packet.meta_mut().set_discard(false);
-            solana_packet.buffer_mut()[0..packet.data.len()].copy_from_slice(&packet.data);
-            if let Some(meta) = &packet.meta {
-                solana_packet.meta_mut().size = meta.size as usize;
-                if let Some(addr) = &meta.addr.parse().ok() {
-                    solana_packet.meta_mut().addr = *addr;
+        let txns = packets
+            .map(|packet| {
+                let mut solana_packet = solana_sdk::packet::Packet::default();
+                solana_packet.meta_mut().size = packet.data.len() as usize;
+                solana_packet.meta_mut().set_discard(false);
+                solana_packet.buffer_mut()[0..packet.data.len()].copy_from_slice(&packet.data);
+                if let Some(meta) = &packet.meta {
+                    solana_packet.meta_mut().size = meta.size as usize;
+                    if let Some(addr) = &meta.addr.parse().ok() {
+                        solana_packet.meta_mut().addr = *addr;
+                    }
+                    solana_packet.meta_mut().port = meta.port as u16;
+                    if let Some(flags) = &meta.flags {
+                        if flags.simple_vote_tx {
+                            solana_packet
+                                .meta_mut()
+                                .flags
+                                .insert(PacketFlags::SIMPLE_VOTE_TX);
+                        }
+                        if flags.forwarded {
+                            solana_packet
+                                .meta_mut()
+                                .flags
+                                .insert(PacketFlags::FORWARDED);
+                        }
+                        if flags.tracer_packet {
+                            solana_packet
+                                .meta_mut()
+                                .flags
+                                .insert(PacketFlags::TRACER_PACKET);
+                        }
+                        if flags.repair {
+                            solana_packet.meta_mut().flags.insert(PacketFlags::REPAIR);
+                        }
+                    }
                 }
-                solana_packet.meta_mut().port = meta.port as u16;
-                if let Some(flags) = &meta.flags {
-                    if flags.simple_vote_tx {
-                        solana_packet.meta_mut().flags.insert(PacketFlags::SIMPLE_VOTE_TX);
-                    }
-                    if flags.forwarded {
-                        solana_packet.meta_mut().flags.insert(PacketFlags::FORWARDED);
-                    }
-                    if flags.tracer_packet {
-                        solana_packet.meta_mut().flags.insert(PacketFlags::TRACER_PACKET);
-                    }
-                    if flags.repair {
-                        solana_packet.meta_mut().flags.insert(PacketFlags::REPAIR);
-                    }
-                }
-            }
-            let packet = ImmutableDeserializedPacket::new(solana_packet).ok()?;
-            let sanitized_transaction = packet.build_sanitized_transaction(
-                false,
-                bank,
-                bank.get_reserved_account_keys())?;
-            Some(sanitized_transaction)
-        }).collect_vec();
+                let packet = ImmutableDeserializedPacket::new(solana_packet).ok()?;
+                let sanitized_transaction = packet.build_sanitized_transaction(
+                    false,
+                    bank,
+                    bank.get_reserved_account_keys(),
+                )?;
+                Some(sanitized_transaction)
+            })
+            .collect_vec();
         if txns.iter().any(Option::is_none) {
             return vec![];
         }
@@ -89,7 +118,9 @@ impl JssExecutor {
                     return true;
                 }
             } else {
-                if write_locked.contains(&lock.account_id) || read_locked.contains_key(&lock.account_id) {
+                if write_locked.contains(&lock.account_id)
+                    || read_locked.contains_key(&lock.account_id)
+                {
                     return true;
                 }
             }
@@ -98,7 +129,10 @@ impl JssExecutor {
         false
     }
 
-    fn get_locks(transactions: &[SanitizedTransaction], lock_id_assigner: &mut LockIdAssigner) -> Vec<Lock> {
+    fn get_locks(
+        transactions: &[SanitizedTransaction],
+        lock_id_assigner: &mut LockIdAssigner,
+    ) -> Vec<Lock> {
         let mut result = vec![];
         for txn in transactions {
             for (index, account) in txn.message().account_keys().iter().enumerate() {
@@ -121,7 +155,10 @@ impl JssExecutor {
             if lock.write {
                 write_locked.insert(lock.account_id);
             } else {
-                read_locked.entry(lock.account_id).and_modify(|e| *e += 1).or_insert(1);
+                read_locked
+                    .entry(lock.account_id)
+                    .and_modify(|e| *e += 1)
+                    .or_insert(1);
             }
         }
     }
@@ -157,11 +194,15 @@ impl JssExecutor {
                 let Ok(context) = request_receiver.try_recv() else {
                     continue;
                 };
-                let success = Self::execute_commit_record_bundle(&bank, &recorder, &mut committer, context.transactions.clone());
-                response_sender.send(JssExecutorWorkerExecutionResult{
-                    context,
-                    success,
-                }).unwrap();
+                let success = Self::execute_commit_record_bundle(
+                    &bank,
+                    &recorder,
+                    &mut committer,
+                    context.transactions.clone(),
+                );
+                response_sender
+                    .send(JssExecutorWorkerExecutionResult { context, success })
+                    .unwrap();
             }
         })
     }
@@ -171,22 +212,25 @@ impl JssExecutor {
         bank: Arc<Bank>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         committer: bundle_stage::committer::Committer,
-        exit: Arc<AtomicBool>)
-        -> ExecutionWorkers
-    {
+        exit: Arc<AtomicBool>,
+    ) -> ExecutionWorkers {
         let (request_sender, request_receiver) =
-        crossbeam_channel::bounded::<BundleContext>(num_workers);
+            crossbeam_channel::bounded::<BundleContext>(num_workers);
         let (response_sender, response_receiver) =
             crossbeam_channel::bounded::<JssExecutorWorkerExecutionResult>(num_workers);
-        let worker_threads = (0..num_workers).into_iter().map(|_| {
-            Self::spawn_worker_thread(
-                exit.clone(),
-                request_receiver.clone(),
-                response_sender.clone(),
-                bank.clone(),
-                poh_recorder.read().unwrap().new_recorder(),
-                committer.clone())
-        }).collect_vec();
+        let worker_threads = (0..num_workers)
+            .into_iter()
+            .map(|_| {
+                Self::spawn_worker_thread(
+                    exit.clone(),
+                    request_receiver.clone(),
+                    response_sender.clone(),
+                    bank.clone(),
+                    poh_recorder.read().unwrap().new_recorder(),
+                    committer.clone(),
+                )
+            })
+            .collect_vec();
         ExecutionWorkers {
             worker_threads,
             exit,
@@ -213,7 +257,8 @@ impl JssExecutor {
         }
 
         // Update the first unprocessed bundle index
-        let skip_ahead = context.bundles
+        let skip_ahead = context
+            .bundles
             .iter()
             .skip(context.first_unprocessed_bundle_index)
             .position(|b| !matches!(b, QueuedBundle::Scheduled));
@@ -225,7 +270,11 @@ impl JssExecutor {
             return;
         }
 
-        for queued_bundle in context.bundles.iter_mut().skip(context.first_unprocessed_bundle_index) {
+        for queued_bundle in context
+            .bundles
+            .iter_mut()
+            .skip(context.first_unprocessed_bundle_index)
+        {
             // If the transaction has already been scheduled, skip it (obviously)
             if matches!(queued_bundle, QueuedBundle::Scheduled) {
                 continue;
@@ -245,9 +294,16 @@ impl JssExecutor {
             if let QueuedBundle::Unparsed(packets) = queued_bundle {
                 let transactions = Self::parse_transactions(&context.bank, packets.iter());
                 let locks = Self::get_locks(&transactions, &mut context.lock_assigner);
-                *queued_bundle = QueuedBundle::Waiting{ transactions, locks };
+                *queued_bundle = QueuedBundle::Waiting {
+                    transactions,
+                    locks,
+                };
             }
-            let QueuedBundle::Waiting{ transactions, locks } = queued_bundle else {
+            let QueuedBundle::Waiting {
+                transactions,
+                locks,
+            } = queued_bundle
+            else {
                 panic!("QueuedBundle::Waiting expected");
             };
 
@@ -258,10 +314,12 @@ impl JssExecutor {
 
             // Finally: lock the accounts, send the bundle, and mark it as scheduled
             Self::lock_accounts(&locks, &mut context.write_locked, &mut context.read_locked);
-            request_sender.send(BundleContext{ 
-                transactions: std::mem::take(transactions),
-                locks: std::mem::take(locks)
-            }).unwrap();
+            request_sender
+                .send(BundleContext {
+                    transactions: std::mem::take(transactions),
+                    locks: std::mem::take(locks),
+                })
+                .unwrap();
             *queued_bundle = QueuedBundle::Scheduled;
             context.inflight_bundles_count += 1;
             if context.inflight_bundles_count >= worker_thread_count {
@@ -276,13 +334,20 @@ impl JssExecutor {
         executed_sender: &Sender<JssExecutorExecutionResult>,
     ) {
         while let Ok(executed_bundle) = response_receiver.try_recv() {
-            Self::unlock_accounts(&executed_bundle.context.locks, &mut context.write_locked, &mut context.read_locked);
+            Self::unlock_accounts(
+                &executed_bundle.context.locks,
+                &mut context.write_locked,
+                &mut context.read_locked,
+            );
             let msg = if executed_bundle.success {
-                JssExecutorExecutionResult::Success(
-                    derive_bundle_id_from_sanitized_transactions(&executed_bundle.context.transactions))
+                JssExecutorExecutionResult::Success(derive_bundle_id_from_sanitized_transactions(
+                    &executed_bundle.context.transactions,
+                ))
             } else {
-                JssExecutorExecutionResult::Failure { 
-                    bundle_id: derive_bundle_id_from_sanitized_transactions(&executed_bundle.context.transactions),
+                JssExecutorExecutionResult::Failure {
+                    bundle_id: derive_bundle_id_from_sanitized_transactions(
+                        &executed_bundle.context.transactions,
+                    ),
                     cus: 0,
                 }
             };
@@ -303,26 +368,43 @@ impl JssExecutor {
 
         // Spawn the worker threads that will be executing the bundles
         const WORKER_THREAD_COUNT: usize = 4;
-        let ExecutionWorkers { worker_threads, exit, request_sender, response_receiver } =
-            Self::prepare_workers(
-                WORKER_THREAD_COUNT,
-                bank.clone(),
-                self.poh_recorder.clone(),
-                self.committer.clone(),
-                exit.clone(),
-            );
+        let ExecutionWorkers {
+            worker_threads,
+            exit,
+            request_sender,
+            response_receiver,
+        } = Self::prepare_workers(
+            WORKER_THREAD_COUNT,
+            bank.clone(),
+            self.poh_recorder.clone(),
+            self.committer.clone(),
+            exit.clone(),
+        );
 
         let mut execution_context = MicroblockExecutionContext::new(bank, micro_block);
         while self.poh_recorder.read().unwrap().has_bank() && execution_context.keep_going() {
-            Self::receive_finished_bundles(&mut execution_context, &response_receiver, &executed_sender);
-            Self::schedule_next_bundles(&mut execution_context, &request_sender, &response_receiver, WORKER_THREAD_COUNT);
+            Self::receive_finished_bundles(
+                &mut execution_context,
+                &response_receiver,
+                &executed_sender,
+            );
+            Self::schedule_next_bundles(
+                &mut execution_context,
+                &request_sender,
+                &response_receiver,
+                WORKER_THREAD_COUNT,
+            );
         }
 
         exit.store(true, std::sync::atomic::Ordering::Relaxed);
         worker_threads.into_iter().for_each(|t| t.join().unwrap());
     }
 
-    pub fn execute_and_commit_and_record_micro_block(&mut self, micro_block: MicroBlock, executed_sender: Sender<JssExecutorExecutionResult>) {
+    pub fn execute_and_commit_and_record_micro_block(
+        &mut self,
+        micro_block: MicroBlock,
+        executed_sender: Sender<JssExecutorExecutionResult>,
+    ) {
         return self.schedule_microblock(micro_block, executed_sender);
     }
 
@@ -330,11 +412,11 @@ impl JssExecutor {
         bank: &Arc<Bank>,
         recorder: &TransactionRecorder,
         committer: &mut bundle_stage::committer::Committer,
-        txns: Vec<SanitizedTransaction>) -> bool
-    {
+        txns: Vec<SanitizedTransaction>,
+    ) -> bool {
         let len = txns.len();
         let bundle_id = derive_bundle_id_from_sanitized_transactions(&txns);
-        let sanitized_bundle = SanitizedBundle{
+        let sanitized_bundle = SanitizedBundle {
             transactions: txns,
             bundle_id: bundle_id.clone(),
         };
@@ -343,14 +425,15 @@ impl JssExecutor {
         let mut bundle_execution_results = load_and_execute_bundle(
             &bank,
             &sanitized_bundle,
-            20, // TODO
+            20,                      // TODO
             &Duration::from_secs(1), // TODO
-            false, // TODO
+            false,                   // TODO
             &None,
             false,
             None,
             &default_accounts,
-            &default_accounts);
+            &default_accounts,
+        );
 
         if let Err(_) = bundle_execution_results.result() {
             return false;
@@ -360,12 +443,13 @@ impl JssExecutor {
             measure_us!(bundle_execution_results.executed_transaction_batches());
 
         let _freeze_lock = bank.freeze_lock();
-        let (last_blockhash, lamports_per_signature) = bank.last_blockhash_and_lamports_per_signature();
+        let (last_blockhash, lamports_per_signature) =
+            bank.last_blockhash_and_lamports_per_signature();
         let RecordTransactionsSummary {
-                result: record_transactions_result,
-                record_transactions_timings: _,
-                starting_transaction_index,
-            } =  recorder.record_transactions(bank.slot(), executed_batches);
+            result: record_transactions_result,
+            record_transactions_timings: _,
+            starting_transaction_index,
+        } = recorder.record_transactions(bank.slot(), executed_batches);
         if record_transactions_result.is_err() {
             return false;
         }
@@ -377,7 +461,8 @@ impl JssExecutor {
             lamports_per_signature,
             starting_transaction_index,
             &bank,
-            &mut execute_and_commit_timings);
+            &mut execute_and_commit_timings,
+        );
 
         true
     }
@@ -390,10 +475,7 @@ pub struct JssExecutorWorkerExecutionResult {
 
 pub enum JssExecutorExecutionResult {
     Success(String /*BundleId*/),
-    Failure{
-        bundle_id: String,
-        cus: u32,
-    },
+    Failure { bundle_id: String, cus: u32 },
 }
 
 struct ExecutionWorkers {
@@ -410,7 +492,7 @@ struct Lock {
 
 enum QueuedBundle {
     Unparsed(Vec<Packet>),
-    Waiting{
+    Waiting {
         transactions: Vec<SanitizedTransaction>,
         locks: Vec<Lock>,
     },
@@ -435,15 +517,16 @@ pub struct MicroblockExecutionContext {
 }
 
 impl MicroblockExecutionContext {
-    pub fn new(
-        bank: Arc<Bank>,
-        microblock: MicroBlock,
-    ) -> Self {
+    pub fn new(bank: Arc<Bank>, microblock: MicroBlock) -> Self {
         Self {
             bank,
             lock_assigner: LockIdAssigner::new(),
             total_bundles_count: microblock.bundles.len(),
-            bundles: microblock.bundles.into_iter().map(|bundle| QueuedBundle::Unparsed(bundle.packets)).collect_vec(),
+            bundles: microblock
+                .bundles
+                .into_iter()
+                .map(|bundle| QueuedBundle::Unparsed(bundle.packets))
+                .collect_vec(),
             write_locked: IntSet::new(),
             read_locked: IntMap::new(),
             inflight_bundles_count: 0,
@@ -483,15 +566,42 @@ impl LockIdAssigner {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::{atomic::{AtomicBool, Ordering}, Arc, RwLock}, thread::{Builder, JoinHandle}, time::Duration};
+    use std::{
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc, RwLock,
+        },
+        thread::{Builder, JoinHandle},
+        time::Duration,
+    };
 
     use crossbeam_channel::Receiver;
     use jito_protos::proto::jds_types::{self, Bundle, MicroBlock};
-    use solana_ledger::{blockstore::Blockstore, genesis_utils::GenesisConfigInfo, get_tmp_ledger_path_auto_delete, leader_schedule_cache::LeaderScheduleCache};
-    use solana_poh::{poh_recorder::{PohRecorder, Record, WorkingBankEntry}, poh_service::PohService};
+    use solana_ledger::{
+        blockstore::Blockstore, genesis_utils::GenesisConfigInfo, get_tmp_ledger_path_auto_delete,
+        leader_schedule_cache::LeaderScheduleCache,
+    };
+    use solana_poh::{
+        poh_recorder::{PohRecorder, Record, WorkingBankEntry},
+        poh_service::PohService,
+    };
     use solana_program_test::programs::spl_programs;
-    use solana_runtime::{bank::Bank, bank_forks::BankForks, genesis_utils::create_genesis_config_with_leader_ex, installed_scheduler_pool::BankWithScheduler};
-    use solana_sdk::{fee_calculator::{FeeRateGovernor, DEFAULT_TARGET_LAMPORTS_PER_SIGNATURE}, genesis_config::ClusterType, native_token::sol_to_lamports, poh_config::PohConfig, pubkey::Pubkey, rent::Rent, signature::Keypair, signer::Signer, system_transaction::transfer, transaction::VersionedTransaction};
+    use solana_runtime::{
+        bank::Bank, bank_forks::BankForks, genesis_utils::create_genesis_config_with_leader_ex,
+        installed_scheduler_pool::BankWithScheduler,
+    };
+    use solana_sdk::{
+        fee_calculator::{FeeRateGovernor, DEFAULT_TARGET_LAMPORTS_PER_SIGNATURE},
+        genesis_config::ClusterType,
+        native_token::sol_to_lamports,
+        poh_config::PohConfig,
+        pubkey::Pubkey,
+        rent::Rent,
+        signature::Keypair,
+        signer::Signer,
+        system_transaction::transfer,
+        transaction::VersionedTransaction,
+    };
     use solana_vote_program::vote_state::VoteState;
 
     pub(crate) fn simulate_poh(
@@ -648,7 +758,8 @@ mod tests {
             let Ok(WorkingBankEntry {
                 bank: wbe_bank,
                 entries_ticks,
-            }) = entry_receiver.try_recv() else {
+            }) = entry_receiver.try_recv()
+            else {
                 continue;
             };
             for (entry, _) in entries_ticks {
@@ -678,12 +789,14 @@ mod tests {
         let mut executor = super::JssExecutor::new(poh_recorder, replay_vote_sender);
 
         let successful_bundle = Bundle {
-            packets: vec![jds_packet_from_versioned_tx(&VersionedTransaction::from(transfer(
-                &genesis_config_info.mint_keypair,
-                &genesis_config_info.mint_keypair.pubkey(),
-                100000,
-                genesis_config_info.genesis_config.hash(),
-            )))],
+            packets: vec![jds_packet_from_versioned_tx(&VersionedTransaction::from(
+                transfer(
+                    &genesis_config_info.mint_keypair,
+                    &genesis_config_info.mint_keypair.pubkey(),
+                    100000,
+                    genesis_config_info.genesis_config.hash(),
+                ),
+            ))],
         };
         let failed_bundle = Bundle {
             packets: vec![
@@ -710,7 +823,8 @@ mod tests {
         let (executed_sender, _executed_receiver) = std::sync::mpsc::channel();
 
         // See if the transaction is executed
-        executor.execute_and_commit_and_record_micro_block(microblock.clone(), executed_sender.clone());
+        executor
+            .execute_and_commit_and_record_micro_block(microblock.clone(), executed_sender.clone());
         let txns = get_executed_txns(&entry_receiver, Duration::from_secs(3));
         assert_eq!(txns.len(), 1);
 
@@ -719,7 +833,8 @@ mod tests {
         let txns = get_executed_txns(&entry_receiver, Duration::from_secs(3));
         assert_eq!(txns.len(), 0);
 
-        executor.poh_recorder
+        executor
+            .poh_recorder
             .write()
             .unwrap()
             .is_exited
