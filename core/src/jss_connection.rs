@@ -1,10 +1,10 @@
 use futures::{channel::mpsc, FutureExt, StreamExt};
 use jito_protos::proto::{
-    jds_api::{
+    jss_api::{
         jss_node_api_client::JssNodeApiClient, start_scheduler_message::Msg,
         start_scheduler_response::Resp, GetTpuConfigRequest, StartSchedulerMessage, TpuConfigResp,
     },
-    jds_types::{ExecutionPreConfirmation, MicroBlock, MicroBlockRequest},
+    jss_types::{ExecutionPreConfirmation, MicroBlock, MicroBlockRequest},
 };
 use tokio::time::timeout;
 
@@ -12,7 +12,7 @@ use tokio::time::timeout;
 // Keeps track of last received heartbeat 'behind the scenes' and will mark itself as unhealthy if no heartbeat is received
 pub struct JssConnection {
     validator_client: JssNodeApiClient<tonic::transport::Channel>,
-    inbound_stream: tonic::Streaming<jito_protos::proto::jds_api::StartSchedulerResponse>,
+    inbound_stream: tonic::Streaming<jito_protos::proto::jss_api::StartSchedulerResponse>,
     outbound_sender: mpsc::UnboundedSender<StartSchedulerMessage>,
     its_over: bool,
     last_heartbeat: Option<std::time::Instant>,

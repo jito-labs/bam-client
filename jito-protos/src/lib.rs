@@ -23,11 +23,11 @@ pub mod proto {
         tonic::include_proto!("shared");
     }
 
-    pub mod jds_types {
-        tonic::include_proto!("jds_types");
+    pub mod jss_types {
+        tonic::include_proto!("jss_types");
     }
 
-    pub mod jds_api {
-        tonic::include_proto!("jds_api");
+    pub mod jss_api {
+        tonic::include_proto!("jss_api");
     }
 }

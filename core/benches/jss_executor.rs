@@ -15,7 +15,7 @@ use std::{
 };
 
 use crossbeam_channel::Receiver;
-use jito_protos::proto::jds_types::{self, Bundle, MicroBlock};
+use jito_protos::proto::jss_types::{self, Bundle, MicroBlock};
 use solana_ledger::{
     blockstore::Blockstore, genesis_utils::GenesisConfigInfo, get_tmp_ledger_path_auto_delete,
     leader_schedule_cache::LeaderScheduleCache,
@@ -174,12 +174,12 @@ fn create_test_fixture(mint_sol: u64) -> TestFixture {
 }
 
 // Converts a versioned transaction to a jds packet
-pub fn jds_packet_from_versioned_tx(tx: &VersionedTransaction) -> jds_types::Packet {
+pub fn jds_packet_from_versioned_tx(tx: &VersionedTransaction) -> jss_types::Packet {
     let tx_data = bincode::serialize(tx).expect("serializes");
     let size = tx_data.len() as u64;
-    jds_types::Packet {
+    jss_types::Packet {
         data: tx_data,
-        meta: Some(jds_types::Meta {
+        meta: Some(jss_types::Meta {
             size,
             ..Default::default()
         }),

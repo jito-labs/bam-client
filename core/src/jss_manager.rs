@@ -13,8 +13,8 @@ use std::{
 
 use ahash::HashMap;
 use jito_protos::proto::{
-    jds_api::TpuConfigResp,
-    jds_types::{
+    jss_api::TpuConfigResp,
+    jss_types::{
         AccountComputeUnitBudget, ExecutionPreConfirmation, MicroBlock, MicroBlockRequest,
         SignedSlotTick, SlotTick, Socket,
     },
