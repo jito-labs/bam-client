@@ -1,5 +1,5 @@
 use futures::{channel::mpsc, FutureExt, StreamExt};
-use jito_protos::proto::{jds_api::{jss_node_api_client::JssNodeApiClient, start_scheduler_message::Msg, start_scheduler_response::Resp, GetTpuConfigRequest, StartSchedulerMessage, TpuConfigResp}, jds_types::{ExecutionPreConfirmation, MicroBlock, SignedSlotTick}};
+use jito_protos::proto::{jds_api::{jss_node_api_client::JssNodeApiClient, start_scheduler_message::Msg, start_scheduler_response::Resp, GetTpuConfigRequest, StartSchedulerMessage, TpuConfigResp}, jds_types::{ExecutionPreConfirmation, MicroBlock, MicroBlockRequest}};
 use tokio::time::timeout;
 
 // Maintains a connection to the JSS Node and handles sending and receiving messages
@@ -75,9 +75,9 @@ impl JssConnection {
     }
 
     // Send a signed slot tick to the JSS instance
-    pub fn send_signed_tick(&mut self, _signed_slot_tick: SignedSlotTick) {
+    pub fn send_micro_block_request(&mut self, micro_block_request: MicroBlockRequest) {
         let _ = self.outbound_sender.unbounded_send(StartSchedulerMessage {
-            msg: Some(Msg::SchedulerTick(todo!())),
+            msg: Some(Msg::MicroBlockRequest(micro_block_request)),
         });
     }
 

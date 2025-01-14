@@ -4,13 +4,14 @@
 /// - Actuating the received microblocks
 /// - Disabling JSS and re-enabling standard txn processing when health check fails
 
-use std::{net::{Ipv4Addr, SocketAddr, SocketAddrV4}, str::FromStr, sync::{atomic::AtomicBool, Arc, RwLock}, thread::Builder};
+use std::{net::{Ipv4Addr, SocketAddr, SocketAddrV4}, str::FromStr, sync::{atomic::AtomicBool, Arc, RwLock}, thread::Builder, time::{Instant, SystemTime, UNIX_EPOCH}};
 
-use jito_protos::proto::{ jds_api::TpuConfigResp, jds_types::{ExecutionPreConfirmation, MicroBlock, SignedSlotTick, SlotTick, Socket} };
+use ahash::HashMap;
+use jito_protos::proto::{ jds_api::TpuConfigResp, jds_types::{AccountComputeUnitBudget, ExecutionPreConfirmation, MicroBlock, MicroBlockRequest, SignedSlotTick, SlotTick, Socket} };
 use solana_gossip::cluster_info::ClusterInfo;
 use solana_poh::poh_recorder::PohRecorder;
 use solana_runtime::{bank_forks::BankForks, vote_sender_types::ReplayVoteSender};
-use solana_sdk::signer::Signer;
+use solana_sdk::{pubkey::Pubkey, signer::Signer};
 use tokio::task::spawn_blocking;
 
 use crate::{jss_executor::{JssExecutor, JssExecutorExecutionResult}, jss_connection::JssConnection};
@@ -133,14 +134,27 @@ impl JssManager {
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         cluster_info: &Arc<ClusterInfo>,
     ) {
+        // Per slot:
+        // - Aim to request 1/4 of block CUs per micro-block (48 million / 4 = 12 million each)
+        // - For each subsequent micro-block, add the failed CUS to the next micro-block request
+        //
+        // In addition:
+        // - Keep track of CUs used per account and send it in the micro-block request
+        //   so that JSS knows how much more CUS each account can still use 
 
         while Self::is_within_leader_slot_with_lookahead(&poh_recorder.read().unwrap()) {
             // Send signed slot tick to JSS
-            let Some(signed_slot_tick) = Self::get_signed_slot_tick(
-                &poh_recorder.read().unwrap(), &cluster_info) else {
+            let Some(micro_block_request) = Self::build_micro_block_request(
+                &poh_recorder.read().unwrap(),
+                &cluster_info,
+                Instant::now() + std::time::Duration::from_millis(50),
+                12_000_000,
+                HashMap::default(), // TODO
+            )
+            else {
                 return;
             };
-            jss_connection.send_signed_tick(signed_slot_tick);
+            jss_connection.send_micro_block_request(micro_block_request);
             
             const TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
             let Some(micro_block) = jss_connection.recv_microblock_with_timeout(TIMEOUT).await else {
@@ -156,12 +170,13 @@ impl JssManager {
         }
     }
 
+    // Returns the total CUS that failed to execute
     async fn execute_micro_block(
         jss_connection: &mut JssConnection,
         jss_executor: &mut JssExecutor,
         jss_is_actuating: &Arc<AtomicBool>,
         micro_block: MicroBlock,
-    ) {
+    ) -> u64 {
         jss_is_actuating.store(true, std::sync::atomic::Ordering::Relaxed);
         let (executed_sender, executed_receiver) = std::sync::mpsc::channel();
         let mut jss_executor = jss_executor.clone(); // TODO: why are we cloning?
@@ -169,6 +184,7 @@ impl JssManager {
             jss_executor.execute_and_commit_and_record_micro_block(micro_block, executed_sender);
             jss_executor
         });
+        let mut failed_cus = 0;
         while !actuation_task.is_finished() {
             if let Ok(execution_result) = executed_receiver.try_recv() {
                 match execution_result {
@@ -177,15 +193,16 @@ impl JssManager {
                             bundle_id: bundle_id.bytes().into_iter().collect(),
                         });
                     },
-                    JssExecutorExecutionResult::Failure { bundle_id, cus } => {
-                        // TODO: collect the amount of failed CUS to potentially request another block
-                        todo!();
+                    JssExecutorExecutionResult::Failure { bundle_id: _, cus } => {
+                        failed_cus += cus;
                     }
                 }
             }
         }
 
         jss_is_actuating.store(false, std::sync::atomic::Ordering::Relaxed);
+
+        failed_cus
     }
 
     fn get_sockaddr(info: Option<&Socket>) -> Option<SocketAddr> {
@@ -228,7 +245,13 @@ impl JssManager {
     // Get the special signed slot tick message to send to the JSS
     // This signed message is used to verify the authenticity of the sender (us)
     // so that JSS knows we are allowed to receive potentially juicy microblocks
-    pub fn get_signed_slot_tick(poh_recorder: &PohRecorder, cluster_info: &ClusterInfo) -> Option<SignedSlotTick> {
+    pub fn build_micro_block_request(
+        poh_recorder: &PohRecorder,
+        cluster_info: &ClusterInfo,
+        deadline: std::time::Instant,
+        requested_compute_units: u32,
+        account_cu_budget: HashMap<Pubkey, u64>,
+    ) -> Option<MicroBlockRequest> {
         let Some(current_slot) = poh_recorder.bank().and_then(|bank| Some(bank.slot())) else {
             return None;
         };
@@ -240,6 +263,40 @@ impl JssManager {
         message.extend_from_slice(&slot_tick.current_slot.to_le_bytes());
         message.extend_from_slice(&slot_tick.parent_slot.to_le_bytes());
         let signature = cluster_info.keypair().sign_message(&message).to_string().into_bytes();
-        Some(SignedSlotTick { slot_tick: Some(slot_tick), signature })
+        let signed_slot_tick = SignedSlotTick { slot_tick: Some(slot_tick), signature };
+
+        Some(MicroBlockRequest{
+            leader_identity_pubkey: cluster_info.keypair().pubkey().to_bytes().to_vec(),
+            signed_slot_tick: Some(signed_slot_tick),
+            deadline: Some(instant_to_prost_timestamp(deadline)),
+            requested_compute_units,
+            account_cu_budget: account_cu_budget.into_iter().map(|(pubkey, available_cus)| {
+                AccountComputeUnitBudget{ pubkey: pubkey.to_bytes().to_vec(), available_cus }
+            }).collect(),
+        })
+    }
+}
+
+pub fn instant_to_prost_timestamp(instant: Instant) -> prost_types::Timestamp {
+    let now = Instant::now();
+    let system_now = SystemTime::now();
+
+    let duration_since_now = if instant >= now {
+        instant - now
+    } else {
+        now - instant
+    };
+
+    let target_time = if instant >= now {
+        system_now + duration_since_now
+    } else {
+        system_now - duration_since_now
+    };
+
+    let duration_since_epoch = target_time.duration_since(UNIX_EPOCH).unwrap_or_default();
+
+    prost_types::Timestamp {
+        seconds: duration_since_epoch.as_secs() as i64,
+        nanos: duration_since_epoch.subsec_nanos() as i32,
     }
 }
