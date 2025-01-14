@@ -392,7 +392,7 @@ pub enum JssExecutorExecutionResult {
     Success(String /*BundleId*/),
     Failure{
         bundle_id: String,
-        cus: u64,
+        cus: u32,
     },
 }
 
