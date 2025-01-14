@@ -153,6 +153,13 @@ impl JssManager {
         // In addition:
         // - Keep track of CUs used per account and send it in the micro-block request
         //   so that JSS knows how much more CUS each account can still use
+        //
+        // More things to consider:
+        // - How to find out the actual used CUs so far?
+        // - How to find the actual use CUs per account so far?
+        //
+        // Basically we need to create an algorithm that continues until the slot is over or
+        // CUS are exhausted.
 
         let slot = poh_recorder
             .read()
