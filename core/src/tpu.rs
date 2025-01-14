@@ -372,14 +372,14 @@ impl Tpu {
 
         let bank_forks_for_jss = bank_forks.clone();
         let exit_for_jss: Arc<AtomicBool> = exit.clone();
-        let jss_is_actuating = Arc::new(AtomicBool::new(false));
+        let jss_is_executing = Arc::new(AtomicBool::new(false));
         let jss_manager = jss_enabled
             .load(std::sync::atomic::Ordering::SeqCst)
             .then(|| {
                 JssManager::new(
                     jss_url.unwrap(),
                     jss_enabled,
-                    jss_is_actuating,
+                    jss_is_executing,
                     poh_recorder.clone(),
                     bank_forks_for_jss,
                     exit_for_jss,

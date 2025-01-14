@@ -41,7 +41,7 @@ impl JssManager {
     pub fn new(
         jss_url: String,
         jss_enabled: Arc<AtomicBool>,
-        jss_is_actuating: Arc<AtomicBool>,
+        jss_is_executing: Arc<AtomicBool>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         bank_forks: Arc<RwLock<BankForks>>,
         exit: Arc<AtomicBool>,
@@ -58,7 +58,7 @@ impl JssManager {
                 rt.block_on(Self::start_manager(
                     jss_url,
                     jss_enabled,
-                    jss_is_actuating,
+                    jss_is_executing,
                     exit,
                     poh_recorder,
                     bank_forks,
@@ -77,7 +77,7 @@ impl JssManager {
     async fn start_manager(
         jss_url: String,
         jss_enabled: Arc<AtomicBool>,
-        jss_is_actuating: Arc<AtomicBool>,
+        jss_is_executing: Arc<AtomicBool>,
         exit: Arc<AtomicBool>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         _bank_forks: Arc<RwLock<BankForks>>,
@@ -108,7 +108,7 @@ impl JssManager {
                 Self::request_and_process_microblocks(
                     jss_connection.as_mut().unwrap(),
                     &mut jss_executor,
-                    &jss_is_actuating,
+                    &jss_is_executing,
                     &poh_recorder,
                     &cluster_info,
                 )
@@ -142,7 +142,7 @@ impl JssManager {
     async fn request_and_process_microblocks(
         jss_connection: &mut JssConnection,
         jss_executor: &mut JssExecutor,
-        jss_is_actuating: &Arc<AtomicBool>,
+        jss_is_executing: &Arc<AtomicBool>,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         cluster_info: &Arc<ClusterInfo>,
     ) {
@@ -191,7 +191,7 @@ impl JssManager {
             failed_cus = Self::execute_micro_block(
                 jss_connection,
                 jss_executor,
-                jss_is_actuating,
+                jss_is_executing,
                 micro_block,
             )
             .await;
@@ -202,10 +202,10 @@ impl JssManager {
     async fn execute_micro_block(
         jss_connection: &mut JssConnection,
         jss_executor: &mut JssExecutor,
-        jss_is_actuating: &Arc<AtomicBool>,
+        jss_is_executing: &Arc<AtomicBool>,
         micro_block: MicroBlock,
     ) -> u32 {
-        jss_is_actuating.store(true, std::sync::atomic::Ordering::Relaxed);
+        jss_is_executing.store(true, std::sync::atomic::Ordering::Relaxed);
         let (executed_sender, executed_receiver) = std::sync::mpsc::channel();
         let mut jss_executor = jss_executor.clone(); // TODO: why are we cloning?
         let actuation_task = spawn_blocking(move || {
@@ -230,7 +230,7 @@ impl JssManager {
             }
         }
 
-        jss_is_actuating.store(false, std::sync::atomic::Ordering::Relaxed);
+        jss_is_executing.store(false, std::sync::atomic::Ordering::Relaxed);
 
         failed_cus
     }
