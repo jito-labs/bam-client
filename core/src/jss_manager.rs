@@ -20,7 +20,7 @@ pub(crate) struct JssManager {
 }
 
 // The (woah)man of the hour; the JSS Manager
-// Run based on timeouts and messages received from the JSS block engine
+// Runs based on timeouts and messages received from the JSS block engine
 impl JssManager {
     // Create and run a new instance of the JSS Manager
     pub fn new(
@@ -141,8 +141,9 @@ impl JssManager {
                 return;
             };
             jss_connection.send_signed_tick(signed_slot_tick);
-
-            let Some(micro_block) = jss_connection.recv_microblock_with_timeout(std::time::Duration::from_millis(100)).await else {
+            
+            const TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
+            let Some(micro_block) = jss_connection.recv_microblock_with_timeout(TIMEOUT).await else {
                 return;
             };
 
@@ -163,7 +164,7 @@ impl JssManager {
     ) {
         jss_is_actuating.store(true, std::sync::atomic::Ordering::Relaxed);
         let (executed_sender, executed_receiver) = std::sync::mpsc::channel();
-        let mut jss_executor = jss_executor.clone(); // TODO: clone is bad, fix this
+        let mut jss_executor = jss_executor.clone(); // TODO: why are we cloning?
         let actuation_task = spawn_blocking(move || {
             jss_executor.execute_and_commit_and_record_micro_block(micro_block, executed_sender);
             jss_executor
