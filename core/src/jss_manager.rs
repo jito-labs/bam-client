@@ -142,13 +142,18 @@ impl JssManager {
         // - Keep track of CUs used per account and send it in the micro-block request
         //   so that JSS knows how much more CUS each account can still use 
 
-        while Self::is_within_leader_slot_with_lookahead(&poh_recorder.read().unwrap()) {
+        let slot = poh_recorder.read().unwrap().bank().map(|bank| bank.slot()).unwrap_or_default();
+        let mut failed_cus = 0;
+        let keep_going = ||{
+            slot == poh_recorder.read().unwrap().bank().map(|bank| bank.slot()).unwrap_or_default()
+        };
+        while keep_going() {
             // Send signed slot tick to JSS
             let Some(micro_block_request) = Self::build_micro_block_request(
                 &poh_recorder.read().unwrap(),
                 &cluster_info,
                 Instant::now() + std::time::Duration::from_millis(50),
-                12_000_000,
+                12_000_000 + failed_cus,
                 HashMap::default(), // TODO
             )
             else {
@@ -161,7 +166,7 @@ impl JssManager {
                 return;
             };
 
-            Self::execute_micro_block(
+            failed_cus = Self::execute_micro_block(
                 jss_connection,
                 jss_executor,
                 jss_is_actuating,
@@ -176,7 +181,7 @@ impl JssManager {
         jss_executor: &mut JssExecutor,
         jss_is_actuating: &Arc<AtomicBool>,
         micro_block: MicroBlock,
-    ) -> u64 {
+    ) -> u32 {
         jss_is_actuating.store(true, std::sync::atomic::Ordering::Relaxed);
         let (executed_sender, executed_receiver) = std::sync::mpsc::channel();
         let mut jss_executor = jss_executor.clone(); // TODO: why are we cloning?
