@@ -223,7 +223,7 @@ fn bench_jss_actuator(b: &mut Bencher) {
     } = create_test_fixture(1);
 
     let (replay_vote_sender, _) = crossbeam_channel::unbounded();
-    let mut actuator = JssExecutor::new(poh_recorder.clone(), replay_vote_sender);
+    let mut actuator = JssExecutor::new(poh_recorder.clone(), replay_vote_sender, None);
 
     let successful_bundle = Bundle {
         packets: vec![jds_packet_from_versioned_tx(&VersionedTransaction::from(

@@ -5,6 +5,7 @@ use crossbeam_channel::Receiver;
 use itertools::Itertools;
 use nohash::{IntMap, IntSet};
 use solana_bundle::bundle_execution::load_and_execute_bundle;
+use solana_ledger::blockstore_processor::TransactionStatusSender;
 use solana_measure::measure_us;
 
 use jito_protos::proto::jss_types::{MicroBlock, Packet};
@@ -35,11 +36,12 @@ impl JssExecutor {
     pub fn new(
         poh_recorder: Arc<RwLock<PohRecorder>>,
         replay_vote_sender: ReplayVoteSender,
+        transaction_status_sender: Option<TransactionStatusSender>,
     ) -> Self {
         Self {
             poh_recorder,
             committer: bundle_stage::committer::Committer::new(
-                None, // TODO
+                transaction_status_sender,
                 replay_vote_sender,
                 Arc::new(PrioritizationFeeCache::default()), // TODO
             ),
@@ -781,7 +783,7 @@ mod tests {
 
         let (replay_vote_sender, _) = crossbeam_channel::unbounded();
 
-        let mut executor = super::JssExecutor::new(poh_recorder, replay_vote_sender);
+        let mut executor = super::JssExecutor::new(poh_recorder, replay_vote_sender, None);
 
         let successful_bundle = Bundle {
             packets: vec![jds_packet_from_versioned_tx(&VersionedTransaction::from(
