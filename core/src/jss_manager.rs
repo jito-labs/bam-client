@@ -22,7 +22,10 @@ use jito_protos::proto::{
 use solana_gossip::cluster_info::ClusterInfo;
 use solana_ledger::blockstore_processor::TransactionStatusSender;
 use solana_poh::poh_recorder::PohRecorder;
-use solana_runtime::{bank_forks::BankForks, vote_sender_types::ReplayVoteSender};
+use solana_runtime::{
+    bank_forks::BankForks, prioritization_fee_cache::PrioritizationFeeCache,
+    vote_sender_types::ReplayVoteSender,
+};
 use solana_sdk::{pubkey::Pubkey, signer::Signer};
 use tokio::task::spawn_blocking;
 
@@ -49,6 +52,7 @@ impl JssManager {
         cluster_info: Arc<ClusterInfo>,
         replay_vote_sender: ReplayVoteSender,
         transaction_status_sender: Option<TransactionStatusSender>,
+        prioritization_fee_cache: Arc<PrioritizationFeeCache>,
     ) -> Self {
         let api_connection_thread = Builder::new()
             .name("jss-manager".to_string())
@@ -67,6 +71,7 @@ impl JssManager {
                     cluster_info,
                     replay_vote_sender,
                     transaction_status_sender,
+                    prioritization_fee_cache,
                 ));
             })
             .unwrap();
@@ -87,12 +92,15 @@ impl JssManager {
         cluster_info: Arc<ClusterInfo>,
         replay_vote_sender: ReplayVoteSender,
         transaction_status_sender: Option<TransactionStatusSender>,
+        prioritization_fee_cache: Arc<PrioritizationFeeCache>,
     ) {
         let mut jss_connection = None;
         let mut jss_executor = JssExecutor::new(
             poh_recorder.clone(),
             replay_vote_sender,
-            transaction_status_sender);
+            transaction_status_sender,
+            prioritization_fee_cache,
+        );
         let mut tpu_info = None;
 
         // Run until (our) world ends

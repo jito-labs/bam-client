@@ -386,6 +386,7 @@ impl Tpu {
                     cluster_info.clone(),
                     replay_vote_sender.clone(),
                     transaction_status_sender.clone(),
+                    prioritization_fee_cache.clone(),
                 )
             });
 
