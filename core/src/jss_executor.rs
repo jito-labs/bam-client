@@ -1,7 +1,4 @@
-use std::{
-    sync::{atomic::AtomicBool, mpsc::Sender, Arc, RwLock},
-    time::Duration,
-};
+use std::sync::{atomic::AtomicBool, mpsc::Sender, Arc, RwLock};
 
 use ahash::{HashMap, HashMapExt, HashSetExt};
 use crossbeam_channel::Receiver;
@@ -17,10 +14,7 @@ use solana_runtime::{
     vote_sender_types::ReplayVoteSender,
 };
 use solana_sdk::{
-    bundle::{derive_bundle_id_from_sanitized_transactions, SanitizedBundle},
-    packet::PacketFlags,
-    pubkey::Pubkey,
-    transaction::SanitizedTransaction,
+    bundle::{derive_bundle_id_from_sanitized_transactions, SanitizedBundle}, clock::MAX_PROCESSING_AGE, packet::PacketFlags, pubkey::Pubkey, transaction::SanitizedTransaction
 };
 
 use crate::{
@@ -28,7 +22,7 @@ use crate::{
         immutable_deserialized_packet::ImmutableDeserializedPacket,
         leader_slot_timing_metrics::LeaderExecuteAndCommitTimings,
     },
-    bundle_stage,
+    bundle_stage::{self, MAX_BUNDLE_RETRY_DURATION},
 };
 
 #[derive(Clone)]
@@ -422,12 +416,13 @@ impl JssExecutor {
         };
 
         let default_accounts = vec![None; len];
+        let transaction_status_sender_enabled = committer.transaction_status_sender_enabled();
         let mut bundle_execution_results = load_and_execute_bundle(
             &bank,
             &sanitized_bundle,
-            20,                      // TODO
-            &Duration::from_secs(1), // TODO
-            false,                   // TODO
+            MAX_PROCESSING_AGE,
+            &MAX_BUNDLE_RETRY_DURATION,
+            transaction_status_sender_enabled,
             &None,
             false,
             None,
