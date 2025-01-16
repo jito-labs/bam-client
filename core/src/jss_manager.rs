@@ -1,7 +1,7 @@
 /// Manages majority of the JSS related functionality:
 /// - Connecting to the JSS block engine via GRPC service
 /// - Sending signed slot ticks + Receive microblocks
-/// - Actuating the received microblocks
+/// - Executing the received microblocks
 /// - Disabling JSS and re-enabling standard txn processing when health check fails
 use std::{
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
