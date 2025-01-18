@@ -2,9 +2,10 @@ use futures::{channel::mpsc, FutureExt, StreamExt};
 use jito_protos::proto::{
     jss_api::{
         jss_node_api_client::JssNodeApiClient, start_scheduler_message::Msg,
-        start_scheduler_response::Resp, GetTpuConfigRequest, StartSchedulerMessage, TpuConfigResp,
+        start_scheduler_response::Resp, GetTpuConfigRequest, StartSchedulerMessage,
+        StartSchedulerResponse, TpuConfigResp,
     },
-    jss_types::{ExecutionPreConfirmation, MicroBlock, MicroBlockRequest},
+    jss_types::{LeaderState, MicroBlock},
 };
 use tokio::time::timeout;
 
@@ -12,7 +13,7 @@ use tokio::time::timeout;
 // Keeps track of last received heartbeat 'behind the scenes' and will mark itself as unhealthy if no heartbeat is received
 pub struct JssConnection {
     validator_client: JssNodeApiClient<tonic::transport::Channel>,
-    inbound_stream: tonic::Streaming<jito_protos::proto::jss_api::StartSchedulerResponse>,
+    inbound_stream: tonic::Streaming<StartSchedulerResponse>,
     outbound_sender: mpsc::UnboundedSender<StartSchedulerMessage>,
     its_over: bool,
     last_heartbeat: Option<std::time::Instant>,
@@ -25,10 +26,12 @@ impl JssConnection {
     pub async fn try_init(url: String) -> Option<Self> {
         let backend_endpoint = tonic::transport::Endpoint::from_shared(url).ok()?;
         let connection_timeout = std::time::Duration::from_secs(5);
+
         let channel = timeout(connection_timeout, backend_endpoint.connect())
             .await
             .ok()?
             .ok()?;
+
         let mut validator_client = JssNodeApiClient::new(channel);
 
         let (outbound_sender, outbound_receiver) = mpsc::unbounded();
@@ -94,16 +97,9 @@ impl JssConnection {
     }
 
     // Send a signed slot tick to the JSS instance
-    pub fn send_micro_block_request(&mut self, micro_block_request: MicroBlockRequest) {
+    pub fn send_leader_state(&mut self, leader_state: LeaderState) {
         let _ = self.outbound_sender.unbounded_send(StartSchedulerMessage {
-            msg: Some(Msg::MicroBlockRequest(micro_block_request)),
-        });
-    }
-
-    // Send a bundle execution confirmation to the JSS instance
-    pub fn send_bundle_execution_confirmation(&mut self, msg: ExecutionPreConfirmation) {
-        let _ = self.outbound_sender.unbounded_send(StartSchedulerMessage {
-            msg: Some(Msg::ExecutionPreConfirmation(msg)),
+            msg: Some(Msg::LeaderState(leader_state)),
         });
     }
 

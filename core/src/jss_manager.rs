@@ -11,12 +11,10 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-use ahash::HashMap;
 use jito_protos::proto::{
     jss_api::TpuConfigResp,
     jss_types::{
-        AccountComputeUnitBudget, ExecutionPreConfirmation, MicroBlock, MicroBlockRequest,
-        SignedSlotTick, SlotTick, Socket,
+        AccountComputeUnitBudget, MicroBlock, Socket,
     },
 };
 use solana_gossip::cluster_info::ClusterInfo;
@@ -31,7 +29,7 @@ use tokio::task::spawn_blocking;
 
 use crate::{
     jss_connection::JssConnection,
-    jss_executor::{JssExecutor, JssExecutorExecutionResult},
+    jss_executor::JssExecutor,
 };
 
 pub(crate) struct JssManager {
@@ -117,18 +115,6 @@ impl JssManager {
                 tpu_info = new_tpu_info;
                 Self::update_tpu_config(tpu_info.as_ref(), &cluster_info).await;
             }
-
-            // If we are within the leader slot, or within lookahead, request and process micro blocks
-            if Self::is_within_leader_slot_with_lookahead(&poh_recorder.read().unwrap()) {
-                Self::request_and_process_microblocks(
-                    jss_connection.as_mut().unwrap(),
-                    &mut jss_executor,
-                    &jss_is_executing,
-                    &poh_recorder,
-                    &cluster_info,
-                )
-                .await;
-            }
         }
     }
 
@@ -154,76 +140,6 @@ impl JssManager {
         true
     }
 
-    async fn request_and_process_microblocks(
-        jss_connection: &mut JssConnection,
-        jss_executor: &mut JssExecutor,
-        jss_is_executing: &Arc<AtomicBool>,
-        poh_recorder: &Arc<RwLock<PohRecorder>>,
-        cluster_info: &Arc<ClusterInfo>,
-    ) {
-        // Per slot:
-        // - Aim to request 1/4 of block CUs per micro-block (48 million / 4 = 12 million each)
-        // - For each subsequent micro-block, add the failed CUS to the next micro-block request
-        //
-        // In addition:
-        // - Keep track of CUs used per account and send it in the micro-block request
-        //   so that JSS knows how much more CUS each account can still use
-        //
-        // More things to consider:
-        // - How to find out the actual used CUs so far?
-        // - How to find the actual use CUs per account so far?
-        //
-        // Basically we need to create an algorithm that continues until the slot is over or
-        // CUS are exhausted. Additionally, this algorithm needs to be pipe-lined so that
-        // we request another micro-block while the previous one is being executed. This potentially has
-        // some issues with JSS re-sending some of the same bundles if it hasn't received a confirmation yet...
-        // So, either on the JSS side or on the client side, we need to keep track of the bundles that have been
-        // sent and received and only send the ones that haven't been confirmed yet.
-
-        let slot = poh_recorder
-            .read()
-            .unwrap()
-            .bank()
-            .map(|bank| bank.slot())
-            .unwrap_or_default();
-        let mut failed_cus = 0;
-        let keep_going = || {
-            slot == poh_recorder
-                .read()
-                .unwrap()
-                .bank()
-                .map(|bank| bank.slot())
-                .unwrap_or_default()
-        };
-        while keep_going() {
-            // Send signed slot tick to JSS
-            let Some(micro_block_request) = Self::build_micro_block_request(
-                &poh_recorder.read().unwrap(),
-                &cluster_info,
-                Instant::now() + std::time::Duration::from_millis(50),
-                12_000_000 + failed_cus,
-                HashMap::default(), // TODO
-            ) else {
-                return;
-            };
-            jss_connection.send_micro_block_request(micro_block_request);
-
-            const TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
-            let Some(micro_block) = jss_connection.recv_microblock_with_timeout(TIMEOUT).await
-            else {
-                return;
-            };
-
-            failed_cus = Self::execute_micro_block(
-                jss_connection,
-                jss_executor,
-                jss_is_executing,
-                micro_block,
-            )
-            .await;
-        }
-    }
-
     // Returns the total CUS that failed to execute
     async fn execute_micro_block(
         jss_connection: &mut JssConnection,
@@ -241,18 +157,7 @@ impl JssManager {
         let mut failed_cus = 0;
         while !actuation_task.is_finished() {
             if let Ok(execution_result) = executed_receiver.try_recv() {
-                match execution_result {
-                    JssExecutorExecutionResult::Success(bundle_id) => {
-                        jss_connection.send_bundle_execution_confirmation(
-                            ExecutionPreConfirmation {
-                                bundle_id: bundle_id.bytes().into_iter().collect(),
-                            },
-                        );
-                    }
-                    JssExecutorExecutionResult::Failure { bundle_id: _, cus } => {
-                        failed_cus += cus;
-                    }
-                }
+                todo!();
             }
         }
 
@@ -298,57 +203,6 @@ impl JssManager {
     pub fn is_within_leader_slot_with_lookahead(poh_recorder: &PohRecorder) -> bool {
         const TICK_LOOKAHEAD: u64 = 8;
         poh_recorder.would_be_leader(TICK_LOOKAHEAD) || poh_recorder.would_be_leader(0)
-    }
-
-    // Get the special signed slot tick message to send to the JSS
-    // This signed message is used to verify the authenticity of the sender (us)
-    // so that JSS knows we are allowed to receive potentially juicy microblocks
-    pub fn build_micro_block_request(
-        poh_recorder: &PohRecorder,
-        cluster_info: &ClusterInfo,
-        deadline: std::time::Instant,
-        requested_compute_units: u32,
-        account_cu_budget: HashMap<Pubkey, u64>,
-    ) -> Option<MicroBlockRequest> {
-        let Some(current_slot) = poh_recorder.bank().and_then(|bank| Some(bank.slot())) else {
-            return None;
-        };
-        let Some(parent_slot) = poh_recorder
-            .bank()
-            .and_then(|bank| Some(bank.parent_slot()))
-        else {
-            return None;
-        };
-        let slot_tick = SlotTick {
-            current_slot,
-            parent_slot,
-        };
-        let mut message = Vec::new();
-        message.extend_from_slice(&slot_tick.current_slot.to_le_bytes());
-        message.extend_from_slice(&slot_tick.parent_slot.to_le_bytes());
-        let signature = cluster_info
-            .keypair()
-            .sign_message(&message)
-            .to_string()
-            .into_bytes();
-        let signed_slot_tick = SignedSlotTick {
-            slot_tick: Some(slot_tick),
-            signature,
-        };
-
-        Some(MicroBlockRequest {
-            leader_identity_pubkey: cluster_info.keypair().pubkey().to_bytes().to_vec(),
-            signed_slot_tick: Some(signed_slot_tick),
-            deadline: Some(instant_to_prost_timestamp(deadline)),
-            requested_compute_units,
-            account_cu_budget: account_cu_budget
-                .into_iter()
-                .map(|(pubkey, available_cus)| AccountComputeUnitBudget {
-                    pubkey: pubkey.to_bytes().to_vec(),
-                    available_cus,
-                })
-                .collect(),
-        })
     }
 }
 
