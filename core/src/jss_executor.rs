@@ -364,7 +364,9 @@ impl JssExecutor {
         executed_sender: Sender<JssExecutorExecutionResult>,
     ) {
         // Grab bank and create exit signal
-        let bank = self.poh_recorder.read().unwrap().bank().unwrap();
+        let Some(bank) = self.poh_recorder.read().unwrap().bank() else {
+            return;
+        };
         let exit = Arc::new(AtomicBool::new(false));
 
         // Spawn the worker threads that will be executing the bundles

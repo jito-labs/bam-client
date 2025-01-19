@@ -14,7 +14,7 @@ use std::{
 use jito_protos::proto::{
     jss_api::TpuConfigResp,
     jss_types::{
-        AccountComputeUnitBudget, MicroBlock, Socket,
+        AccountComputeUnitBudget, MicroBlock, Socket, LeaderState,
     },
 };
 use solana_gossip::cluster_info::ClusterInfo;
@@ -52,6 +52,27 @@ impl JssManager {
         transaction_status_sender: Option<TransactionStatusSender>,
         prioritization_fee_cache: Arc<PrioritizationFeeCache>,
     ) -> Self {
+        let (micro_block_sender, micro_block_receiver) = std::sync::mpsc::channel();
+        let exit_micro_block_execution_thread = exit.clone();
+        let poh_recorder_micro_block_execution_thread = poh_recorder.clone();
+        let micro_block_execution_thread = Builder::new()
+            .name("micro_block_execution_thread".to_string())
+            .spawn(move || {
+                let mut executor = JssExecutor::new(
+                    poh_recorder_micro_block_execution_thread,
+                    replay_vote_sender,
+                    transaction_status_sender,
+                    prioritization_fee_cache,
+                );
+                while !exit_micro_block_execution_thread.load(std::sync::atomic::Ordering::Relaxed) {
+                    let Some(micro_block) = micro_block_receiver.recv().ok() else {
+                        continue;
+                    };
+                    let (executed_sender, executed_receiver) = std::sync::mpsc::channel();
+                    executor.execute_and_commit_and_record_micro_block(micro_block, executed_sender);
+                }
+            }).unwrap();
+
         let api_connection_thread = Builder::new()
             .name("jss-manager".to_string())
             .spawn(move || {
@@ -62,20 +83,19 @@ impl JssManager {
                 rt.block_on(Self::start_manager(
                     jss_url,
                     jss_enabled,
-                    jss_is_executing,
                     exit,
                     poh_recorder,
-                    bank_forks,
                     cluster_info,
-                    replay_vote_sender,
-                    transaction_status_sender,
-                    prioritization_fee_cache,
+                    micro_block_sender,
                 ));
             })
             .unwrap();
 
         Self {
-            threads: vec![api_connection_thread],
+            threads: vec![
+                api_connection_thread,
+                micro_block_execution_thread
+            ],
         }
     }
 
@@ -83,22 +103,12 @@ impl JssManager {
     async fn start_manager(
         jss_url: String,
         jss_enabled: Arc<AtomicBool>,
-        jss_is_executing: Arc<AtomicBool>,
         exit: Arc<AtomicBool>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
-        _bank_forks: Arc<RwLock<BankForks>>,
         cluster_info: Arc<ClusterInfo>,
-        replay_vote_sender: ReplayVoteSender,
-        transaction_status_sender: Option<TransactionStatusSender>,
-        prioritization_fee_cache: Arc<PrioritizationFeeCache>,
+        micro_block_sender: std::sync::mpsc::Sender<MicroBlock>,
     ) {
         let mut jss_connection = None;
-        let mut jss_executor = JssExecutor::new(
-            poh_recorder.clone(),
-            replay_vote_sender,
-            transaction_status_sender,
-            prioritization_fee_cache,
-        );
         let mut tpu_info = None;
 
         // Run until (our) world ends
@@ -109,11 +119,42 @@ impl JssManager {
                 continue;
             }
 
+            let Some(jss_connection) = jss_connection.as_mut() else {
+                continue;
+            };
+
             // Update TPU config
-            let new_tpu_info = jss_connection.as_ref().unwrap().get_tpu_config();
+            let new_tpu_info = jss_connection.get_tpu_config();
             if new_tpu_info != tpu_info {
                 tpu_info = new_tpu_info;
                 Self::update_tpu_config(tpu_info.as_ref(), &cluster_info).await;
+            }
+
+            // Check if we are in leader slot
+            let poh_recorder = poh_recorder.read().unwrap();
+            let mut last_tick_height = poh_recorder.tick_height();
+            while Self::is_within_leader_slot_with_lookahead(&poh_recorder) {
+                // Receive microblocks
+                while let Some(micro_block) = jss_connection.try_recv_microblock() {
+                    micro_block_sender.send(micro_block).ok();
+                }
+
+                // If tick has increased, send leader state
+                if poh_recorder.tick_height() > last_tick_height {
+                    last_tick_height = poh_recorder.tick_height();
+                    let slot_cu_budget = 0;
+                    let slot_account_cu_budget = vec![]; // TODO fill this
+                    let leader_state = LeaderState {
+                        pubkey: cluster_info.keypair().pubkey().to_bytes().to_vec(),
+                        slot: poh_recorder.working_slot().unwrap_or_default(),
+                        tick: poh_recorder.tick_height() as u32,
+                        slot_account_cu_budget,
+                        slot_cu_budget,
+                        recently_executed_txn_signatures: vec![], // TODO fill this
+                        
+                    };
+                    jss_connection.send_leader_state(leader_state);
+                }
             }
         }
     }
@@ -138,32 +179,6 @@ impl JssManager {
         }
 
         true
-    }
-
-    // Returns the total CUS that failed to execute
-    async fn execute_micro_block(
-        jss_connection: &mut JssConnection,
-        jss_executor: &mut JssExecutor,
-        jss_is_executing: &Arc<AtomicBool>,
-        micro_block: MicroBlock,
-    ) -> u32 {
-        jss_is_executing.store(true, std::sync::atomic::Ordering::Relaxed);
-        let (executed_sender, executed_receiver) = std::sync::mpsc::channel();
-        let mut jss_executor = jss_executor.clone(); // TODO: why are we cloning?
-        let actuation_task = spawn_blocking(move || {
-            jss_executor.execute_and_commit_and_record_micro_block(micro_block, executed_sender);
-            jss_executor
-        });
-        let mut failed_cus = 0;
-        while !actuation_task.is_finished() {
-            if let Ok(execution_result) = executed_receiver.try_recv() {
-                todo!();
-            }
-        }
-
-        jss_is_executing.store(false, std::sync::atomic::Ordering::Relaxed);
-
-        failed_cus
     }
 
     fn get_sockaddr(info: Option<&Socket>) -> Option<SocketAddr> {
