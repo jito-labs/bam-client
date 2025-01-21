@@ -139,10 +139,20 @@ impl JssManager {
                     micro_block_sender.send(micro_block).ok();
                 }
 
+                let Some(bank) = poh_recorder.bank() else {
+                    break;
+                };
+
                 // If tick has increased, send leader state
                 if poh_recorder.tick_height() > last_tick_height {
                     last_tick_height = poh_recorder.tick_height();
-                    let slot_cu_budget = 0;
+                    // Get the maximum compute units per block
+                    let max_block_cu = bank.read_cost_tracker().unwrap().block_cost_limit();
+                    // Get consumed compute units in the current block
+                    let consumed_block_cu = bank.read_cost_tracker()
+                        .unwrap()
+                        .block_cost();
+                    let slot_cu_budget = max_block_cu.saturating_sub(consumed_block_cu) as u32;
                     let slot_account_cu_budget = vec![]; // TODO fill this
                     let leader_state = LeaderState {
                         pubkey: cluster_info.keypair().pubkey().to_bytes().to_vec(),
