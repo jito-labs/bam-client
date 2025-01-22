@@ -13,17 +13,16 @@ use std::{
 
 use jito_protos::proto::{
     jss_api::TpuConfigResp,
-    jss_types::{AccountComputeUnitBudget, LeaderState, MicroBlock, Socket},
+    jss_types::{LeaderState, MicroBlock, Socket},
 };
 use solana_gossip::cluster_info::ClusterInfo;
 use solana_ledger::blockstore_processor::TransactionStatusSender;
 use solana_poh::poh_recorder::PohRecorder;
 use solana_runtime::{
-    bank_forks::BankForks, prioritization_fee_cache::PrioritizationFeeCache,
+    prioritization_fee_cache::PrioritizationFeeCache,
     vote_sender_types::ReplayVoteSender,
 };
-use solana_sdk::{pubkey::Pubkey, signer::Signer};
-use tokio::task::spawn_blocking;
+use solana_sdk::signer::Signer;
 
 use crate::{jss_connection::JssConnection, jss_executor::JssExecutor};
 
@@ -123,7 +122,7 @@ impl JssManager {
                 Self::update_tpu_config(tpu_info.as_ref(), &cluster_info).await;
             }
 
-            if Self::is_within_leader_slot_with_lookahead(&poh_recorder.read().unwrap()) {
+            if Self::is_within_leader_slot_with_lookahead(&poh_recorder.read().unwrap(), 8) {
                 Self::run_leader_slot_mode(
                     &mut jss_connection,
                     &cluster_info,
@@ -146,6 +145,8 @@ impl JssManager {
         let send_leader_state = |jss_connection: &mut JssConnection| {
             let poh = poh();
             let bank = poh.bank().unwrap();
+
+            
             let max_block_cu = bank.read_cost_tracker().unwrap().block_cost_limit();
             let consumed_block_cu = bank.read_cost_tracker().unwrap().block_cost();
             let slot_cu_budget = max_block_cu.saturating_sub(consumed_block_cu) as u32;
@@ -165,7 +166,7 @@ impl JssManager {
         send_leader_state(jss_connection);
 
         let mut last_tick_height = 0;
-        while Self::is_within_leader_slot_with_lookahead(&poh()) {
+        while Self::is_within_leader_slot_with_lookahead(&poh(), 8) {
             while let Some(micro_block) = jss_connection.try_recv_microblock() {
                 micro_block_sender.send(micro_block).ok();
             }
@@ -234,9 +235,8 @@ impl JssManager {
 
     // Check if it's time for an auction
     // This is decided based on the PohRecorder's current slot and the lookahead
-    pub fn is_within_leader_slot_with_lookahead(poh_recorder: &PohRecorder) -> bool {
-        const TICK_LOOKAHEAD: u64 = 8;
-        poh_recorder.would_be_leader(TICK_LOOKAHEAD) || poh_recorder.would_be_leader(0)
+    pub fn is_within_leader_slot_with_lookahead(poh_recorder: &PohRecorder, tick_lookahead: u64) -> bool {
+        poh_recorder.would_be_leader(tick_lookahead) || poh_recorder.would_be_leader(0)
     }
 }
 
