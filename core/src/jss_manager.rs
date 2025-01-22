@@ -143,16 +143,17 @@ impl JssManager {
     ) {
         let poh = || -> RwLockReadGuard<PohRecorder> { poh_recorder.read().unwrap() };
 
-        let mut send_leader_state = |jss_connection: &mut JssConnection| {
-            let bank = poh().bank().unwrap();
+        let send_leader_state = |jss_connection: &mut JssConnection| {
+            let poh = poh();
+            let bank = poh.bank().unwrap();
             let max_block_cu = bank.read_cost_tracker().unwrap().block_cost_limit();
             let consumed_block_cu = bank.read_cost_tracker().unwrap().block_cost();
             let slot_cu_budget = max_block_cu.saturating_sub(consumed_block_cu) as u32;
             let slot_account_cu_budget = vec![]; // TODO fill this
             let leader_state = LeaderState {
                 pubkey: cluster_info.keypair().pubkey().to_bytes().to_vec(),
-                slot: poh().working_slot().unwrap_or_default(),
-                tick: poh().tick_height() as u32,
+                slot: poh.working_slot().unwrap_or_default(),
+                tick: poh.tick_height() as u32,
                 slot_account_cu_budget,
                 slot_cu_budget,
                 recently_executed_txn_signatures: vec![], // TODO; fill this (Maybe not needed for POC)
@@ -163,14 +164,14 @@ impl JssManager {
         // Start off by sending the leader state
         send_leader_state(jss_connection);
 
-        let mut last_tick_height = poh().tick_height();
+        let mut last_tick_height = 0;
         while Self::is_within_leader_slot_with_lookahead(&poh()) {
             while let Some(micro_block) = jss_connection.try_recv_microblock() {
                 micro_block_sender.send(micro_block).ok();
             }
 
             // If tick has increased, send leader state
-            if poh().tick_height() > last_tick_height {
+            if poh().tick_height() != last_tick_height {
                 last_tick_height = poh().tick_height();
                 send_leader_state(jss_connection);
             }
