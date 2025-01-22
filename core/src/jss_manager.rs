@@ -43,9 +43,7 @@ impl JssManager {
     pub fn new(
         jss_url: String,
         jss_enabled: Arc<AtomicBool>,
-        jss_is_executing: Arc<AtomicBool>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
-        bank_forks: Arc<RwLock<BankForks>>,
         exit: Arc<AtomicBool>,
         cluster_info: Arc<ClusterInfo>,
         replay_vote_sender: ReplayVoteSender,
