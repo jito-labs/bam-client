@@ -144,22 +144,34 @@ impl JssManager {
 
         let send_leader_state = |jss_connection: &mut JssConnection| {
             let poh = poh();
-            let bank = poh.bank().unwrap();
-
-            
-            let max_block_cu = bank.read_cost_tracker().unwrap().block_cost_limit();
-            let consumed_block_cu = bank.read_cost_tracker().unwrap().block_cost();
-            let slot_cu_budget = max_block_cu.saturating_sub(consumed_block_cu) as u32;
-            let slot_account_cu_budget = vec![]; // TODO fill this
-            let leader_state = LeaderState {
-                pubkey: cluster_info.keypair().pubkey().to_bytes().to_vec(),
-                slot: poh.working_slot().unwrap_or_default(),
-                tick: poh.tick_height() as u32,
-                slot_account_cu_budget,
-                slot_cu_budget,
-                recently_executed_txn_signatures: vec![], // TODO; fill this (Maybe not needed for POC)
+            if let Some(bank) = poh.bank() {
+                let max_block_cu = bank.read_cost_tracker().unwrap().block_cost_limit();
+                let consumed_block_cu = bank.read_cost_tracker().unwrap().block_cost();
+                let slot_cu_budget = max_block_cu.saturating_sub(consumed_block_cu) as u32;
+                let slot_account_cu_budget = vec![]; // TODO fill this
+                let leader_state = LeaderState {
+                    pubkey: cluster_info.keypair().pubkey().to_bytes().to_vec(),
+                    slot: poh.working_slot().unwrap_or_default(),
+                    tick: poh.tick_height() as u32,
+                    slot_account_cu_budget,
+                    slot_cu_budget,
+                    recently_executed_txn_signatures: vec![], // TODO; fill this (Maybe not needed for POC)
+                };
+                jss_connection.send_leader_state(leader_state);
+            } else {
+                // poh.bank_start()
+                // let slot_cu_budget = 48_000_000; // TODO; fill this with variable
+                // let slot_account_cu_budget = vec![]; // TODO fill this
+                // let leader_state = LeaderState {
+                //     pubkey: cluster_info.keypair().pubkey().to_bytes().to_vec(),
+                //     slot: 0, // TODO
+                //     tick: 0,
+                //     slot_account_cu_budget,
+                //     slot_cu_budget,
+                //     recently_executed_txn_signatures: vec![], // TODO; fill this (Maybe not needed for POC)
+                // };
+                // jss_connection.send_leader_state(leader_state);
             };
-            jss_connection.send_leader_state(leader_state);
         };
 
         // Start off by sending the leader state
