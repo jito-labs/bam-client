@@ -66,7 +66,7 @@ impl JssManager {
                     let Some(micro_block) = micro_block_receiver.recv().ok() else {
                         continue;
                     };
-                    let (executed_sender, executed_receiver) = std::sync::mpsc::channel();
+                    let (executed_sender, _executed_receiver) = std::sync::mpsc::channel();
                     executor.execute_and_commit_and_record_micro_block(micro_block, executed_sender);
                 }
             }).unwrap();
