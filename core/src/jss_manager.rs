@@ -158,7 +158,7 @@ impl JssManager {
                         tick: poh_recorder.tick_height() as u32,
                         slot_account_cu_budget,
                         slot_cu_budget,
-                        recently_executed_txn_signatures: vec![], // TODO fill this
+                        recently_executed_txn_signatures: vec![], // TODO; fill this (Maybe not needed for POC)
                         
                     };
                     jss_connection.send_leader_state(leader_state);
