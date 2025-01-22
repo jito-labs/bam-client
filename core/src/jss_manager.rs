@@ -6,16 +6,14 @@
 use std::{
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     str::FromStr,
-    sync::{atomic::AtomicBool, Arc, RwLock},
+    sync::{atomic::AtomicBool, Arc, RwLock, RwLockReadGuard},
     thread::Builder,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use jito_protos::proto::{
     jss_api::TpuConfigResp,
-    jss_types::{
-        AccountComputeUnitBudget, MicroBlock, Socket, LeaderState,
-    },
+    jss_types::{AccountComputeUnitBudget, LeaderState, MicroBlock, Socket},
 };
 use solana_gossip::cluster_info::ClusterInfo;
 use solana_ledger::blockstore_processor::TransactionStatusSender;
@@ -27,10 +25,7 @@ use solana_runtime::{
 use solana_sdk::{pubkey::Pubkey, signer::Signer};
 use tokio::task::spawn_blocking;
 
-use crate::{
-    jss_connection::JssConnection,
-    jss_executor::JssExecutor,
-};
+use crate::{jss_connection::JssConnection, jss_executor::JssExecutor};
 
 pub(crate) struct JssManager {
     threads: Vec<std::thread::JoinHandle<()>>,
@@ -62,14 +57,17 @@ impl JssManager {
                     transaction_status_sender,
                     prioritization_fee_cache,
                 );
-                while !exit_micro_block_execution_thread.load(std::sync::atomic::Ordering::Relaxed) {
+                while !exit_micro_block_execution_thread.load(std::sync::atomic::Ordering::Relaxed)
+                {
                     let Some(micro_block) = micro_block_receiver.recv().ok() else {
                         continue;
                     };
                     let (executed_sender, _executed_receiver) = std::sync::mpsc::channel();
-                    executor.execute_and_commit_and_record_micro_block(micro_block, executed_sender);
+                    executor
+                        .execute_and_commit_and_record_micro_block(micro_block, executed_sender);
                 }
-            }).unwrap();
+            })
+            .unwrap();
 
         let api_connection_thread = Builder::new()
             .name("jss-manager".to_string())
@@ -90,10 +88,7 @@ impl JssManager {
             .unwrap();
 
         Self {
-            threads: vec![
-                api_connection_thread,
-                micro_block_execution_thread
-            ],
+            threads: vec![api_connection_thread, micro_block_execution_thread],
         }
     }
 
@@ -117,7 +112,7 @@ impl JssManager {
                 continue;
             }
 
-            let Some(jss_connection) = jss_connection.as_mut() else {
+            let Some(mut jss_connection) = jss_connection.as_mut() else {
                 continue;
             };
 
@@ -128,41 +123,56 @@ impl JssManager {
                 Self::update_tpu_config(tpu_info.as_ref(), &cluster_info).await;
             }
 
-            // Check if we are in leader slot
-            let poh_recorder = poh_recorder.read().unwrap();
-            let mut last_tick_height = poh_recorder.tick_height();
-            while Self::is_within_leader_slot_with_lookahead(&poh_recorder) {
-                // Receive microblocks
-                while let Some(micro_block) = jss_connection.try_recv_microblock() {
-                    micro_block_sender.send(micro_block).ok();
-                }
+            if Self::is_within_leader_slot_with_lookahead(&poh_recorder.read().unwrap()) {
+                Self::run_leader_slot_mode(
+                    &mut jss_connection,
+                    &cluster_info,
+                    &poh_recorder,
+                    &micro_block_sender,
+                );
+            }
+        }
+    }
 
-                let Some(bank) = poh_recorder.bank() else {
-                    break;
-                };
+    // Run the leader slot mode
+    fn run_leader_slot_mode(
+        jss_connection: &mut JssConnection,
+        cluster_info: &Arc<ClusterInfo>,
+        poh_recorder: &RwLock<PohRecorder>,
+        micro_block_sender: &std::sync::mpsc::Sender<MicroBlock>,
+    ) {
+        let poh = || -> RwLockReadGuard<PohRecorder> { poh_recorder.read().unwrap() };
 
-                // If tick has increased, send leader state
-                if poh_recorder.tick_height() > last_tick_height {
-                    last_tick_height = poh_recorder.tick_height();
-                    // Get the maximum compute units per block
-                    let max_block_cu = bank.read_cost_tracker().unwrap().block_cost_limit();
-                    // Get consumed compute units in the current block
-                    let consumed_block_cu = bank.read_cost_tracker()
-                        .unwrap()
-                        .block_cost();
-                    let slot_cu_budget = max_block_cu.saturating_sub(consumed_block_cu) as u32;
-                    let slot_account_cu_budget = vec![]; // TODO fill this
-                    let leader_state = LeaderState {
-                        pubkey: cluster_info.keypair().pubkey().to_bytes().to_vec(),
-                        slot: poh_recorder.working_slot().unwrap_or_default(),
-                        tick: poh_recorder.tick_height() as u32,
-                        slot_account_cu_budget,
-                        slot_cu_budget,
-                        recently_executed_txn_signatures: vec![], // TODO; fill this (Maybe not needed for POC)
-                        
-                    };
-                    jss_connection.send_leader_state(leader_state);
-                }
+        let mut send_leader_state = |jss_connection: &mut JssConnection| {
+            let bank = poh().bank().unwrap();
+            let max_block_cu = bank.read_cost_tracker().unwrap().block_cost_limit();
+            let consumed_block_cu = bank.read_cost_tracker().unwrap().block_cost();
+            let slot_cu_budget = max_block_cu.saturating_sub(consumed_block_cu) as u32;
+            let slot_account_cu_budget = vec![]; // TODO fill this
+            let leader_state = LeaderState {
+                pubkey: cluster_info.keypair().pubkey().to_bytes().to_vec(),
+                slot: poh().working_slot().unwrap_or_default(),
+                tick: poh().tick_height() as u32,
+                slot_account_cu_budget,
+                slot_cu_budget,
+                recently_executed_txn_signatures: vec![], // TODO; fill this (Maybe not needed for POC)
+            };
+            jss_connection.send_leader_state(leader_state);
+        };
+
+        // Start off by sending the leader state
+        send_leader_state(jss_connection);
+
+        let mut last_tick_height = poh().tick_height();
+        while Self::is_within_leader_slot_with_lookahead(&poh()) {
+            while let Some(micro_block) = jss_connection.try_recv_microblock() {
+                micro_block_sender.send(micro_block).ok();
+            }
+
+            // If tick has increased, send leader state
+            if poh().tick_height() > last_tick_height {
+                last_tick_height = poh().tick_height();
+                send_leader_state(jss_connection);
             }
         }
     }
