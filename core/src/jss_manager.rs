@@ -17,10 +17,9 @@ use jito_protos::proto::{
 };
 use solana_gossip::cluster_info::ClusterInfo;
 use solana_ledger::blockstore_processor::TransactionStatusSender;
-use solana_poh::poh_recorder::PohRecorder;
+use solana_poh::poh_recorder::{BankStart, PohRecorder};
 use solana_runtime::{
-    prioritization_fee_cache::PrioritizationFeeCache,
-    vote_sender_types::ReplayVoteSender,
+    bank::Bank, prioritization_fee_cache::PrioritizationFeeCache, vote_sender_types::ReplayVoteSender
 };
 use solana_sdk::signer::Signer;
 
@@ -111,6 +110,7 @@ impl JssManager {
 
         // Run until (our) world ends
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
             // Init and/or check health of connection
             if !Self::get_or_init_connection(jss_url.clone(), &mut jss_connection).await {
@@ -131,10 +131,18 @@ impl JssManager {
             }
 
             if Self::is_within_leader_slot_with_lookahead(&poh_recorder.read().unwrap(), 0) {
+                let Some(bank_start) = poh_recorder.read().unwrap().bank_start() else {
+                    continue;
+                };
+                if !bank_start.should_working_bank_still_be_processing_txs() {
+                    continue;
+                }
+
+                info!("Entering leader slot mode slot={} tick={}", bank_start.working_bank.slot(), bank_start.working_bank.tick_height() as u64 % bank_start.working_bank.ticks_per_slot());
                 Self::run_leader_slot_mode(
                     &mut jss_connection,
                     &cluster_info,
-                    &poh_recorder,
+                    &bank_start,
                     &micro_block_sender,
                 );
             }
@@ -147,60 +155,40 @@ impl JssManager {
     fn run_leader_slot_mode(
         jss_connection: &mut JssConnection,
         cluster_info: &Arc<ClusterInfo>,
-        poh_recorder: &RwLock<PohRecorder>,
+        bank_start: &BankStart,
         micro_block_sender: &std::sync::mpsc::Sender<MicroBlock>,
     ) {
-        let poh = || -> RwLockReadGuard<PohRecorder> { poh_recorder.read().unwrap() };
-
-        let send_leader_state = |jss_connection: &mut JssConnection| {
-            let poh = poh();
-            if let Some(bank) = poh.bank() {
-                let max_block_cu = bank.read_cost_tracker().unwrap().block_cost_limit();
-                let consumed_block_cu = bank.read_cost_tracker().unwrap().block_cost();
-                let slot_cu_budget = max_block_cu.saturating_sub(consumed_block_cu) as u32;
-                let slot_account_cu_budget = vec![]; // TODO fill this
-                let leader_state = LeaderState {
-                    pubkey: cluster_info.keypair().pubkey().to_bytes().to_vec(),
-                    slot: poh.working_slot().unwrap_or_default(),
-                    tick: poh.tick_height() as u32,
-                    slot_account_cu_budget,
-                    slot_cu_budget,
-                    recently_executed_txn_signatures: vec![], // TODO; fill this (Maybe not needed for POC)
-                };
-                //info!("Sending leader state slot={} tick={}", leader_state.slot, leader_state.tick as u64 % poh.ticks_per_slot());
-                jss_connection.send_leader_state(leader_state);
-            } else {
-                //poh.bank_start()
-                //let slot_cu_budget = 48_000_000; // TODO; fill this with variable
-                //let slot_account_cu_budget = vec![]; // TODO fill this
-                //let leader_state = LeaderState {
-                //    pubkey: cluster_info.keypair().pubkey().to_bytes().to_vec(),
-                //    slot: 0, // TODO
-                //    tick: 0,
-                //    slot_account_cu_budget,
-                //    slot_cu_budget,
-                //    recently_executed_txn_signatures: vec![], // TODO; fill this (Maybe not needed for POC)
-                //};
-                //jss_connection.send_leader_state(leader_state);
+        let send_leader_state = |jss_connection: &mut JssConnection, bank: &Bank| {
+            let max_block_cu = bank.read_cost_tracker().unwrap().block_cost_limit();
+            let consumed_block_cu = bank.read_cost_tracker().unwrap().block_cost();
+            let slot_cu_budget = max_block_cu.saturating_sub(consumed_block_cu) as u32;
+            let slot_account_cu_budget = vec![]; // TODO fill this
+            let leader_state = LeaderState {
+                pubkey: cluster_info.keypair().pubkey().to_bytes().to_vec(),
+                slot: bank.slot(),
+                tick: bank.tick_height() as u32,
+                slot_account_cu_budget,
+                slot_cu_budget,
+                recently_executed_txn_signatures: vec![], // TODO; fill this (Maybe not needed for POC)
             };
+            //info!("Sending leader state slot={} tick={}", leader_state.slot, leader_state.tick as u64 % poh.ticks_per_slot());
+            jss_connection.send_leader_state(leader_state);
         };
 
         // Start off by sending the leader state
-        send_leader_state(jss_connection);
 
-        let slot = poh().working_slot().unwrap_or_default();
-        let mut prev_tick = poh().tick_height();
-        while Self::is_within_leader_slot_with_lookahead(&poh(), 8) && slot == poh().working_slot().unwrap_or_default() {
+        let mut prev_tick = bank_start.working_bank.tick_height();
+        while bank_start.should_working_bank_still_be_processing_txs() {
             while let Some(micro_block) = jss_connection.try_recv_microblock() {
                 info!("Received micro block; bundle_count: {}", micro_block.bundles.len());
                 micro_block_sender.send(micro_block).ok();
             }
 
             // If tick has increased, send leader state
-            let tick = poh().tick_height();
-            if prev_tick != tick && tick % 32 == 0 {
+            let tick = bank_start.working_bank.tick_height();
+            if prev_tick != tick && tick % 64 == 1 {
                 prev_tick = tick;
-                send_leader_state(jss_connection);
+                send_leader_state(jss_connection, &bank_start.working_bank);
             }
         }
     }

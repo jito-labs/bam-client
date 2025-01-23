@@ -195,6 +195,7 @@ impl JssExecutor {
                 let Ok(context) = request_receiver.try_recv() else {
                     continue;
                 };
+                info!("Executing bundle with {} transactions", context.transactions.len());
                 let success = Self::execute_commit_record_bundle(
                     &bank,
                     &recorder,
@@ -439,7 +440,8 @@ impl JssExecutor {
             &default_accounts,
         );
 
-        if let Err(_) = bundle_execution_results.result() {
+        if let Err(err) = bundle_execution_results.result() {
+            error!("Error executing bundle {}: {:?}", bundle_id, err);
             return false;
         }
 
