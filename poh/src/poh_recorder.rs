@@ -74,7 +74,7 @@ pub struct BankStart {
 }
 
 impl BankStart {
-    fn get_working_bank_if_not_expired(&self) -> Option<&Bank> {
+    pub fn get_working_bank_if_not_expired(&self) -> Option<&Bank> {
         if self.should_working_bank_still_be_processing_txs() {
             Some(&self.working_bank)
         } else {

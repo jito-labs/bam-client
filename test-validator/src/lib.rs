@@ -1002,6 +1002,7 @@ impl TestValidator {
             accounts_db_config,
             runtime_config,
             account_indexes: config.rpc_config.account_indexes.clone(),
+            jss_url: Some("http://0.0.0.0:50055".to_string()),
             ..ValidatorConfig::default_for_test()
         };
         if let Some(ref tower_storage) = config.tower_storage {

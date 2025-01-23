@@ -1,4 +1,4 @@
-use futures::{channel::mpsc, FutureExt, StreamExt};
+use futures::{channel::mpsc, FutureExt, StreamExt, TryStreamExt};
 use jito_protos::proto::{
     jss_api::{
         jss_node_api_client::JssNodeApiClient, start_scheduler_message::Msg,
@@ -111,7 +111,7 @@ impl JssConnection {
         !self.its_over
             && self
                 .last_heartbeat
-                .map_or(true, |heartbeat| heartbeat.elapsed().as_secs() < 5)
+                .map_or(true, |heartbeat| heartbeat.elapsed().as_secs() < 10)
     }
 
     async fn housekeeping(&mut self) {
@@ -123,18 +123,17 @@ impl JssConnection {
                 .get_tpu_config(GetTpuConfigRequest {})
                 .await
             {
+                info!("Received TPU config");
                 self.tpu_config = Some(tpu_config_response.into_inner());
             }
             self.last_tpu_update = now;
         }
 
         // Pickup heartbeats and drain stream
-        while let Some(msg) = self.inbound_stream.next().await {
+        while let Some(Ok(Some(msg))) = self.inbound_stream.try_next().now_or_never() {
             // Update last_heartbeat if a new one is received
-            if let Ok(response) = msg {
-                if let Some(Resp::HeartBeat(_)) = response.resp {
-                    self.last_heartbeat = Some(std::time::Instant::now());
-                }
+            if let Some(Resp::HeartBeat(_)) = msg.resp {
+                self.last_heartbeat = Some(std::time::Instant::now());
             }
         }
     }
