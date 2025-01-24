@@ -398,6 +398,12 @@ impl JssExecutor {
                 WORKER_THREAD_COUNT,
             );
         }
+
+        info!(
+            "Completed {}/{} bundles",
+            execution_context.completed_bundles_count(),
+            execution_context.total_bundles_count()
+        );
     }
 
     pub fn execute_and_commit_and_record_micro_block(
@@ -547,6 +553,14 @@ impl MicroblockExecutionContext {
 
     pub fn keep_going(&self) -> bool {
         self.completed_bundles_count < self.total_bundles_count
+    }
+
+    pub fn completed_bundles_count(&self) -> usize {
+        self.completed_bundles_count
+    }
+
+    pub fn total_bundles_count(&self) -> usize {
+        self.total_bundles_count
     }
 }
 

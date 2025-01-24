@@ -112,8 +112,6 @@ impl JssManager {
 
         // Run until (our) world ends
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-
             // Init and/or check health of connection
             if !Self::get_or_init_connection(jss_url.clone(), &mut jss_connection).await {
                 jss_enabled.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -154,6 +152,8 @@ impl JssManager {
                     &bank_start,
                     &micro_block_sender,
                 );
+            } else {
+                tokio::time::sleep(std::time::Duration::from_micros(500)).await;
             }
         }
 
