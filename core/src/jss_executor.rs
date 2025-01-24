@@ -9,7 +9,7 @@ use solana_ledger::blockstore_processor::TransactionStatusSender;
 use solana_measure::measure_us;
 
 use jito_protos::proto::jss_types::{MicroBlock, Packet};
-use solana_poh::poh_recorder::{PohRecorder, RecordTransactionsSummary, TransactionRecorder};
+use solana_poh::poh_recorder::{BankStart, PohRecorder, RecordTransactionsSummary, TransactionRecorder};
 use solana_runtime::{
     bank::Bank, prioritization_fee_cache::PrioritizationFeeCache,
     vote_sender_types::ReplayVoteSender,
@@ -30,11 +30,12 @@ use crate::{
     bundle_stage::{self, MAX_BUNDLE_RETRY_DURATION},
 };
 
-#[derive(Clone)]
 pub struct JssExecutor {
     poh_recorder: Arc<RwLock<PohRecorder>>,
-    committer: bundle_stage::committer::Committer,
+    workers: ExecutionWorkers,
 }
+
+const WORKER_THREAD_COUNT: usize = 4;
 
 impl JssExecutor {
     pub fn new(
@@ -42,14 +43,24 @@ impl JssExecutor {
         replay_vote_sender: ReplayVoteSender,
         transaction_status_sender: Option<TransactionStatusSender>,
         prioritization_fee_cache: Arc<PrioritizationFeeCache>,
+        exit: Arc<AtomicBool>,
     ) -> Self {
+        let committer = bundle_stage::committer::Committer::new(
+            transaction_status_sender,
+            replay_vote_sender,
+            prioritization_fee_cache,
+        );
+
+        let workers = Self::prepare_workers(
+            WORKER_THREAD_COUNT,
+            poh_recorder.clone(),
+            committer,
+            exit.clone(),
+        );
+
         Self {
             poh_recorder,
-            committer: bundle_stage::committer::Committer::new(
-                transaction_status_sender,
-                replay_vote_sender,
-                prioritization_fee_cache,
-            ),
+            workers,
         }
     }
 
@@ -186,16 +197,19 @@ impl JssExecutor {
         exit: Arc<AtomicBool>,
         request_receiver: Receiver<BundleContext>,
         response_sender: crossbeam_channel::Sender<JssExecutorWorkerExecutionResult>,
-        bank: Arc<Bank>,
-        recorder: TransactionRecorder,
+        poh_recorder: Arc<RwLock<PohRecorder>>,
         mut committer: bundle_stage::committer::Committer,
     ) -> std::thread::JoinHandle<()> {
         std::thread::spawn(move || {
+            let recorder = poh_recorder.read().unwrap().new_recorder();
             while !exit.load(std::sync::atomic::Ordering::Relaxed) {
                 let Ok(context) = request_receiver.try_recv() else {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
                     continue;
                 };
-                info!("Executing bundle with {} transactions", context.transactions.len());
+                let Some(bank) = poh_recorder.read().unwrap().bank() else {
+                    continue;
+                };
                 let success = Self::execute_commit_record_bundle(
                     &bank,
                     &recorder,
@@ -211,7 +225,6 @@ impl JssExecutor {
 
     fn prepare_workers(
         num_workers: usize,
-        bank: Arc<Bank>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         committer: bundle_stage::committer::Committer,
         exit: Arc<AtomicBool>,
@@ -227,8 +240,7 @@ impl JssExecutor {
                     exit.clone(),
                     request_receiver.clone(),
                     response_sender.clone(),
-                    bank.clone(),
-                    poh_recorder.read().unwrap().new_recorder(),
+                    poh_recorder.clone(),
                     committer.clone(),
                 )
             })
@@ -287,6 +299,11 @@ impl JssExecutor {
             if !response_receiver.is_empty() {
                 break;
             }
+            
+            if !context.bank_start.should_working_bank_still_be_processing_txs() {
+                break;
+            }
+            let bank = context.bank_start.working_bank.as_ref();
 
             // If these packets haven't been parsed yet, parse them and save them
             // so that we never have to this again for this bundle
@@ -294,7 +311,7 @@ impl JssExecutor {
             // This is kinda sad because I love parsing, re-parsing, serializing, and deserializing
             // I think CPU registers should hold JSON strings
             if let QueuedBundle::Unparsed(packets) = queued_bundle {
-                let transactions = Self::parse_transactions(&context.bank, packets.iter());
+                let transactions = Self::parse_transactions(bank, packets.iter());
                 let locks = Self::get_locks(&transactions, &mut context.lock_assigner);
                 *queued_bundle = QueuedBundle::Waiting {
                     transactions,
@@ -364,44 +381,23 @@ impl JssExecutor {
         micro_block: MicroBlock,
         executed_sender: Sender<JssExecutorExecutionResult>,
     ) {
-        // Grab bank and create exit signal
-        let Some(bank) = self.poh_recorder.read().unwrap().bank() else {
+        let Some(bank_start) = self.poh_recorder.read().unwrap().bank_start() else {
             return;
         };
-        let exit = Arc::new(AtomicBool::new(false));
-
-        // Spawn the worker threads that will be executing the bundles
-        const WORKER_THREAD_COUNT: usize = 4;
-        let ExecutionWorkers {
-            worker_threads,
-            exit,
-            request_sender,
-            response_receiver,
-        } = Self::prepare_workers(
-            WORKER_THREAD_COUNT,
-            bank.clone(),
-            self.poh_recorder.clone(),
-            self.committer.clone(),
-            exit.clone(),
-        );
-
-        let mut execution_context = MicroblockExecutionContext::new(bank, micro_block);
+        let mut execution_context = MicroblockExecutionContext::new(bank_start, micro_block);
         while self.poh_recorder.read().unwrap().has_bank() && execution_context.keep_going() {
             Self::receive_finished_bundles(
                 &mut execution_context,
-                &response_receiver,
+                &self.workers.response_receiver,
                 &executed_sender,
             );
             Self::schedule_next_bundles(
                 &mut execution_context,
-                &request_sender,
-                &response_receiver,
+                &self.workers.request_sender,
+                &self.workers.response_receiver,
                 WORKER_THREAD_COUNT,
             );
         }
-
-        exit.store(true, std::sync::atomic::Ordering::Relaxed);
-        worker_threads.into_iter().for_each(|t| t.join().unwrap());
     }
 
     pub fn execute_and_commit_and_record_micro_block(
@@ -474,6 +470,14 @@ impl JssExecutor {
     }
 }
 
+impl Drop for JssExecutor {
+    fn drop(&mut self) {
+        for worker in self.workers.worker_threads.drain(..) {
+            worker.join().unwrap();
+        }
+    }
+}
+
 pub struct JssExecutorWorkerExecutionResult {
     context: BundleContext,
     success: bool,
@@ -511,7 +515,7 @@ struct BundleContext {
 }
 
 pub struct MicroblockExecutionContext {
-    bank: Arc<Bank>,
+    bank_start: BankStart,
     bundles: Vec<QueuedBundle>,
     lock_assigner: LockIdAssigner,
     write_locked: IntSet<u32>,
@@ -523,9 +527,9 @@ pub struct MicroblockExecutionContext {
 }
 
 impl MicroblockExecutionContext {
-    pub fn new(bank: Arc<Bank>, microblock: MicroBlock) -> Self {
+    pub fn new(bank_start: BankStart, microblock: MicroBlock) -> Self {
         Self {
-            bank,
+            bank_start,
             lock_assigner: LockIdAssigner::new(),
             total_bundles_count: microblock.bundles.len(),
             bundles: microblock
@@ -798,6 +802,7 @@ mod tests {
             replay_vote_sender,
             None,
             Arc::new(PrioritizationFeeCache::default()),
+            exit.clone(),
         );
 
         let successful_bundle = Bundle {

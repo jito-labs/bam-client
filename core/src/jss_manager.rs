@@ -6,7 +6,7 @@
 use std::{
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     str::FromStr,
-    sync::{atomic::AtomicBool, Arc, RwLock, RwLockReadGuard},
+    sync::{atomic::AtomicBool, Arc, RwLock},
     thread::Builder,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -19,7 +19,8 @@ use solana_gossip::cluster_info::ClusterInfo;
 use solana_ledger::blockstore_processor::TransactionStatusSender;
 use solana_poh::poh_recorder::{BankStart, PohRecorder};
 use solana_runtime::{
-    bank::Bank, prioritization_fee_cache::PrioritizationFeeCache, vote_sender_types::ReplayVoteSender
+    bank::Bank, prioritization_fee_cache::PrioritizationFeeCache,
+    vote_sender_types::ReplayVoteSender,
 };
 use solana_sdk::signer::Signer;
 
@@ -54,6 +55,7 @@ impl JssManager {
                     replay_vote_sender,
                     transaction_status_sender,
                     prioritization_fee_cache,
+                    exit_micro_block_execution_thread.clone(),
                 );
 
                 info!("Micro block execution thread started");
@@ -116,6 +118,8 @@ impl JssManager {
             if !Self::get_or_init_connection(jss_url.clone(), &mut jss_connection).await {
                 jss_enabled.store(false, std::sync::atomic::Ordering::Relaxed);
                 continue;
+            } else {
+                jss_enabled.store(true, std::sync::atomic::Ordering::Relaxed);
             }
 
             let Some(mut jss_connection) = jss_connection.as_mut() else {
@@ -138,7 +142,12 @@ impl JssManager {
                     continue;
                 }
 
-                info!("Entering leader slot mode slot={} tick={}", bank_start.working_bank.slot(), bank_start.working_bank.tick_height() as u64 % bank_start.working_bank.ticks_per_slot());
+                info!(
+                    "Entering leader slot mode slot={} tick={}",
+                    bank_start.working_bank.slot(),
+                    bank_start.working_bank.tick_height() as u64
+                        % bank_start.working_bank.ticks_per_slot()
+                );
                 Self::run_leader_slot_mode(
                     &mut jss_connection,
                     &cluster_info,
@@ -180,7 +189,10 @@ impl JssManager {
         let mut prev_tick = bank_start.working_bank.tick_height();
         while bank_start.should_working_bank_still_be_processing_txs() {
             while let Some(micro_block) = jss_connection.try_recv_microblock() {
-                info!("Received micro block; bundle_count: {}", micro_block.bundles.len());
+                info!(
+                    "Received micro block; bundle_count: {}",
+                    micro_block.bundles.len()
+                );
                 micro_block_sender.send(micro_block).ok();
             }
 
@@ -252,7 +264,10 @@ impl JssManager {
 
     // Check if it's time for an auction
     // This is decided based on the PohRecorder's current slot and the lookahead
-    pub fn is_within_leader_slot_with_lookahead(poh_recorder: &PohRecorder, tick_lookahead: u64) -> bool {
+    pub fn is_within_leader_slot_with_lookahead(
+        poh_recorder: &PohRecorder,
+        tick_lookahead: u64,
+    ) -> bool {
         poh_recorder.would_be_leader(tick_lookahead) || poh_recorder.would_be_leader(0)
     }
 }
