@@ -51,7 +51,7 @@ impl JssManager {
             .name("micro_block_execution_thread".to_string())
             .spawn(move || {
                 let mut executor = JssExecutor::new(
-                    poh_recorder_micro_block_execution_thread,
+                    poh_recorder_micro_block_execution_thread.clone(),
                     replay_vote_sender,
                     transaction_status_sender,
                     prioritization_fee_cache,
@@ -62,13 +62,26 @@ impl JssManager {
 
                 while !exit_micro_block_execution_thread.load(std::sync::atomic::Ordering::Relaxed)
                 {
-                    let Some(micro_block) = micro_block_receiver.recv().ok() else {
+                    let Some((micro_block, slot)) : Option<(MicroBlock, u64)> = micro_block_receiver.recv().ok() else {
                         continue;
                     };
+                    let Some(current_slot) = poh_recorder_micro_block_execution_thread.read().unwrap().working_slot() else {
+                        continue;
+                    };
+                    if slot != current_slot {
+                        info!("Received micro block for slot={} but current slot is={}; skipping", slot, current_slot);
+                        continue;
+                    }
+                    info!(
+                        "Received micro block; bundle_count: {}",
+                        micro_block.bundles.len()
+                    );
                     let (executed_sender, _executed_receiver) = std::sync::mpsc::channel();
+                    let start = Instant::now();
                     executor
                         .execute_and_commit_and_record_micro_block(micro_block, executed_sender);
-                    info!("Executed micro block");
+                    let duration = Instant::now().duration_since(start);
+                    info!("Executed micro block in {}ms", duration.as_millis());
                 }
             })
             .unwrap();
@@ -103,7 +116,7 @@ impl JssManager {
         exit: Arc<AtomicBool>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         cluster_info: Arc<ClusterInfo>,
-        micro_block_sender: std::sync::mpsc::Sender<MicroBlock>,
+        micro_block_sender: std::sync::mpsc::Sender<(MicroBlock, u64)>,
     ) {
         let mut jss_connection = None;
         let mut tpu_info = None;
@@ -165,7 +178,7 @@ impl JssManager {
         jss_connection: &mut JssConnection,
         cluster_info: &Arc<ClusterInfo>,
         bank_start: &BankStart,
-        micro_block_sender: &std::sync::mpsc::Sender<MicroBlock>,
+        micro_block_sender: &std::sync::mpsc::Sender<(MicroBlock, u64)>,
     ) {
         let send_leader_state = |jss_connection: &mut JssConnection, bank: &Bank| {
             let max_block_cu = bank.read_cost_tracker().unwrap().block_cost_limit();
@@ -189,11 +202,8 @@ impl JssManager {
         let mut prev_tick = bank_start.working_bank.tick_height();
         while bank_start.should_working_bank_still_be_processing_txs() {
             while let Some(micro_block) = jss_connection.try_recv_microblock() {
-                info!(
-                    "Received micro block; bundle_count: {}",
-                    micro_block.bundles.len()
-                );
-                micro_block_sender.send(micro_block).ok();
+                let current_slot = bank_start.working_bank.slot();
+                micro_block_sender.send((micro_block, current_slot)).ok();
             }
 
             // If tick has increased, send leader state
