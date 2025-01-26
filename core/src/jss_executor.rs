@@ -373,8 +373,8 @@ impl JssExecutor {
                 }
             };
             executed_sender.send(msg).unwrap();
-            context.inflight_bundles_count -= 1;
-            context.completed_bundles_count += 1;
+            context.inflight_bundles_count = context.inflight_bundles_count.saturating_sub(1);
+            context.completed_bundles_count = context.completed_bundles_count.saturating_add(1);
         }
     }
 

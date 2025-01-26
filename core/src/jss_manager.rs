@@ -84,7 +84,7 @@ impl JssManager {
                     let start = Instant::now();
                     executor
                         .execute_and_commit_and_record_micro_block(micro_block, executed_sender);
-                    let duration = Instant::now().duration_since(start);
+                    let duration = start.elapsed();
                     info!("Executed micro block in {}ms", duration.as_millis());
                 }
             })
