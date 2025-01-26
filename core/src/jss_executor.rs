@@ -184,7 +184,9 @@ impl JssExecutor {
             if lock.write {
                 write_locked.remove(&lock.account_id);
             } else {
-                let count = read_locked.get_mut(&lock.account_id).unwrap();
+                let Some(count) = read_locked.get_mut(&lock.account_id) else {
+                    continue;
+                };
                 *count -= 1;
                 if *count == 0 {
                     read_locked.remove(&lock.account_id);
@@ -384,8 +386,8 @@ impl JssExecutor {
         let Some(bank_start) = self.poh_recorder.read().unwrap().bank_start() else {
             return;
         };
-        let mut execution_context = MicroblockExecutionContext::new(bank_start, micro_block);
-        while self.poh_recorder.read().unwrap().has_bank() && execution_context.keep_going() {
+        let mut execution_context = MicroblockExecutionContext::new(bank_start.clone(), micro_block);
+        while bank_start.should_working_bank_still_be_processing_txs() && execution_context.keep_going() {
             Self::receive_finished_bundles(
                 &mut execution_context,
                 &self.workers.response_receiver,
