@@ -72,8 +72,12 @@ impl JssManager {
                         info!("Received micro block for slot={} but current slot is={}; skipping", slot, current_slot);
                         continue;
                     }
+                    let poh = poh_recorder_micro_block_execution_thread.read().unwrap();
+                    let current_tick = poh.tick_height() % poh.ticks_per_slot();
                     info!(
-                        "Received micro block; bundle_count: {}",
+                        "Received micro block; slot={}, tick={}, bundle_count: {}",
+                        current_slot,
+                        current_tick,
                         micro_block.bundles.len()
                     );
                     let (executed_sender, _executed_receiver) = std::sync::mpsc::channel();
