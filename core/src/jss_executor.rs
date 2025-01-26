@@ -209,15 +209,21 @@ impl JssExecutor {
                     std::thread::sleep(std::time::Duration::from_millis(1));
                     continue;
                 };
-                let Some(bank) = poh_recorder.read().unwrap().bank() else {
+                let Some(bank_start) = poh_recorder.read().unwrap().bank_start() else {
                     continue;
                 };
+                if !bank_start.should_working_bank_still_be_processing_txs() {
+                    continue;
+                }
                 let success = Self::execute_commit_record_bundle(
-                    &bank,
+                    &bank_start.working_bank,
                     &recorder,
                     &mut committer,
                     context.transactions.clone(),
                 );
+                if !bank_start.should_working_bank_still_be_processing_txs() {
+                    continue;
+                }
                 response_sender
                     .send(JssExecutorWorkerExecutionResult { context, success })
                     .unwrap();
