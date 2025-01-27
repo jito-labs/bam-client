@@ -1,4 +1,4 @@
-use std::sync::{atomic::AtomicBool, Arc, RwLock};
+use std::{collections::{HashSet, VecDeque}, sync::{atomic::AtomicBool, Arc, RwLock}};
 
 use ahash::HashMap;
 use itertools::Itertools;
@@ -55,10 +55,10 @@ impl JssExecutor2 {
 
         let mut threads = Vec::new();
 
-        let mut bundle_senders = Vec::new();
+        let mut workers = Vec::new();
         for _ in 0..WORKER_THREAD_COUNT {
-            let (sender, receiver) = crossbeam_channel::bounded(5);
-            bundle_senders.push(sender);
+            let (sender, receiver) = crossbeam_channel::bounded(50);
+            workers.push(Worker::new(sender));
             let poh_recorder = poh_recorder.clone();
             let committer = committer.clone();
             let exit = exit.clone();
@@ -68,7 +68,7 @@ impl JssExecutor2 {
         }
 
         threads.push(std::thread::spawn(|| {
-            Self::spawn_management_thread(microblock_receiver, poh_recorder, bundle_senders, exit);
+            Self::spawn_management_thread(microblock_receiver, poh_recorder, workers, exit);
         }));
 
         Self {
@@ -139,7 +139,7 @@ impl JssExecutor2 {
     fn spawn_management_thread(
         microblock_receiver: crossbeam_channel::Receiver<MicroBlock>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
-        bundle_senders: Vec<crossbeam_channel::Sender<(BundleId, Vec<SanitizedTransaction>)>>,
+        mut workers: Vec<Worker>,
         exit: Arc<AtomicBool>,
     ) {
         let mut bundles_scheduled = 0;
@@ -158,7 +158,7 @@ impl JssExecutor2 {
             let mut next_bundle_id: u64 = 0;
 
             while bank_start.should_working_bank_still_be_processing_txs() {
-                if let Ok(micro_block) = microblock_receiver.recv() {
+                if let Ok(micro_block) = microblock_receiver.try_recv() {
                     let start = std::time::Instant::now();
                     let len = micro_block.bundles.len();
                     for bundle in micro_block.bundles {
@@ -185,22 +185,6 @@ impl JssExecutor2 {
                     );
                 }
 
-                // Fill queues with bundles
-                loop {
-                    let Some(sender) = bundle_senders.iter().find(|sender| !sender.is_full())
-                    else {
-                        break;
-                    };
-
-                    let (bundle_id, txns) = match prio_graph.pop_and_unblock() {
-                        Some((bundle, _)) => (bundle, bundles.remove(&bundle).unwrap()),
-                        None => break,
-                    };
-                    if sender.send((bundle_id, txns)).is_ok() {
-                        bundles_scheduled += 1;
-                    }
-                }
-
                 if last_metrics.elapsed().as_secs() > 1 {
                     info!(
                         "mempool_size={} scheduled={}",
@@ -210,6 +194,31 @@ impl JssExecutor2 {
                     bundles_scheduled = 0;
                     last_metrics = std::time::Instant::now();
                 }
+
+                // Fill queues with bundles
+                let Some(worker) = workers.iter_mut().find(|w| !w.is_full())
+                else {
+                    info!("All workers are full");
+                    continue;
+                };
+
+                for bundle_id in worker.get_unblocked() {
+                    prio_graph.unblock(&bundle_id);
+                }
+
+                let (bundle_id, txns) = match prio_graph.pop() {
+                    Some(bundle) => (bundle, bundles.remove(&bundle).unwrap()),
+                    None => {
+                        continue;
+                    }
+                };
+                if worker.send(bundle_id, txns) {
+                    bundles_scheduled += 1;
+                }
+            }
+
+            for worker in workers.iter_mut() {
+                worker.clear();
             }
 
             info!("unscheduled={}", bundles.len());
@@ -330,5 +339,49 @@ struct BundleId {
 impl TopLevelId<Self> for BundleId {
     fn id(&self) -> Self {
         *self
+    }
+}
+
+struct Worker {
+    sender: crossbeam_channel::Sender<(BundleId, Vec<SanitizedTransaction>)>,
+    queue: VecDeque<BundleId>,
+}
+
+impl Worker {
+    fn new(sender: crossbeam_channel::Sender<(BundleId, Vec<SanitizedTransaction>)>) -> Self {
+        Self {
+            sender,
+            queue: VecDeque::new(),
+        }
+    }
+
+    fn is_full(&self) -> bool {
+        self.sender.is_full()
+    }
+
+    fn send(&mut self, bundle_id: BundleId, txns: Vec<SanitizedTransaction>) -> bool {
+        if self.sender.try_send((bundle_id, txns)).is_ok() {
+            self.queue.push_back(bundle_id);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn get_unblocked(&mut self) -> Vec<BundleId> {
+        let mut unblocked = Vec::new();
+        let diff = self.queue.len().saturating_sub(self.sender.len());
+        for _ in 0..diff {
+            let Some(blocking) = self.queue.pop_front() else {
+                break;
+            };
+            unblocked.push(blocking);
+        }
+
+        unblocked
+    }
+
+    fn clear(&mut self) {
+        self.queue.clear();
     }
 }
