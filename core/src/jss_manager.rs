@@ -24,7 +24,7 @@ use solana_runtime::{
 };
 use solana_sdk::signer::Signer;
 
-use crate::{jss_connection::JssConnection, jss_executor::JssExecutor};
+use crate::{jss_connection::JssConnection, jss_executor::JssExecutor, jss_executor_2::JssExecutor2};
 
 pub(crate) struct JssManager {
     threads: Vec<std::thread::JoinHandle<()>>,
@@ -50,7 +50,7 @@ impl JssManager {
         let micro_block_execution_thread = Builder::new()
             .name("micro_block_execution_thread".to_string())
             .spawn(move || {
-                let mut executor = JssExecutor::new(
+                let mut executor = JssExecutor2::new(
                     poh_recorder_micro_block_execution_thread.clone(),
                     replay_vote_sender,
                     transaction_status_sender,
@@ -80,10 +80,9 @@ impl JssManager {
                         current_tick,
                         micro_block.bundles.len()
                     );
-                    let (executed_sender, _executed_receiver) = std::sync::mpsc::channel();
                     let start = Instant::now();
                     executor
-                        .execute_and_commit_and_record_micro_block(micro_block, executed_sender);
+                        .execute_and_commit_and_record_micro_block(micro_block);
                     let duration = start.elapsed();
                     info!("Executed micro block in {}ms", duration.as_millis());
                 }
