@@ -10,11 +10,25 @@ use solana_entry::poh;
 use solana_ledger::blockstore_processor::TransactionStatusSender;
 use solana_measure::measure_us;
 use solana_poh::poh_recorder::{PohRecorder, RecordTransactionsSummary, TransactionRecorder};
-use solana_runtime::{bank::Bank, prioritization_fee_cache::PrioritizationFeeCache, vote_sender_types::ReplayVoteSender};
-use solana_sdk::{bundle::{derive_bundle_id_from_sanitized_transactions, SanitizedBundle}, clock::MAX_PROCESSING_AGE, packet::PacketFlags, pubkey::Pubkey, transaction::SanitizedTransaction};
+use solana_runtime::{
+    bank::Bank, prioritization_fee_cache::PrioritizationFeeCache,
+    vote_sender_types::ReplayVoteSender,
+};
+use solana_sdk::{
+    bundle::{derive_bundle_id_from_sanitized_transactions, SanitizedBundle},
+    clock::MAX_PROCESSING_AGE,
+    packet::PacketFlags,
+    pubkey::Pubkey,
+    transaction::SanitizedTransaction,
+};
 
-use crate::{banking_stage::{immutable_deserialized_packet::ImmutableDeserializedPacket, leader_slot_timing_metrics::LeaderExecuteAndCommitTimings}, bundle_stage::{self, MAX_BUNDLE_RETRY_DURATION}};
-
+use crate::{
+    banking_stage::{
+        immutable_deserialized_packet::ImmutableDeserializedPacket,
+        leader_slot_timing_metrics::LeaderExecuteAndCommitTimings,
+    },
+    bundle_stage::{self, MAX_BUNDLE_RETRY_DURATION},
+};
 
 pub struct JssExecutor2 {
     microblock_sender: crossbeam_channel::Sender<MicroBlock>,
@@ -118,10 +132,7 @@ impl JssExecutor2 {
         txns.into_iter().map(|x| x.unwrap()).collect_vec()
     }
 
-    pub fn execute_and_commit_and_record_micro_block(
-        &mut self,
-        micro_block: MicroBlock,
-    ) -> bool {
+    pub fn execute_and_commit_and_record_micro_block(&mut self, micro_block: MicroBlock) -> bool {
         self.microblock_sender.try_send(micro_block).is_ok()
     }
 
@@ -151,21 +162,33 @@ impl JssExecutor2 {
                     let start = std::time::Instant::now();
                     let len = micro_block.bundles.len();
                     for bundle in micro_block.bundles {
-                        let transactions = Self::parse_transactions(&bank_start.working_bank, bundle.packets.iter());
+                        let transactions = Self::parse_transactions(
+                            &bank_start.working_bank,
+                            bundle.packets.iter(),
+                        );
                         let id = next_bundle_id;
                         let bundle_id = BundleId { id };
                         next_bundle_id += 1;
-                        prio_graph.insert_transaction(bundle_id, transactions.iter().map(|tx| {
-                            Self::get_transaction_account_access(tx)
-                        }).flatten());
+                        prio_graph.insert_transaction(
+                            bundle_id,
+                            transactions
+                                .iter()
+                                .map(|tx| Self::get_transaction_account_access(tx))
+                                .flatten(),
+                        );
                         bundles.insert(bundle_id, transactions);
                     }
-                    info!("Received micro block with {} bundles; ingestion_time={}", len, start.elapsed().as_millis());
+                    info!(
+                        "Received micro block with {} bundles; ingestion_time={}",
+                        len,
+                        start.elapsed().as_millis()
+                    );
                 }
 
                 // Fill queues with bundles
                 loop {
-                    let Some(sender) = bundle_senders.iter().find(|sender| !sender.is_full()) else {
+                    let Some(sender) = bundle_senders.iter().find(|sender| !sender.is_full())
+                    else {
                         break;
                     };
 
@@ -179,12 +202,16 @@ impl JssExecutor2 {
                 }
 
                 if last_metrics.elapsed().as_secs() > 1 {
-                    info!("mempool_size={} scheduled={}", bundles.len(), bundles_scheduled);
+                    info!(
+                        "mempool_size={} scheduled={}",
+                        bundles.len(),
+                        bundles_scheduled
+                    );
                     bundles_scheduled = 0;
                     last_metrics = std::time::Instant::now();
                 }
             }
-            
+
             info!("unscheduled={}", bundles.len());
         }
     }
@@ -206,7 +233,12 @@ impl JssExecutor2 {
             if !bank_start.should_working_bank_still_be_processing_txs() {
                 continue;
             }
-            Self::execute_commit_record_bundle(&bank_start.working_bank, &recorder, &mut committer, txns);
+            Self::execute_commit_record_bundle(
+                &bank_start.working_bank,
+                &recorder,
+                &mut committer,
+                txns,
+            );
         }
     }
 

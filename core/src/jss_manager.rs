@@ -24,7 +24,9 @@ use solana_runtime::{
 };
 use solana_sdk::signer::Signer;
 
-use crate::{jss_connection::JssConnection, jss_executor::JssExecutor, jss_executor_2::JssExecutor2};
+use crate::{
+    jss_connection::JssConnection, jss_executor::JssExecutor, jss_executor_2::JssExecutor2,
+};
 
 pub(crate) struct JssManager {
     threads: Vec<std::thread::JoinHandle<()>>,
@@ -62,14 +64,23 @@ impl JssManager {
 
                 while !exit_micro_block_execution_thread.load(std::sync::atomic::Ordering::Relaxed)
                 {
-                    let Some((micro_block, slot)) : Option<(MicroBlock, u64)> = micro_block_receiver.recv().ok() else {
+                    let Some((micro_block, slot)): Option<(MicroBlock, u64)> =
+                        micro_block_receiver.recv().ok()
+                    else {
                         continue;
                     };
-                    let Some(current_slot) = poh_recorder_micro_block_execution_thread.read().unwrap().working_slot() else {
+                    let Some(current_slot) = poh_recorder_micro_block_execution_thread
+                        .read()
+                        .unwrap()
+                        .working_slot()
+                    else {
                         continue;
                     };
                     if slot != current_slot {
-                        info!("Received micro block for slot={} but current slot is={}; skipping", slot, current_slot);
+                        info!(
+                            "Received micro block for slot={} but current slot is={}; skipping",
+                            slot, current_slot
+                        );
                         continue;
                     }
                     let poh = poh_recorder_micro_block_execution_thread.read().unwrap();
@@ -81,8 +92,7 @@ impl JssManager {
                         micro_block.bundles.len()
                     );
                     let start = Instant::now();
-                    executor
-                        .execute_and_commit_and_record_micro_block(micro_block);
+                    executor.execute_and_commit_and_record_micro_block(micro_block);
                     let duration = start.elapsed();
                     info!("Executed micro block in {}ms", duration.as_millis());
                 }

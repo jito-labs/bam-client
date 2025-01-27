@@ -9,7 +9,9 @@ use solana_ledger::blockstore_processor::TransactionStatusSender;
 use solana_measure::measure_us;
 
 use jito_protos::proto::jss_types::{MicroBlock, Packet};
-use solana_poh::poh_recorder::{BankStart, PohRecorder, RecordTransactionsSummary, TransactionRecorder};
+use solana_poh::poh_recorder::{
+    BankStart, PohRecorder, RecordTransactionsSummary, TransactionRecorder,
+};
 use solana_runtime::{
     bank::Bank, prioritization_fee_cache::PrioritizationFeeCache,
     vote_sender_types::ReplayVoteSender,
@@ -307,8 +309,11 @@ impl JssExecutor {
             if !response_receiver.is_empty() {
                 break;
             }
-            
-            if !context.bank_start.should_working_bank_still_be_processing_txs() {
+
+            if !context
+                .bank_start
+                .should_working_bank_still_be_processing_txs()
+            {
                 break;
             }
             let bank = context.bank_start.working_bank.as_ref();
@@ -392,8 +397,11 @@ impl JssExecutor {
         let Some(bank_start) = self.poh_recorder.read().unwrap().bank_start() else {
             return;
         };
-        let mut execution_context = MicroblockExecutionContext::new(bank_start.clone(), micro_block);
-        while bank_start.should_working_bank_still_be_processing_txs() && execution_context.keep_going() {
+        let mut execution_context =
+            MicroblockExecutionContext::new(bank_start.clone(), micro_block);
+        while bank_start.should_working_bank_still_be_processing_txs()
+            && execution_context.keep_going()
+        {
             Self::receive_finished_bundles(
                 &mut execution_context,
                 &self.workers.response_receiver,
