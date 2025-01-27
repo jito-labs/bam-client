@@ -43,7 +43,7 @@ impl JssExecutor2 {
 
         let mut bundle_senders = Vec::new();
         for _ in 0..WORKER_THREAD_COUNT {
-            let (sender, receiver) = crossbeam_channel::bounded(20);
+            let (sender, receiver) = crossbeam_channel::bounded(5);
             bundle_senders.push(sender);
             let poh_recorder = poh_recorder.clone();
             let committer = committer.clone();
@@ -131,10 +131,6 @@ impl JssExecutor2 {
         bundle_senders: Vec<crossbeam_channel::Sender<(BundleId, Vec<SanitizedTransaction>)>>,
         exit: Arc<AtomicBool>,
     ) {
-        let mut bundles = HashMap::default();
-        let mut prio_graph = prio_graph::PrioGraph::new(|id: &BundleId, _graph_node| *id);
-        let mut next_bundle_id: u64 = 0;
-
         let mut bundles_scheduled = 0;
         let mut last_metrics = std::time::Instant::now();
 
@@ -142,48 +138,54 @@ impl JssExecutor2 {
             let Some(bank_start) = poh_recorder.read().unwrap().bank_start() else {
                 continue;
             };
-            if bank_start.should_working_bank_still_be_processing_txs() {
+            if !bank_start.should_working_bank_still_be_processing_txs() {
                 continue;
             }
-            if let Ok(micro_block) = microblock_receiver.recv() {
-                let len = micro_block.bundles.len();
-                for bundle in micro_block.bundles {
-                    let transactions = Self::parse_transactions(&bank_start.working_bank, bundle.packets.iter());
-                    let id = next_bundle_id;
-                    let bundle_id = BundleId { id };
-                    next_bundle_id += 1;
-                    prio_graph.insert_transaction(bundle_id, transactions.iter().map(|tx| {
-                        Self::get_transaction_account_access(tx)
-                    }).flatten());
-                    bundles.insert(bundle_id, transactions);
+
+            let mut bundles = HashMap::default();
+            let mut prio_graph = prio_graph::PrioGraph::new(|id: &BundleId, _graph_node| *id);
+            let mut next_bundle_id: u64 = 0;
+
+            while bank_start.should_working_bank_still_be_processing_txs() {
+                if let Ok(micro_block) = microblock_receiver.recv() {
+                    let start = std::time::Instant::now();
+                    let len = micro_block.bundles.len();
+                    for bundle in micro_block.bundles {
+                        let transactions = Self::parse_transactions(&bank_start.working_bank, bundle.packets.iter());
+                        let id = next_bundle_id;
+                        let bundle_id = BundleId { id };
+                        next_bundle_id += 1;
+                        prio_graph.insert_transaction(bundle_id, transactions.iter().map(|tx| {
+                            Self::get_transaction_account_access(tx)
+                        }).flatten());
+                        bundles.insert(bundle_id, transactions);
+                    }
+                    info!("Received micro block with {} bundles; ingestion_time={}", len, start.elapsed().as_millis());
                 }
-                info!("Received micro block with {} bundles", len);
-            }
 
-            for _ in 0..100 {
-                // Get next bundle to process
-                let Some((bundle, _)) = prio_graph.pop_and_unblock() else {
-                    continue;
-                };
-
-                // Send bundle to random worker (fix this later)
+                // Fill queues with bundles
                 loop {
-                    let worker = bundle_senders.first().unwrap();
-                    if worker.is_full() {
-                        continue;
-                    }
-                    if worker.send((bundle, bundles.remove(&bundle).unwrap())).is_ok() {
-                        bundles_scheduled += 1;
+                    let Some(sender) = bundle_senders.iter().find(|sender| !sender.is_full()) else {
                         break;
+                    };
+
+                    let (bundle_id, txns) = match prio_graph.pop_and_unblock() {
+                        Some((bundle, _)) => (bundle, bundles.remove(&bundle).unwrap()),
+                        None => break,
+                    };
+                    if sender.send((bundle_id, txns)).is_ok() {
+                        bundles_scheduled += 1;
                     }
                 }
-            }
 
-            if last_metrics.elapsed().as_secs() > 1 {
-                info!("mempool_size={} scheduled={}", bundles.len(), bundles_scheduled);
-                bundles_scheduled = 0;
-                last_metrics = std::time::Instant::now();
+                if last_metrics.elapsed().as_secs() > 1 {
+                    info!("mempool_size={} scheduled={}", bundles.len(), bundles_scheduled);
+                    bundles_scheduled = 0;
+                    last_metrics = std::time::Instant::now();
+                }
             }
+            
+            info!("unscheduled={}", bundles.len());
         }
     }
 
@@ -201,7 +203,7 @@ impl JssExecutor2 {
             let Some(bank_start) = poh_recorder.read().unwrap().bank_start() else {
                 continue;
             };
-            if bank_start.should_working_bank_still_be_processing_txs() {
+            if !bank_start.should_working_bank_still_be_processing_txs() {
                 continue;
             }
             Self::execute_commit_record_bundle(&bank_start.working_bank, &recorder, &mut committer, txns);
