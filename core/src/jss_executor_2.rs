@@ -33,7 +33,7 @@ use crate::{
 };
 
 pub struct JssExecutor2 {
-    microblock_sender: crossbeam_channel::Sender<MicroBlock>,
+    microblock_sender: crossbeam_channel::Sender<Vec<Vec<SanitizedTransaction>>>,
     threads: Vec<std::thread::JoinHandle<()>>,
 }
 
@@ -140,12 +140,17 @@ impl JssExecutor2 {
         txns.into_iter().map(|x| x.unwrap()).collect_vec()
     }
 
-    pub fn execute_and_commit_and_record_micro_block(&mut self, micro_block: MicroBlock) -> bool {
-        self.microblock_sender.try_send(micro_block).is_ok()
+    pub fn execute_and_commit_and_record_micro_block(&mut self, bank: &Bank, micro_block: MicroBlock) -> bool {
+        let bundles = micro_block
+            .bundles
+            .iter()
+            .map(|bundle| Self::parse_transactions(bank, bundle.packets.iter()))
+            .collect_vec();
+        self.microblock_sender.try_send(bundles).is_ok()
     }
 
     fn spawn_management_thread(
-        microblock_receiver: crossbeam_channel::Receiver<MicroBlock>,
+        microblock_receiver: crossbeam_channel::Receiver<Vec<Vec<SanitizedTransaction>>>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         mut workers: Vec<Worker>,
         exit: Arc<AtomicBool>,
@@ -164,6 +169,8 @@ impl JssExecutor2 {
             let mut bundles = HashMap::default();
             let mut prio_graph = prio_graph::PrioGraph::new(|id: &BundleId, _graph_node| *id);
             let mut next_bundle_id: u64 = 0;
+            let mut microblock_count = 0;
+            let slot = bank_start.working_bank.slot();
 
             let mut schedule_next = |prio_graph: &mut prio_graph::PrioGraph<_, _, _, _>, bundles: &mut HashMap<_, _>, bundles_scheduled: &mut u64| {
                 for worker in workers.iter_mut().filter(|w| !w.is_full()) {
@@ -186,13 +193,10 @@ impl JssExecutor2 {
 
             while bank_start.should_working_bank_still_be_processing_txs() {
                 if let Ok(micro_block) = microblock_receiver.try_recv() {
+                    microblock_count += 1;
                     let start = std::time::Instant::now();
-                    let len = micro_block.bundles.len();
-                    for bundle in micro_block.bundles {
-                        let transactions = Self::parse_transactions(
-                            &bank_start.working_bank,
-                            bundle.packets.iter(),
-                        );
+                    let len = micro_block.len();
+                    for transactions in micro_block {
                         let id = next_bundle_id;
                         let bundle_id = BundleId { id };
                         next_bundle_id += 1;
@@ -230,7 +234,7 @@ impl JssExecutor2 {
                 worker.clear();
             }
 
-            info!("unscheduled={}", bundles.len());
+            info!("slot={} microblock_count={} unscheduled={}", slot, microblock_count, bundles.len());
         }
     }
 
@@ -284,7 +288,7 @@ impl JssExecutor2 {
             }
             let start = std::time::Instant::now();
             if txns.len() == 1 {
-                Self::execute_commit_record_transaction(
+                Self::execute_commit_record_transactions(
                     &current_bank_start.working_bank,
                     &recorder,
                     &mut transaction_commiter,
@@ -381,7 +385,7 @@ impl JssExecutor2 {
         true
     }
 
-    pub fn execute_commit_record_transaction(
+    pub fn execute_commit_record_transactions(
         bank: &Arc<Bank>,
         recorder: &TransactionRecorder,
         committer: &mut Committer,

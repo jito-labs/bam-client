@@ -92,8 +92,13 @@ impl JssManager {
                         micro_block.bundles.len()
                     );
                     let start = Instant::now();
-                    executor.execute_and_commit_and_record_micro_block(micro_block);
-                    let duration = start.elapsed();
+                    let Some(bank) = poh.bank_start() else {
+                        continue;
+                    };
+                    if !bank.should_working_bank_still_be_processing_txs() {
+                        continue;
+                    }
+                    executor.execute_and_commit_and_record_micro_block(&bank.working_bank, micro_block);
                 }
             })
             .unwrap();
@@ -177,8 +182,6 @@ impl JssManager {
                     &bank_start,
                     &micro_block_sender,
                 );
-            } else {
-                tokio::time::sleep(std::time::Duration::from_micros(500)).await;
             }
         }
 
