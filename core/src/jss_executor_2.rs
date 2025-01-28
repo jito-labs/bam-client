@@ -156,7 +156,6 @@ impl JssExecutor2 {
         exit: Arc<AtomicBool>,
     ) {
         let mut bundles_scheduled = 0;
-        let mut last_metrics = std::time::Instant::now();
 
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
             let Some(bank_start) = poh_recorder.read().unwrap().bank_start() else {
@@ -217,16 +216,6 @@ impl JssExecutor2 {
                     );
                 }
 
-                if last_metrics.elapsed().as_secs() > 1 {
-                    info!(
-                        "mempool_size={} scheduled={}",
-                        bundles.len(),
-                        bundles_scheduled
-                    );
-                    bundles_scheduled = 0;
-                    last_metrics = std::time::Instant::now();
-                }
-
                 schedule_next(&mut prio_graph, &mut bundles, &mut bundles_scheduled);
             }
 
@@ -234,7 +223,8 @@ impl JssExecutor2 {
                 worker.clear();
             }
 
-            info!("slot={} microblock_count={} unscheduled={}", slot, microblock_count, bundles.len());
+            info!("slot={} microblock_count={} scheduled={} unscheduled={}", slot, microblock_count, bundles_scheduled, bundles.len());
+            bundles_scheduled = 0;
         }
     }
 
@@ -248,44 +238,32 @@ impl JssExecutor2 {
         let recorder = poh_recorder.read().unwrap().new_recorder();
         let mut executing_time_us = 0;
         let mut overall_start = std::time::Instant::now();
+        let mut prev_slot = 0;
         let mut bank_start = None;
-        let mut empty_polls = 0;
-        let mut got_first_bundle = false;
-        let mut good_bank = false;
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
             if bank_start.is_none() {
                 bank_start = poh_recorder.read().unwrap().bank_start();
-                if bank_start.is_some() {
-                    overall_start = std::time::Instant::now();
-                    executing_time_us = 0;
-                }
             }
             let Some(current_bank_start) = bank_start.as_ref() else {
                 continue;
             };
-            if good_bank && !current_bank_start.should_working_bank_still_be_processing_txs() {
-                good_bank = false;
+            if !current_bank_start.should_working_bank_still_be_processing_txs() {
                 bank_start = None;
-                info!(
-                    "worker_time_us={} executing_time_us={} executing_percent={} empty_polls={}",
-                    overall_start.elapsed().as_micros(),
-                    executing_time_us,
-                    executing_time_us as f64 / overall_start.elapsed().as_micros() as f64,
-                    empty_polls
-                );
-                empty_polls = 0;
-                got_first_bundle = false;
                 continue;
+            }
+            if prev_slot != current_bank_start.working_bank.slot() {
+                info!(
+                    "slot={} percent_executing={:.2}%",
+                    current_bank_start.working_bank.slot(),
+                    executing_time_us as f64 / overall_start.elapsed().as_micros() as f64 * 100.0
+                );
+                executing_time_us = 0;
+                overall_start = std::time::Instant::now();
+                prev_slot = current_bank_start.working_bank.slot();
             }
             let Ok((_, txns)) = receiver.try_recv() else {
-                empty_polls += if bank_start.is_some() { 1 } else { 0 };
                 continue;
             };
-            good_bank = true;
-            if !got_first_bundle {
-                got_first_bundle = true;
-                empty_polls = 0;
-            }
             let start = std::time::Instant::now();
             if txns.len() == 1 {
                 Self::execute_commit_record_transactions(

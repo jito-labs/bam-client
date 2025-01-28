@@ -91,7 +91,6 @@ impl JssManager {
                         current_tick,
                         micro_block.bundles.len()
                     );
-                    let start = Instant::now();
                     let Some(bank) = poh.bank_start() else {
                         continue;
                     };
