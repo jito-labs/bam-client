@@ -1,17 +1,18 @@
 use std::{collections::{HashSet, VecDeque}, sync::{atomic::AtomicBool, Arc, RwLock}};
 
 use ahash::HashMap;
+use chrono::Duration;
 use itertools::Itertools;
 use jito_protos::proto::jss_types::{MicroBlock, Packet};
 use prio_graph::{AccessKind, TopLevelId};
 use rand::seq::IteratorRandom;
 use solana_bundle::bundle_execution::load_and_execute_bundle;
 use solana_entry::poh;
-use solana_ledger::blockstore_processor::TransactionStatusSender;
+use solana_ledger::{blockstore_processor::TransactionStatusSender, token_balances::collect_token_balances};
 use solana_measure::measure_us;
 use solana_poh::poh_recorder::{PohRecorder, RecordTransactionsSummary, TransactionRecorder};
 use solana_runtime::{
-    bank::Bank, prioritization_fee_cache::PrioritizationFeeCache,
+    bank::{Bank, ExecutedTransactionCounts}, prioritization_fee_cache::PrioritizationFeeCache,
     vote_sender_types::ReplayVoteSender,
 };
 use solana_sdk::{
@@ -21,11 +22,12 @@ use solana_sdk::{
     pubkey::Pubkey,
     transaction::SanitizedTransaction,
 };
+use solana_svm::transaction_processor::{ExecutionRecordingConfig, TransactionProcessingConfig};
+use solana_transaction_status::PreBalanceInfo;
 
 use crate::{
     banking_stage::{
-        immutable_deserialized_packet::ImmutableDeserializedPacket,
-        leader_slot_timing_metrics::LeaderExecuteAndCommitTimings,
+        committer::Committer, immutable_deserialized_packet::ImmutableDeserializedPacket, leader_slot_timing_metrics::LeaderExecuteAndCommitTimings
     },
     bundle_stage::{self, MAX_BUNDLE_RETRY_DURATION},
 };
@@ -35,7 +37,7 @@ pub struct JssExecutor2 {
     threads: Vec<std::thread::JoinHandle<()>>,
 }
 
-const WORKER_THREAD_COUNT: usize = 4;
+const WORKER_THREAD_COUNT: usize = 1;
 
 impl JssExecutor2 {
     pub fn new(
@@ -45,7 +47,12 @@ impl JssExecutor2 {
         prioritization_fee_cache: Arc<PrioritizationFeeCache>,
         exit: Arc<AtomicBool>,
     ) -> Self {
-        let committer = bundle_stage::committer::Committer::new(
+        let bundle_committer = bundle_stage::committer::Committer::new(
+            transaction_status_sender.clone(),
+            replay_vote_sender.clone(),
+            prioritization_fee_cache.clone(),
+        );
+        let transaction_commiter = Committer::new(
             transaction_status_sender,
             replay_vote_sender,
             prioritization_fee_cache,
@@ -57,13 +64,14 @@ impl JssExecutor2 {
 
         let mut workers = Vec::new();
         for _ in 0..WORKER_THREAD_COUNT {
-            let (sender, receiver) = crossbeam_channel::bounded(50);
+            let (sender, receiver) = crossbeam_channel::bounded(1);
             workers.push(Worker::new(sender));
             let poh_recorder = poh_recorder.clone();
-            let committer = committer.clone();
+            let bundle_committer = bundle_committer.clone();
+            let transaction_commiter = transaction_commiter.clone();
             let exit = exit.clone();
             threads.push(std::thread::spawn(move || {
-                Self::spawn_worker(poh_recorder, committer.clone(), receiver, exit);
+                Self::spawn_worker(poh_recorder, bundle_committer.clone(), transaction_commiter.clone(), receiver, exit);
             }));
         }
 
@@ -157,6 +165,25 @@ impl JssExecutor2 {
             let mut prio_graph = prio_graph::PrioGraph::new(|id: &BundleId, _graph_node| *id);
             let mut next_bundle_id: u64 = 0;
 
+            let mut schedule_next = |prio_graph: &mut prio_graph::PrioGraph<_, _, _, _>, bundles: &mut HashMap<_, _>, bundles_scheduled: &mut u64| {
+                for worker in workers.iter_mut().filter(|w| !w.is_full()) {
+                    for bundle_id in worker.get_unblocked() {
+                        prio_graph.unblock(&bundle_id);
+                    }
+
+                    let (bundle_id, txns) = match prio_graph.pop() {
+                        Some(bundle) => (bundle, bundles.remove(&bundle).unwrap()),
+                        None => {
+                            return;
+                        }
+                    };
+
+                    if worker.send(bundle_id, txns) {
+                        *bundles_scheduled += 1;
+                    }
+                }
+            };
+
             while bank_start.should_working_bank_still_be_processing_txs() {
                 if let Ok(micro_block) = microblock_receiver.try_recv() {
                     let start = std::time::Instant::now();
@@ -177,6 +204,7 @@ impl JssExecutor2 {
                                 .flatten(),
                         );
                         bundles.insert(bundle_id, transactions);
+                        schedule_next(&mut prio_graph, &mut bundles, &mut bundles_scheduled);
                     }
                     info!(
                         "Received micro block with {} bundles; ingestion_time={}",
@@ -195,26 +223,7 @@ impl JssExecutor2 {
                     last_metrics = std::time::Instant::now();
                 }
 
-                // Fill queues with bundles
-                let Some(worker) = workers.iter_mut().find(|w| !w.is_full())
-                else {
-                    info!("All workers are full");
-                    continue;
-                };
-
-                for bundle_id in worker.get_unblocked() {
-                    prio_graph.unblock(&bundle_id);
-                }
-
-                let (bundle_id, txns) = match prio_graph.pop() {
-                    Some(bundle) => (bundle, bundles.remove(&bundle).unwrap()),
-                    None => {
-                        continue;
-                    }
-                };
-                if worker.send(bundle_id, txns) {
-                    bundles_scheduled += 1;
-                }
+                schedule_next(&mut prio_graph, &mut bundles, &mut bundles_scheduled);
             }
 
             for worker in workers.iter_mut() {
@@ -227,27 +236,69 @@ impl JssExecutor2 {
 
     fn spawn_worker(
         poh_recorder: Arc<RwLock<PohRecorder>>,
-        mut committer: bundle_stage::committer::Committer,
+        mut bundle_committer: bundle_stage::committer::Committer,
+        mut transaction_commiter: Committer,
         receiver: crossbeam_channel::Receiver<(BundleId, Vec<SanitizedTransaction>)>,
         exit: Arc<AtomicBool>,
     ) {
         let recorder = poh_recorder.read().unwrap().new_recorder();
+        let mut executing_time_us = 0;
+        let mut overall_start = std::time::Instant::now();
+        let mut bank_start = None;
+        let mut empty_polls = 0;
+        let mut got_first_bundle = false;
+        let mut good_bank = false;
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
-            let Ok((_, txns)) = receiver.try_recv() else {
+            if bank_start.is_none() {
+                bank_start = poh_recorder.read().unwrap().bank_start();
+                if bank_start.is_some() {
+                    overall_start = std::time::Instant::now();
+                    executing_time_us = 0;
+                }
+            }
+            let Some(current_bank_start) = bank_start.as_ref() else {
                 continue;
             };
-            let Some(bank_start) = poh_recorder.read().unwrap().bank_start() else {
-                continue;
-            };
-            if !bank_start.should_working_bank_still_be_processing_txs() {
+            if good_bank && !current_bank_start.should_working_bank_still_be_processing_txs() {
+                good_bank = false;
+                bank_start = None;
+                info!(
+                    "worker_time_us={} executing_time_us={} executing_percent={} empty_polls={}",
+                    overall_start.elapsed().as_micros(),
+                    executing_time_us,
+                    executing_time_us as f64 / overall_start.elapsed().as_micros() as f64,
+                    empty_polls
+                );
+                empty_polls = 0;
+                got_first_bundle = false;
                 continue;
             }
-            Self::execute_commit_record_bundle(
-                &bank_start.working_bank,
-                &recorder,
-                &mut committer,
-                txns,
-            );
+            let Ok((_, txns)) = receiver.try_recv() else {
+                empty_polls += if bank_start.is_some() { 1 } else { 0 };
+                continue;
+            };
+            good_bank = true;
+            if !got_first_bundle {
+                got_first_bundle = true;
+                empty_polls = 0;
+            }
+            let start = std::time::Instant::now();
+            if txns.len() == 1 {
+                Self::execute_commit_record_transaction(
+                    &current_bank_start.working_bank,
+                    &recorder,
+                    &mut transaction_commiter,
+                    txns,
+                );
+            } else {
+                Self::execute_commit_record_bundle(
+                    &current_bank_start.working_bank,
+                    &recorder,
+                    &mut bundle_committer,
+                    txns,
+                );
+            }
+            executing_time_us += start.elapsed().as_micros();
         }
     }
 
@@ -326,6 +377,96 @@ impl JssExecutor2 {
             &bank,
             &mut execute_and_commit_timings,
         );
+
+        true
+    }
+
+    pub fn execute_commit_record_transaction(
+        bank: &Arc<Bank>,
+        recorder: &TransactionRecorder,
+        committer: &mut Committer,
+        transactions: Vec<SanitizedTransaction>,
+    ) -> bool {
+        assert_eq!(transactions.len(), 1);
+        let batch = bank.prepare_sanitized_batch_with_results(
+            &transactions,
+            std::iter::once(None).map(|_: Option<()>| Ok(())),
+            None,
+            None,
+        );
+
+        let mut pre_balance_info = PreBalanceInfo::default();
+        let transaction_status_sender_enabled = committer.transaction_status_sender_enabled();
+        let (_, collect_balances_us) = measure_us!({
+            // If the extra meta-data services are enabled for RPC, collect the
+            // pre-balances for native and token programs.
+            if transaction_status_sender_enabled {
+                pre_balance_info.native = bank.collect_balances(&batch);
+                pre_balance_info.token =
+                    collect_token_balances(bank, &batch, &mut pre_balance_info.mint_decimals, None)
+            }
+        });
+
+        let mut execute_and_commit_timings = LeaderExecuteAndCommitTimings::default();
+        let mut results = bank.load_and_execute_transactions(
+            &batch,
+            MAX_PROCESSING_AGE,
+            &mut execute_and_commit_timings.execute_timings,
+            TransactionProcessingConfig {
+                account_overrides: None,
+                check_program_modification_slot: bank.check_program_modification_slot(),
+                compute_budget: bank.compute_budget(),
+                log_messages_bytes_limit: None,
+                limit_to_load_programs: true,
+                recording_config: ExecutionRecordingConfig::new_single_setting(
+                    false
+                ),
+                transaction_account_lock_limit: Some(bank.get_transaction_account_lock_limit()),
+            },
+        );
+        if results.executed_transactions_count == 0 {
+            return false;
+        }
+
+        let _freeze_lock = bank.freeze_lock();
+        let (last_blockhash, lamports_per_signature) = bank.last_blockhash_and_lamports_per_signature();
+
+
+        let (executed_transactions, execution_results_to_transactions_us) =
+            measure_us!(results.execution_results
+                .iter()
+                .zip(batch.sanitized_transactions())
+                .filter_map(|(execution_result, tx)| {
+                    if execution_result.was_executed() {
+                        Some(tx.to_versioned_transaction())
+                    } else {
+                        None
+                    }
+                })
+                .collect_vec());
+        let RecordTransactionsSummary {
+            result: record_transactions_result,
+            record_transactions_timings: _,
+            starting_transaction_index,
+        } = recorder.record_transactions(bank.slot(), vec![executed_transactions]);
+        if record_transactions_result.is_err() {
+            return false;
+        }
+
+        committer.commit_transactions(
+            &batch,
+            &mut results.loaded_transactions,
+            results.execution_results,
+            last_blockhash,
+            lamports_per_signature,
+            starting_transaction_index,
+            bank,
+            &mut pre_balance_info,
+            &mut execute_and_commit_timings,
+            results.signature_count,
+            results.executed_transactions_count,
+            results.executed_non_vote_transactions_count,
+            results.executed_with_successful_result_count);
 
         true
     }

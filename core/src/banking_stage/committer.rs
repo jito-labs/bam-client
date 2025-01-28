@@ -50,7 +50,7 @@ impl Committer {
         }
     }
 
-    pub(super) fn transaction_status_sender_enabled(&self) -> bool {
+    pub fn transaction_status_sender_enabled(&self) -> bool {
         self.transaction_status_sender.is_some()
     }
 
