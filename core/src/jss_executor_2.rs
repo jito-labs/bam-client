@@ -379,15 +379,13 @@ impl JssExecutor2 {
 
         let mut pre_balance_info = PreBalanceInfo::default();
         let transaction_status_sender_enabled = committer.transaction_status_sender_enabled();
-        let (_, collect_balances_us) = measure_us!({
-            // If the extra meta-data services are enabled for RPC, collect the
-            // pre-balances for native and token programs.
-            if transaction_status_sender_enabled {
-                pre_balance_info.native = bank.collect_balances(&batch);
-                pre_balance_info.token =
-                    collect_token_balances(bank, &batch, &mut pre_balance_info.mint_decimals, None)
-            }
-        });
+        // If the extra meta-data services are enabled for RPC, collect the
+        // pre-balances for native and token programs.
+        if transaction_status_sender_enabled {
+            pre_balance_info.native = bank.collect_balances(&batch);
+            pre_balance_info.token =
+                collect_token_balances(bank, &batch, &mut pre_balance_info.mint_decimals, None)
+        }
 
         let mut execute_and_commit_timings = LeaderExecuteAndCommitTimings::default();
         let mut results = bank.load_and_execute_transactions(
@@ -401,7 +399,7 @@ impl JssExecutor2 {
                 log_messages_bytes_limit: None,
                 limit_to_load_programs: true,
                 recording_config: ExecutionRecordingConfig::new_single_setting(
-                    false
+                    transaction_status_sender_enabled
                 ),
                 transaction_account_lock_limit: Some(bank.get_transaction_account_lock_limit()),
             },
@@ -454,7 +452,7 @@ impl JssExecutor2 {
     }
 }
 
-#[derive(Hash, Eq, PartialEq, Clone, Copy, Ord, PartialOrd)]
+#[derive(Hash, Eq, PartialEq, Clone, Copy)]
 struct BundleId {
     id: u64,
 }
@@ -462,6 +460,18 @@ struct BundleId {
 impl TopLevelId<Self> for BundleId {
     fn id(&self) -> Self {
         *self
+    }
+}
+
+impl Ord for BundleId {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.id.cmp(&other.id).reverse()
+    }
+}
+
+impl PartialOrd for BundleId {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 
