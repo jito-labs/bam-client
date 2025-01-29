@@ -97,7 +97,7 @@ impl JssManager {
                     if !bank.should_working_bank_still_be_processing_txs() {
                         continue;
                     }
-                    executor.execute_and_commit_and_record_micro_block(&bank.working_bank, micro_block);
+                    executor.schedule_microblock(&bank.working_bank, micro_block);
                 }
             })
             .unwrap();
