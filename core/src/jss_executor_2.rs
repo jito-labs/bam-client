@@ -48,10 +48,9 @@ pub struct JssExecutor2 {
     threads: Vec<std::thread::JoinHandle<()>>,
 }
 
-const WORKER_THREAD_COUNT: usize = 1;
-
 impl JssExecutor2 {
     pub fn new(
+        worker_thread_count: usize,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         replay_vote_sender: ReplayVoteSender,
         transaction_status_sender: Option<TransactionStatusSender>,
@@ -73,27 +72,37 @@ impl JssExecutor2 {
         let mut threads = Vec::new();
 
         let mut workers = Vec::new();
-        for _ in 0..WORKER_THREAD_COUNT {
+        for id in 0..worker_thread_count {
             let (sender, receiver) = crossbeam_channel::bounded(1);
             workers.push(Worker::new(sender));
             let poh_recorder = poh_recorder.clone();
             let bundle_committer = bundle_committer.clone();
             let transaction_commiter = transaction_commiter.clone();
             let exit = exit.clone();
-            threads.push(std::thread::spawn(move || {
-                Self::spawn_worker(
-                    poh_recorder,
-                    bundle_committer.clone(),
-                    transaction_commiter.clone(),
-                    receiver,
-                    exit,
-                );
-            }));
+            threads.push(
+                std::thread::Builder::new()
+                    .name(format!("jss_executor_worker_{}", id))
+                    .spawn(move || {
+                        Self::spawn_worker(
+                            poh_recorder,
+                            bundle_committer.clone(),
+                            transaction_commiter.clone(),
+                            receiver,
+                            exit,
+                        );
+                    })
+                    .unwrap(),
+            );
         }
 
-        threads.push(std::thread::spawn(|| {
-            Self::spawn_management_thread(microblock_receiver, poh_recorder, workers, exit);
-        }));
+        threads.push(
+            std::thread::Builder::new()
+                .name("jss_executor_manager".to_string())
+                .spawn(|| {
+                    Self::spawn_management_thread(microblock_receiver, poh_recorder, workers, exit);
+                })
+                .unwrap(),
+        );
 
         Self {
             microblock_sender,
@@ -168,10 +177,12 @@ impl JssExecutor2 {
             .bundles
             .iter()
             .map(|bundle| Self::parse_transactions(bank, bundle.packets.iter()))
+            .filter(|txns| !txns.is_empty())
             .collect_vec();
         self.microblock_sender.try_send(bundles).is_ok()
     }
 
+    /// Loop responsible for scheduling transactions to workers
     fn spawn_management_thread(
         microblock_receiver: crossbeam_channel::Receiver<Vec<Vec<SanitizedTransaction>>>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
@@ -193,7 +204,7 @@ impl JssExecutor2 {
             let mut microblock_count = 0;
 
             while bank_start.should_working_bank_still_be_processing_txs() {
-                Self::ingest_new_microblock(
+                Self::maybe_ingest_new_microblock(
                     &microblock_receiver,
                     &mut prio_graph,
                     &mut microblock_count,
@@ -225,7 +236,10 @@ impl JssExecutor2 {
         }
     }
 
-    fn ingest_new_microblock<
+    /// Ingests new micro-blocks and inserts them into the prio-graph.
+    /// If a worker is available between incoming transactions, it schedules the next batch
+    /// so that no workers has to wait.
+    fn maybe_ingest_new_microblock<
         C: std::hash::Hash + Eq + Clone + TopLevelId<BundleId> + Copy,
         D: Fn(&BundleId, &GraphNode<BundleId>) -> C,
     >(
@@ -254,6 +268,8 @@ impl JssExecutor2 {
         }
     }
 
+    /// Schedules the next batch of transactions to workers, by checking if any worker is available.
+    /// If a worker is available, it pops the next bundle from the prio-graph and sends it to the worker.
     fn schedule_next_batch<
         C: std::hash::Hash + Eq + Clone + TopLevelId<BundleId> + Copy,
         D: Fn(&BundleId, &GraphNode<BundleId>) -> C,
@@ -299,6 +315,7 @@ impl JssExecutor2 {
             })
     }
 
+    /// Loop responsible for executing transactions and bundles
     fn spawn_worker(
         poh_recorder: Arc<RwLock<PohRecorder>>,
         mut bundle_committer: bundle_stage::committer::Committer,
@@ -307,9 +324,6 @@ impl JssExecutor2 {
         exit: Arc<AtomicBool>,
     ) {
         let recorder = poh_recorder.read().unwrap().new_recorder();
-        let mut executing_time_us = 0;
-        let mut overall_start = std::time::Instant::now();
-        let mut prev_slot = 0;
         let mut bank_start = None;
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
             if bank_start.is_none() {
@@ -322,20 +336,9 @@ impl JssExecutor2 {
                 bank_start = None;
                 continue;
             }
-            if prev_slot != current_bank_start.working_bank.slot() {
-                info!(
-                    "slot={} percent_executing={:.2}%",
-                    current_bank_start.working_bank.slot(),
-                    executing_time_us as f64 / overall_start.elapsed().as_micros() as f64 * 100.0
-                );
-                executing_time_us = 0;
-                overall_start = std::time::Instant::now();
-                prev_slot = current_bank_start.working_bank.slot();
-            }
             let Ok((_, txns)) = receiver.try_recv() else {
                 continue;
             };
-            let start = std::time::Instant::now();
             Self::execute_record_commit(
                 &current_bank_start.working_bank,
                 &recorder,
@@ -343,10 +346,11 @@ impl JssExecutor2 {
                 &mut transaction_commiter,
                 txns,
             );
-            executing_time_us += start.elapsed().as_micros();
         }
     }
 
+    /// Executes and records transactions or bundles; using the
+    /// length of the transactions to determine which branch to take
     pub fn execute_record_commit(
         bank: &Arc<Bank>,
         recorder: &TransactionRecorder,
@@ -362,20 +366,21 @@ impl JssExecutor2 {
                 transactions,
             )
         } else {
+            // TODO: properly handle jito tips
             Self::execute_commit_record_bundle(bank, recorder, bundle_committer, transactions)
         }
     }
 
-    pub fn execute_commit_record_bundle(
+    fn execute_commit_record_bundle(
         bank: &Arc<Bank>,
         recorder: &TransactionRecorder,
         committer: &mut bundle_stage::committer::Committer,
-        txns: Vec<SanitizedTransaction>,
+        transactions: Vec<SanitizedTransaction>,
     ) -> bool {
-        let len = txns.len();
-        let bundle_id = derive_bundle_id_from_sanitized_transactions(&txns);
+        let len = transactions.len();
+        let bundle_id = derive_bundle_id_from_sanitized_transactions(&transactions);
         let sanitized_bundle = SanitizedBundle {
-            transactions: txns,
+            transactions,
             bundle_id: bundle_id.clone(),
         };
 
@@ -427,13 +432,14 @@ impl JssExecutor2 {
         true
     }
 
-    pub fn execute_commit_record_transactions(
+    fn execute_commit_record_transactions(
         bank: &Arc<Bank>,
         recorder: &TransactionRecorder,
         committer: &mut banking_stage::committer::Committer,
         transactions: Vec<SanitizedTransaction>,
     ) -> bool {
         assert_eq!(transactions.len(), 1);
+
         let batch = bank.prepare_sanitized_batch_with_results(
             &transactions,
             std::iter::once(None).map(|_: Option<()>| Ok(())),
@@ -443,8 +449,6 @@ impl JssExecutor2 {
 
         let mut pre_balance_info = PreBalanceInfo::default();
         let transaction_status_sender_enabled = committer.transaction_status_sender_enabled();
-        // If the extra meta-data services are enabled for RPC, collect the
-        // pre-balances for native and token programs.
         if transaction_status_sender_enabled {
             pre_balance_info.native = bank.collect_balances(&batch);
             pre_balance_info.token =
@@ -476,7 +480,7 @@ impl JssExecutor2 {
         let (last_blockhash, lamports_per_signature) =
             bank.last_blockhash_and_lamports_per_signature();
 
-        let (executed_transactions, execution_results_to_transactions_us) = measure_us!(results
+        let executed_transactions = results
             .execution_results
             .iter()
             .zip(batch.sanitized_transactions())
@@ -487,7 +491,7 @@ impl JssExecutor2 {
                     None
                 }
             })
-            .collect_vec());
+            .collect_vec();
         let RecordTransactionsSummary {
             result: record_transactions_result,
             record_transactions_timings: _,

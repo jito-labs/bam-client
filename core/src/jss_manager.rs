@@ -52,7 +52,9 @@ impl JssManager {
         let micro_block_execution_thread = Builder::new()
             .name("micro_block_execution_thread".to_string())
             .spawn(move || {
+                const WORKER_THREAD_COUNT: usize = 4;
                 let mut executor = JssExecutor2::new(
+                    WORKER_THREAD_COUNT,
                     poh_recorder_micro_block_execution_thread.clone(),
                     replay_vote_sender,
                     transaction_status_sender,
