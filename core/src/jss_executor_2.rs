@@ -8,7 +8,9 @@
 
 use std::{
     collections::VecDeque,
-    sync::{atomic::AtomicBool, Arc, RwLock}, time::Duration,
+    sync::{atomic::AtomicBool, Arc, RwLock},
+    thread,
+    time::Duration,
 };
 
 use ahash::HashMap;
@@ -69,31 +71,14 @@ impl JssExecutor2 {
         );
 
         let (microblock_sender, microblock_receiver) = crossbeam_channel::bounded(50);
-        let mut threads = Vec::new();
 
-        let mut workers = Vec::new();
-        for id in 0..worker_thread_count {
-            let (sender, receiver) = crossbeam_channel::bounded(1);
-            workers.push(Worker::new(sender));
-            let poh_recorder = poh_recorder.clone();
-            let bundle_committer = bundle_committer.clone();
-            let transaction_commiter = transaction_commiter.clone();
-            let exit = exit.clone();
-            threads.push(
-                std::thread::Builder::new()
-                    .name(format!("jss_executor_worker_{}", id))
-                    .spawn(move || {
-                        Self::spawn_worker(
-                            poh_recorder,
-                            bundle_committer.clone(),
-                            transaction_commiter.clone(),
-                            receiver,
-                            exit,
-                        );
-                    })
-                    .unwrap(),
-            );
-        }
+        let (mut threads, workers) = Self::spawn_workers(
+            worker_thread_count,
+            poh_recorder.clone(),
+            bundle_committer.clone(),
+            transaction_commiter.clone(),
+            exit.clone(),
+        );
 
         threads.push(
             std::thread::Builder::new()
@@ -145,7 +130,8 @@ impl JssExecutor2 {
                 continue;
             }
 
-            let mut prio_graph = prio_graph::PrioGraph::new(|id: &BundleExecutionId, _graph_node| *id);
+            let mut prio_graph =
+                prio_graph::PrioGraph::new(|id: &BundleExecutionId, _graph_node| *id);
             let mut microblock_count = 0;
 
             while bank_start.should_working_bank_still_be_processing_txs() {
@@ -237,6 +223,40 @@ impl JssExecutor2 {
                 *bundles_scheduled += 1;
             }
         }
+    }
+
+    fn spawn_workers(
+        worker_thread_count: usize,
+        poh_recorder: Arc<RwLock<PohRecorder>>,
+        bundle_committer: bundle_stage::committer::Committer,
+        transaction_commiter: banking_stage::committer::Committer,
+        exit: Arc<AtomicBool>,
+    ) -> (Vec<std::thread::JoinHandle<()>>, Vec<Worker>) {
+        let mut threads = Vec::new();
+        let mut workers = Vec::new();
+        for id in 0..worker_thread_count {
+            let (sender, receiver) = crossbeam_channel::bounded(1);
+            workers.push(Worker::new(sender));
+            let poh_recorder = poh_recorder.clone();
+            let bundle_committer = bundle_committer.clone();
+            let transaction_commiter = transaction_commiter.clone();
+            let exit = exit.clone();
+            threads.push(
+                std::thread::Builder::new()
+                    .name(format!("jss_executor_worker_{}", id))
+                    .spawn(move || {
+                        Self::spawn_worker(
+                            poh_recorder,
+                            bundle_committer.clone(),
+                            transaction_commiter.clone(),
+                            receiver,
+                            exit,
+                        );
+                    })
+                    .unwrap(),
+            );
+        }
+        (threads, workers)
     }
 
     /// Loop responsible for executing transactions and bundles
@@ -527,7 +547,6 @@ impl JssExecutor2 {
     }
 }
 
-
 /// Used to determine the priority of the bundle for execution.
 /// Since microblocks are already sorted, FIFO assignment of ids
 /// can be used to determine priority.
@@ -561,7 +580,9 @@ struct Worker {
 }
 
 impl Worker {
-    fn new(sender: crossbeam_channel::Sender<(BundleExecutionId, Vec<SanitizedTransaction>)>) -> Self {
+    fn new(
+        sender: crossbeam_channel::Sender<(BundleExecutionId, Vec<SanitizedTransaction>)>,
+    ) -> Self {
         Self {
             sender,
             queue: VecDeque::new(),
