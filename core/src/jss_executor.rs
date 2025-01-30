@@ -15,7 +15,7 @@ use std::{
 use itertools::Itertools;
 use jito_protos::proto::jss_types::{MicroBlock, Packet};
 use prio_graph::{AccessKind, GraphNode, TopLevelId};
-use solana_bundle::bundle_execution::load_and_execute_bundle;
+use solana_bundle::{bundle_execution::load_and_execute_bundle, derive_bundle_id_from_sanitized_transactions, SanitizedBundle};
 use solana_ledger::{
     blockstore_processor::TransactionStatusSender, token_balances::collect_token_balances,
 };
@@ -28,13 +28,12 @@ use solana_runtime::{
     vote_sender_types::ReplayVoteSender,
 };
 use solana_sdk::{
-    bundle::{derive_bundle_id_from_sanitized_transactions, SanitizedBundle},
     clock::MAX_PROCESSING_AGE,
     packet::PacketFlags,
     pubkey::Pubkey,
     transaction::SanitizedTransaction,
 };
-use solana_svm::transaction_processor::{ExecutionRecordingConfig, TransactionProcessingConfig};
+use solana_svm::{transaction_error_metrics::TransactionErrorMetrics, transaction_processing_result::TransactionProcessingResultExtensions, transaction_processor::{ExecutionRecordingConfig, TransactionProcessingConfig}};
 use solana_transaction_status::PreBalanceInfo;
 
 use crate::{
@@ -396,8 +395,6 @@ impl JssExecutor {
         let mut execute_and_commit_timings = LeaderExecuteAndCommitTimings::default();
         committer.commit_bundle(
             &mut bundle_execution_results,
-            last_blockhash,
-            lamports_per_signature,
             starting_transaction_index,
             &bank,
             &mut execute_and_commit_timings,
@@ -434,6 +431,7 @@ impl JssExecutor {
             &batch,
             MAX_PROCESSING_AGE,
             &mut execute_and_commit_timings.execute_timings,
+            &mut TransactionErrorMetrics::default(),
             TransactionProcessingConfig {
                 account_overrides: None,
                 check_program_modification_slot: bank.check_program_modification_slot(),
@@ -446,7 +444,7 @@ impl JssExecutor {
                 transaction_account_lock_limit: Some(bank.get_transaction_account_lock_limit()),
             },
         );
-        if results.executed_transactions_count == 0 {
+        if results.processed_counts.processed_transactions_count == 0 {
             return false;
         }
 
@@ -454,12 +452,12 @@ impl JssExecutor {
         let (last_blockhash, lamports_per_signature) =
             bank.last_blockhash_and_lamports_per_signature();
 
-        let executed_transactions = results
-            .execution_results
+        let processed_transactions = results
+            .processing_results
             .iter()
             .zip(batch.sanitized_transactions())
             .filter_map(|(execution_result, tx)| {
-                if execution_result.was_executed() {
+                if execution_result.was_processed() {
                     Some(tx.to_versioned_transaction())
                 } else {
                     None
@@ -470,27 +468,19 @@ impl JssExecutor {
             result: record_transactions_result,
             record_transactions_timings: _,
             starting_transaction_index,
-        } = recorder.record_transactions(bank.slot(), vec![executed_transactions]);
+        } = recorder.record_transactions(bank.slot(), vec![processed_transactions]);
         if record_transactions_result.is_err() {
             return false;
         }
 
         committer.commit_transactions(
             &batch,
-            &mut results.loaded_transactions,
-            results.execution_results,
-            last_blockhash,
-            lamports_per_signature,
+            results.processing_results,
             starting_transaction_index,
-            bank,
+            &bank,
             &mut pre_balance_info,
             &mut execute_and_commit_timings,
-            results.signature_count,
-            results.executed_transactions_count,
-            results.executed_non_vote_transactions_count,
-            results.executed_with_successful_result_count,
-        );
-
+            &results.processed_counts);
         true
     }
 
@@ -546,7 +536,7 @@ impl JssExecutor {
         if txns.iter().any(Option::is_none) {
             return vec![];
         }
-        txns.into_iter().map(|x| x.unwrap()).collect_vec()
+        txns.into_iter().map(|x| x.unwrap().0).collect_vec()
     }
 
     /// Gets accessed accounts (resources) for use in `PrioGraph`.

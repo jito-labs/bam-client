@@ -1194,7 +1194,7 @@ version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6362ed55def622cddc70a4746a68554d7b687713770de539e59a739b249f8ed"
 dependencies = [
- "borsh-derive 1.5.3",
+ "borsh-derive 1.5.1",
  "cfg_aliases 0.2.1",
 ]
 
@@ -9303,48 +9303,6 @@ dependencies = [
  "solana-frozen-abi-macro",
  "solana-sanitize",
  "solana-serde-varint",
-]
-
-[[package]]
-name = "solana-vortexor"
-version = "2.2.0"
-dependencies = [
- "assert_matches",
- "async-channel",
- "bytes",
- "clap 2.33.3",
- "crossbeam-channel",
- "dashmap",
- "futures 0.3.31",
- "futures-util",
- "governor",
- "histogram",
- "indexmap 2.7.0",
- "itertools 0.12.1",
- "libc",
- "log",
- "nix 0.28.0",
- "pem",
- "percentage",
- "quinn",
- "quinn-proto",
- "rand 0.8.5",
- "rustls 0.23.20",
- "smallvec",
- "socket2 0.5.8",
- "solana-clap-utils",
- "solana-logger",
- "solana-measure",
- "solana-metrics",
- "solana-net-utils",
- "solana-perf",
- "solana-sdk",
- "solana-streamer",
- "solana-transaction-metrics-tracker",
- "solana-version",
- "thiserror 2.0.9",
- "tokio",
- "x509-parser",
 ]
 
 [[package]]
