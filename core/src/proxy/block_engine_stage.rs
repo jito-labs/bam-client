@@ -100,6 +100,7 @@ impl BlockEngineStage {
         banking_packet_sender: BankingPacketSender,
         exit: Arc<AtomicBool>,
         block_builder_fee_info: &Arc<Mutex<BlockBuilderFeeInfo>>,
+        jss_enabled: Arc<AtomicBool>,
     ) -> Self {
         let block_builder_fee_info = block_builder_fee_info.clone();
 
@@ -118,6 +119,7 @@ impl BlockEngineStage {
                     banking_packet_sender,
                     exit,
                     block_builder_fee_info,
+                    jss_enabled,
                 ));
             })
             .unwrap();
@@ -143,6 +145,7 @@ impl BlockEngineStage {
         banking_packet_sender: BankingPacketSender,
         exit: Arc<AtomicBool>,
         block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
+        jss_enabled: Arc<AtomicBool>,
     ) {
         const CONNECTION_TIMEOUT: Duration = Duration::from_secs(CONNECTION_TIMEOUT_S);
         const CONNECTION_BACKOFF: Duration = Duration::from_secs(CONNECTION_BACKOFF_S);
@@ -169,6 +172,7 @@ impl BlockEngineStage {
                 &exit,
                 &block_builder_fee_info,
                 &CONNECTION_TIMEOUT,
+                &jss_enabled,
             )
             .await
             {
@@ -202,6 +206,7 @@ impl BlockEngineStage {
         exit: &Arc<AtomicBool>,
         block_builder_fee_info: &Arc<Mutex<BlockBuilderFeeInfo>>,
         connection_timeout: &Duration,
+        jss_enabled: &Arc<AtomicBool>,
     ) -> crate::proxy::Result<()> {
         // Get a copy of configs here in case they have changed at runtime
         let keypair = cluster_info.keypair().clone();
@@ -283,6 +288,7 @@ impl BlockEngineStage {
             connection_timeout,
             keypair,
             cluster_info,
+            jss_enabled,
         )
         .await
     }
@@ -303,6 +309,7 @@ impl BlockEngineStage {
         connection_timeout: &Duration,
         keypair: Arc<Keypair>,
         cluster_info: &Arc<ClusterInfo>,
+        jss_enabled: &Arc<AtomicBool>,
     ) -> crate::proxy::Result<()> {
         let subscribe_packets_stream = timeout(
             *connection_timeout,
@@ -360,6 +367,7 @@ impl BlockEngineStage {
             keypair,
             cluster_info,
             connection_timeout,
+            jss_enabled,
         )
         .await
     }
@@ -384,6 +392,7 @@ impl BlockEngineStage {
         keypair: Arc<Keypair>,
         cluster_info: &Arc<ClusterInfo>,
         connection_timeout: &Duration,
+        jss_enabled: &Arc<AtomicBool>,
     ) -> crate::proxy::Result<()> {
         const METRICS_TICK: Duration = Duration::from_secs(1);
         const MAINTENANCE_TICK: Duration = Duration::from_secs(10 * 60);
@@ -394,10 +403,26 @@ impl BlockEngineStage {
         let mut block_engine_stats = BlockEngineStageStats::default();
         let mut metrics_and_auth_tick = interval(METRICS_TICK);
         let mut maintenance_tick = interval(MAINTENANCE_TICK);
+        let mut jss_enabled_prev = false;
 
         info!("connected to packet and bundle stream");
 
         while !exit.load(Ordering::Relaxed) {
+            let jss_enabled = jss_enabled.load(Ordering::Relaxed);
+            if jss_enabled != jss_enabled_prev {
+                if jss_enabled {
+                    info!("jss enabled, pausing block engine stage");
+                } else {
+                    info!("jss disabled, resuming block engine stage");
+                }
+                jss_enabled_prev = jss_enabled;
+            }
+
+            if jss_enabled_prev {
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+
             tokio::select! {
                 maybe_msg = packet_stream.message() => {
                     let resp = maybe_msg?.ok_or(ProxyError::GrpcStreamDisconnected)?;
