@@ -8,7 +8,7 @@
 
 use std::{
     collections::VecDeque,
-    sync::{atomic::AtomicBool, Arc, RwLock},
+    sync::{atomic::AtomicBool, Arc, RwLock}, time::Duration,
 };
 
 use ahash::HashMap;
@@ -116,61 +116,6 @@ impl JssExecutor2 {
         }
     }
 
-    fn parse_transactions<'a>(
-        bank: &Bank,
-        packets: impl Iterator<Item = &'a Packet>,
-    ) -> Vec<SanitizedTransaction> {
-        let txns = packets
-            .map(|packet| {
-                let mut solana_packet = solana_sdk::packet::Packet::default();
-                solana_packet.meta_mut().size = packet.data.len() as usize;
-                solana_packet.meta_mut().set_discard(false);
-                solana_packet.buffer_mut()[0..packet.data.len()].copy_from_slice(&packet.data);
-                if let Some(meta) = &packet.meta {
-                    solana_packet.meta_mut().size = meta.size as usize;
-                    if let Some(addr) = &meta.addr.parse().ok() {
-                        solana_packet.meta_mut().addr = *addr;
-                    }
-                    solana_packet.meta_mut().port = meta.port as u16;
-                    if let Some(flags) = &meta.flags {
-                        if flags.simple_vote_tx {
-                            solana_packet
-                                .meta_mut()
-                                .flags
-                                .insert(PacketFlags::SIMPLE_VOTE_TX);
-                        }
-                        if flags.forwarded {
-                            solana_packet
-                                .meta_mut()
-                                .flags
-                                .insert(PacketFlags::FORWARDED);
-                        }
-                        if flags.tracer_packet {
-                            solana_packet
-                                .meta_mut()
-                                .flags
-                                .insert(PacketFlags::TRACER_PACKET);
-                        }
-                        if flags.repair {
-                            solana_packet.meta_mut().flags.insert(PacketFlags::REPAIR);
-                        }
-                    }
-                }
-                let packet = ImmutableDeserializedPacket::new(solana_packet).ok()?;
-                let sanitized_transaction = packet.build_sanitized_transaction(
-                    false,
-                    bank,
-                    bank.get_reserved_account_keys(),
-                )?;
-                Some(sanitized_transaction)
-            })
-            .collect_vec();
-        if txns.iter().any(Option::is_none) {
-            return vec![];
-        }
-        txns.into_iter().map(|x| x.unwrap()).collect_vec()
-    }
-
     // Serialize transactions from micro-block and send them to the scheduling thread
     pub fn schedule_microblock(&mut self, bank: &Bank, micro_block: MicroBlock) -> bool {
         let bundles = micro_block
@@ -200,7 +145,7 @@ impl JssExecutor2 {
                 continue;
             }
 
-            let mut prio_graph = prio_graph::PrioGraph::new(|id: &BundleId, _graph_node| *id);
+            let mut prio_graph = prio_graph::PrioGraph::new(|id: &BundleExecutionId, _graph_node| *id);
             let mut microblock_count = 0;
 
             while bank_start.should_working_bank_still_be_processing_txs() {
@@ -240,11 +185,11 @@ impl JssExecutor2 {
     /// If a worker is available between incoming transactions, it schedules the next batch
     /// so that no workers has to wait.
     fn maybe_ingest_new_microblock<
-        C: std::hash::Hash + Eq + Clone + TopLevelId<BundleId> + Copy,
-        D: Fn(&BundleId, &GraphNode<BundleId>) -> C,
+        C: std::hash::Hash + Eq + Clone + TopLevelId<BundleExecutionId> + Copy,
+        D: Fn(&BundleExecutionId, &GraphNode<BundleExecutionId>) -> C,
     >(
         microblock_receiver: &crossbeam_channel::Receiver<Vec<Vec<SanitizedTransaction>>>,
-        prio_graph: &mut prio_graph::PrioGraph<BundleId, Pubkey, C, D>,
+        prio_graph: &mut prio_graph::PrioGraph<BundleExecutionId, Pubkey, C, D>,
         microblock_count: &mut u64,
         bundles: &mut Vec<Option<Vec<SanitizedTransaction>>>,
         bundles_scheduled: &mut u64,
@@ -254,13 +199,10 @@ impl JssExecutor2 {
             *microblock_count += 1;
             for transactions in micro_block {
                 let id = bundles.len();
-                let bundle_id = BundleId { id };
+                let bundle_id = BundleExecutionId { id };
                 prio_graph.insert_transaction(
                     bundle_id,
-                    transactions
-                        .iter()
-                        .map(|tx| Self::get_transaction_account_access(tx))
-                        .flatten(),
+                    Self::get_bundle_account_access(transactions.as_slice()),
                 );
                 bundles.push(Some(transactions));
                 Self::schedule_next_batch(prio_graph, bundles, bundles_scheduled, workers);
@@ -271,10 +213,10 @@ impl JssExecutor2 {
     /// Schedules the next batch of transactions to workers, by checking if any worker is available.
     /// If a worker is available, it pops the next bundle from the prio-graph and sends it to the worker.
     fn schedule_next_batch<
-        C: std::hash::Hash + Eq + Clone + TopLevelId<BundleId> + Copy,
-        D: Fn(&BundleId, &GraphNode<BundleId>) -> C,
+        C: std::hash::Hash + Eq + Clone + TopLevelId<BundleExecutionId> + Copy,
+        D: Fn(&BundleExecutionId, &GraphNode<BundleExecutionId>) -> C,
     >(
-        prio_graph: &mut prio_graph::PrioGraph<BundleId, Pubkey, C, D>,
+        prio_graph: &mut prio_graph::PrioGraph<BundleExecutionId, Pubkey, C, D>,
         bundles: &mut Vec<Option<Vec<SanitizedTransaction>>>,
         bundles_scheduled: &mut u64,
         workers: &mut Vec<Worker>,
@@ -297,30 +239,12 @@ impl JssExecutor2 {
         }
     }
 
-    /// Gets accessed accounts (resources) for use in `PrioGraph`.
-    fn get_transaction_account_access(
-        transaction: &SanitizedTransaction,
-    ) -> impl Iterator<Item = (Pubkey, AccessKind)> + '_ {
-        let message = transaction.message();
-        message
-            .account_keys()
-            .iter()
-            .enumerate()
-            .map(|(index, key)| {
-                if message.is_writable(index) {
-                    (*key, AccessKind::Write)
-                } else {
-                    (*key, AccessKind::Read)
-                }
-            })
-    }
-
     /// Loop responsible for executing transactions and bundles
     fn spawn_worker(
         poh_recorder: Arc<RwLock<PohRecorder>>,
         mut bundle_committer: bundle_stage::committer::Committer,
         mut transaction_commiter: banking_stage::committer::Committer,
-        receiver: crossbeam_channel::Receiver<(BundleId, Vec<SanitizedTransaction>)>,
+        receiver: crossbeam_channel::Receiver<(BundleExecutionId, Vec<SanitizedTransaction>)>,
         exit: Arc<AtomicBool>,
     ) {
         let recorder = poh_recorder.read().unwrap().new_recorder();
@@ -336,7 +260,7 @@ impl JssExecutor2 {
                 bank_start = None;
                 continue;
             }
-            let Ok((_, txns)) = receiver.try_recv() else {
+            let Ok((_, txns)) = receiver.recv_timeout(Duration::from_millis(1)) else {
                 continue;
             };
             Self::execute_record_commit(
@@ -519,26 +443,112 @@ impl JssExecutor2 {
 
         true
     }
+
+    fn parse_transactions<'a>(
+        bank: &Bank,
+        packets: impl Iterator<Item = &'a Packet>,
+    ) -> Vec<SanitizedTransaction> {
+        let txns = packets
+            .map(|packet| {
+                let mut solana_packet = solana_sdk::packet::Packet::default();
+                solana_packet.meta_mut().size = packet.data.len() as usize;
+                solana_packet.meta_mut().set_discard(false);
+                solana_packet.buffer_mut()[0..packet.data.len()].copy_from_slice(&packet.data);
+                if let Some(meta) = &packet.meta {
+                    solana_packet.meta_mut().size = meta.size as usize;
+                    if let Some(addr) = &meta.addr.parse().ok() {
+                        solana_packet.meta_mut().addr = *addr;
+                    }
+                    solana_packet.meta_mut().port = meta.port as u16;
+                    if let Some(flags) = &meta.flags {
+                        if flags.simple_vote_tx {
+                            solana_packet
+                                .meta_mut()
+                                .flags
+                                .insert(PacketFlags::SIMPLE_VOTE_TX);
+                        }
+                        if flags.forwarded {
+                            solana_packet
+                                .meta_mut()
+                                .flags
+                                .insert(PacketFlags::FORWARDED);
+                        }
+                        if flags.tracer_packet {
+                            solana_packet
+                                .meta_mut()
+                                .flags
+                                .insert(PacketFlags::TRACER_PACKET);
+                        }
+                        if flags.repair {
+                            solana_packet.meta_mut().flags.insert(PacketFlags::REPAIR);
+                        }
+                    }
+                }
+                let packet = ImmutableDeserializedPacket::new(solana_packet).ok()?;
+                let sanitized_transaction = packet.build_sanitized_transaction(
+                    false,
+                    bank,
+                    bank.get_reserved_account_keys(),
+                )?;
+                Some(sanitized_transaction)
+            })
+            .collect_vec();
+        if txns.iter().any(Option::is_none) {
+            return vec![];
+        }
+        txns.into_iter().map(|x| x.unwrap()).collect_vec()
+    }
+
+    /// Gets accessed accounts (resources) for use in `PrioGraph`.
+    fn get_bundle_account_access(
+        transactions: &[SanitizedTransaction],
+    ) -> impl Iterator<Item = (Pubkey, AccessKind)> + '_ {
+        transactions
+            .iter()
+            .flat_map(|tx| Self::get_transaction_account_access(tx))
+    }
+
+    /// Gets accessed accounts (resources) for use in `PrioGraph`.
+    fn get_transaction_account_access(
+        transaction: &SanitizedTransaction,
+    ) -> impl Iterator<Item = (Pubkey, AccessKind)> + '_ {
+        let message = transaction.message();
+        message
+            .account_keys()
+            .iter()
+            .enumerate()
+            .map(|(index, key)| {
+                if message.is_writable(index) {
+                    (*key, AccessKind::Write)
+                } else {
+                    (*key, AccessKind::Read)
+                }
+            })
+    }
 }
 
+
+/// Used to determine the priority of the bundle for execution.
+/// Since microblocks are already sorted, FIFO assignment of ids
+/// can be used to determine priority.
 #[derive(Hash, Eq, PartialEq, Clone, Copy)]
-struct BundleId {
+struct BundleExecutionId {
     id: usize,
 }
 
-impl TopLevelId<Self> for BundleId {
+impl TopLevelId<Self> for BundleExecutionId {
     fn id(&self) -> Self {
         *self
     }
 }
 
-impl Ord for BundleId {
+impl Ord for BundleExecutionId {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.id.cmp(&other.id).reverse()
     }
 }
 
-impl PartialOrd for BundleId {
+impl PartialOrd for BundleExecutionId {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
@@ -546,12 +556,12 @@ impl PartialOrd for BundleId {
 
 // Worker management struct for scheduling thread
 struct Worker {
-    sender: crossbeam_channel::Sender<(BundleId, Vec<SanitizedTransaction>)>,
-    queue: VecDeque<BundleId>,
+    sender: crossbeam_channel::Sender<(BundleExecutionId, Vec<SanitizedTransaction>)>,
+    queue: VecDeque<BundleExecutionId>,
 }
 
 impl Worker {
-    fn new(sender: crossbeam_channel::Sender<(BundleId, Vec<SanitizedTransaction>)>) -> Self {
+    fn new(sender: crossbeam_channel::Sender<(BundleExecutionId, Vec<SanitizedTransaction>)>) -> Self {
         Self {
             sender,
             queue: VecDeque::new(),
@@ -562,7 +572,7 @@ impl Worker {
         self.sender.is_full()
     }
 
-    fn send(&mut self, bundle_id: BundleId, txns: Vec<SanitizedTransaction>) -> bool {
+    fn send(&mut self, bundle_id: BundleExecutionId, txns: Vec<SanitizedTransaction>) -> bool {
         if self.sender.try_send((bundle_id, txns)).is_ok() {
             self.queue.push_back(bundle_id);
             true
@@ -571,7 +581,7 @@ impl Worker {
         }
     }
 
-    fn get_unblocked(&mut self) -> Vec<BundleId> {
+    fn get_unblocked(&mut self) -> Vec<BundleExecutionId> {
         let mut unblocked = Vec::new();
         let diff = self.queue.len().saturating_sub(self.sender.len());
         for _ in 0..diff {
