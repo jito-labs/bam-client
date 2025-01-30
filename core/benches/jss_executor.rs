@@ -27,7 +27,7 @@ use solana_poh::{
 use solana_program_test::programs::spl_programs;
 use solana_runtime::{
     bank::Bank, bank_forks::BankForks, genesis_utils::create_genesis_config_with_leader_ex,
-    installed_scheduler_pool::BankWithScheduler,
+    installed_scheduler_pool::BankWithScheduler, prioritization_fee_cache::PrioritizationFeeCache,
 };
 use solana_sdk::{
     fee_calculator::{FeeRateGovernor, DEFAULT_TARGET_LAMPORTS_PER_SIGNATURE},
@@ -210,7 +210,7 @@ pub fn get_executed_txns(
 }
 
 #[bench]
-fn bench_jss_actuator(b: &mut Bencher) {
+fn bench_jss_executor(b: &mut Bencher) {
     let TestFixture {
         genesis_config_info,
         leader_keypair,
@@ -223,11 +223,13 @@ fn bench_jss_actuator(b: &mut Bencher) {
     } = create_test_fixture(1);
 
     let (replay_vote_sender, _) = crossbeam_channel::unbounded();
-    let mut actuator = JssExecutor::new(
+    let mut executor = JssExecutor::new(
+        4,
         poh_recorder.clone(),
         replay_vote_sender,
         None,
         Arc::new(PrioritizationFeeCache::default()),
+        exit.clone(),
     );
 
     let successful_bundle = Bundle {
@@ -271,8 +273,6 @@ fn bench_jss_actuator(b: &mut Bencher) {
     poh_simulator.join().unwrap();
 
     b.iter(|| {
-        // TODO: make this actually useful (LOL)
-        let (executed_sender, _executed_receiver) = std::sync::mpsc::channel();
-        actuator.execute_and_commit_and_record_micro_block(microblock.clone(), executed_sender);
+        executor.schedule_microblock(&bank, microblock.clone());
     });
 }
