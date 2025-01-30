@@ -24,8 +24,7 @@ use solana_poh::poh_recorder::{
     BankStart, PohRecorder, RecordTransactionsSummary, TransactionRecorder,
 };
 use solana_runtime::{
-    bank::Bank,
-    prioritization_fee_cache::PrioritizationFeeCache,
+    bank::Bank, prioritization_fee_cache::PrioritizationFeeCache,
     vote_sender_types::ReplayVoteSender,
 };
 use solana_sdk::{
@@ -656,7 +655,6 @@ impl Worker {
         self.queue.clear();
     }
 }
-
 
 #[cfg(test)]
 mod tests {

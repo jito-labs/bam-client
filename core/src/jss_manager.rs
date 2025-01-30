@@ -24,9 +24,7 @@ use solana_runtime::{
 };
 use solana_sdk::signer::Signer;
 
-use crate::{
-    jss_connection::JssConnection, jss_executor::JssExecutor,
-};
+use crate::{jss_connection::JssConnection, jss_executor::JssExecutor};
 
 pub(crate) struct JssManager {
     threads: Vec<std::thread::JoinHandle<()>>,

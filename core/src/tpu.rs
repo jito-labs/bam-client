@@ -265,6 +265,7 @@ impl Tpu {
             non_vote_sender.clone(),
             exit.clone(),
             &block_builder_fee_info,
+            jss_enabled.clone(),
         );
 
         let (heartbeat_tx, heartbeat_rx) = unbounded();
