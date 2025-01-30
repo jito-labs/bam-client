@@ -25,7 +25,7 @@ use solana_runtime::{
 use solana_sdk::signer::Signer;
 
 use crate::{
-    jss_connection::JssConnection, jss_executor::JssExecutor, jss_executor_2::JssExecutor2,
+    jss_connection::JssConnection, jss_executor::JssExecutor,
 };
 
 pub(crate) struct JssManager {
@@ -53,7 +53,7 @@ impl JssManager {
             .name("micro_block_execution_thread".to_string())
             .spawn(move || {
                 const WORKER_THREAD_COUNT: usize = 4;
-                let mut executor = JssExecutor2::new(
+                let mut executor = JssExecutor::new(
                     WORKER_THREAD_COUNT,
                     poh_recorder_micro_block_execution_thread.clone(),
                     replay_vote_sender,

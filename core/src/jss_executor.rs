@@ -1,19 +1,31 @@
-use std::sync::{atomic::AtomicBool, mpsc::Sender, Arc, RwLock};
+// Executor design:
+// - Micro-blocks are turned into serialized transactions and inserted into Prio-Graph by scheduling thread.
+// - Each worker thread has a channel of size 1 for new bundles to execute.
+// - The scheduling thread continually scans the worker channels to see if one is empty; as soon as it is;
+//   it unblocks the transactions blocked by what was in the channel before; and pops the next one off the prio graph;
+//   sending it to the channel. Transaction execution far outweighs the time for the scheduling thread to re-check the channel.
+// - When the working bank is no longer valid; the Prio-graph and mempool are drained. Thinking about a feedback loop for JSS to know it scheduled too much.
 
-use ahash::{HashMap, HashMapExt, HashSetExt};
-use crossbeam_channel::Receiver;
+use std::{
+    collections::VecDeque,
+    sync::{atomic::AtomicBool, Arc, RwLock},
+    time::Duration,
+};
+
 use itertools::Itertools;
-use nohash::{IntMap, IntSet};
-use solana_bundle::bundle_execution::load_and_execute_bundle;
-use solana_ledger::blockstore_processor::TransactionStatusSender;
-use solana_measure::measure_us;
-
 use jito_protos::proto::jss_types::{MicroBlock, Packet};
+use prio_graph::{AccessKind, GraphNode, TopLevelId};
+use solana_bundle::bundle_execution::load_and_execute_bundle;
+use solana_ledger::{
+    blockstore_processor::TransactionStatusSender, token_balances::collect_token_balances,
+};
+use solana_measure::measure_us;
 use solana_poh::poh_recorder::{
     BankStart, PohRecorder, RecordTransactionsSummary, TransactionRecorder,
 };
 use solana_runtime::{
-    bank::Bank, prioritization_fee_cache::PrioritizationFeeCache,
+    bank::Bank,
+    prioritization_fee_cache::PrioritizationFeeCache,
     vote_sender_types::ReplayVoteSender,
 };
 use solana_sdk::{
@@ -23,47 +35,464 @@ use solana_sdk::{
     pubkey::Pubkey,
     transaction::SanitizedTransaction,
 };
+use solana_svm::transaction_processor::{ExecutionRecordingConfig, TransactionProcessingConfig};
+use solana_transaction_status::PreBalanceInfo;
 
 use crate::{
     banking_stage::{
-        immutable_deserialized_packet::ImmutableDeserializedPacket,
+        self, immutable_deserialized_packet::ImmutableDeserializedPacket,
         leader_slot_timing_metrics::LeaderExecuteAndCommitTimings,
     },
     bundle_stage::{self, MAX_BUNDLE_RETRY_DURATION},
 };
 
 pub struct JssExecutor {
-    poh_recorder: Arc<RwLock<PohRecorder>>,
-    workers: ExecutionWorkers,
+    microblock_sender: crossbeam_channel::Sender<Vec<Vec<SanitizedTransaction>>>,
+    threads: Vec<std::thread::JoinHandle<()>>,
 }
-
-const WORKER_THREAD_COUNT: usize = 4;
 
 impl JssExecutor {
     pub fn new(
+        worker_thread_count: usize,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         replay_vote_sender: ReplayVoteSender,
         transaction_status_sender: Option<TransactionStatusSender>,
         prioritization_fee_cache: Arc<PrioritizationFeeCache>,
         exit: Arc<AtomicBool>,
     ) -> Self {
-        let committer = bundle_stage::committer::Committer::new(
+        let (bundle_committer, transaction_commiter) = Self::build_committers(
+            replay_vote_sender.clone(),
+            transaction_status_sender.clone(),
+            prioritization_fee_cache.clone(),
+        );
+
+        let (worker_threads, worker_handles) = Self::spawn_workers(
+            worker_thread_count,
+            poh_recorder.clone(),
+            bundle_committer.clone(),
+            transaction_commiter.clone(),
+            exit.clone(),
+        );
+
+        const MICROBLOCK_CHANNEL_SIZE: usize = 50;
+        let (microblock_sender, microblock_receiver) =
+            crossbeam_channel::bounded(MICROBLOCK_CHANNEL_SIZE);
+        let manager_thread = std::thread::Builder::new()
+            .name("jss_executor_manager".to_string())
+            .spawn(|| {
+                Self::spawn_management_thread(
+                    microblock_receiver,
+                    poh_recorder,
+                    worker_handles,
+                    exit,
+                );
+            })
+            .unwrap();
+
+        Self {
+            microblock_sender,
+            threads: std::iter::once(manager_thread)
+                .chain(worker_threads)
+                .collect(),
+        }
+    }
+
+    fn build_committers(
+        replay_vote_sender: ReplayVoteSender,
+        transaction_status_sender: Option<TransactionStatusSender>,
+        prioritization_fee_cache: Arc<PrioritizationFeeCache>,
+    ) -> (
+        bundle_stage::committer::Committer,
+        banking_stage::committer::Committer,
+    ) {
+        let bundle_committer = bundle_stage::committer::Committer::new(
+            transaction_status_sender.clone(),
+            replay_vote_sender.clone(),
+            prioritization_fee_cache.clone(),
+        );
+        let transaction_commiter = banking_stage::committer::Committer::new(
             transaction_status_sender,
             replay_vote_sender,
             prioritization_fee_cache,
         );
+        (bundle_committer, transaction_commiter)
+    }
 
-        let workers = Self::prepare_workers(
-            WORKER_THREAD_COUNT,
-            poh_recorder.clone(),
-            committer,
-            exit.clone(),
+    fn get_working_bank_start(poh_recorder: &Arc<RwLock<PohRecorder>>) -> Option<BankStart> {
+        let Some(bank_start) = poh_recorder.read().unwrap().bank_start() else {
+            return None;
+        };
+        if bank_start.should_working_bank_still_be_processing_txs() {
+            Some(bank_start)
+        } else {
+            None
+        }
+    }
+
+    pub fn join(self) {
+        for thread in self.threads.into_iter() {
+            thread.join().unwrap();
+        }
+    }
+
+    // Serialize transactions from micro-block and send them to the scheduling thread
+    pub fn schedule_microblock(&mut self, bank: &Bank, micro_block: MicroBlock) -> bool {
+        let bundles = micro_block
+            .bundles
+            .iter()
+            .map(|bundle| Self::parse_transactions(bank, bundle.packets.iter()))
+            .filter(|txns| !txns.is_empty())
+            .collect_vec();
+        self.microblock_sender.try_send(bundles).is_ok()
+    }
+
+    /// Loop responsible for scheduling transactions to workers
+    fn spawn_management_thread(
+        microblock_receiver: crossbeam_channel::Receiver<Vec<Vec<SanitizedTransaction>>>,
+        poh_recorder: Arc<RwLock<PohRecorder>>,
+        mut workers: Vec<Worker>,
+        exit: Arc<AtomicBool>,
+    ) {
+        let mut bundles_scheduled = 0;
+        let mut bundles = Vec::new();
+
+        while !exit.load(std::sync::atomic::Ordering::Relaxed) {
+            let Some(bank_start) = Self::get_working_bank_start(&poh_recorder) else {
+                continue;
+            };
+
+            let mut prio_graph =
+                prio_graph::PrioGraph::new(|id: &BundleExecutionId, _graph_node| *id);
+            let mut microblock_count = 0;
+
+            while bank_start.should_working_bank_still_be_processing_txs() {
+                Self::maybe_ingest_new_microblock(
+                    &microblock_receiver,
+                    &mut prio_graph,
+                    &mut microblock_count,
+                    &mut bundles,
+                    &mut bundles_scheduled,
+                    &mut workers,
+                );
+                Self::schedule_next_batch(
+                    &mut prio_graph,
+                    &mut bundles,
+                    &mut bundles_scheduled,
+                    &mut workers,
+                );
+            }
+
+            for worker in workers.iter_mut() {
+                worker.clear();
+            }
+
+            info!(
+                "slot={} microblock_count={} scheduled={} unscheduled={}",
+                bank_start.working_bank.slot(),
+                microblock_count,
+                bundles_scheduled,
+                bundles.len()
+            );
+            bundles_scheduled = 0;
+            bundles.clear();
+        }
+    }
+
+    /// Ingests new micro-blocks and inserts them into the prio-graph.
+    /// If a worker is available between incoming transactions, it schedules the next batch
+    /// so that no workers has to wait.
+    fn maybe_ingest_new_microblock<
+        C: std::hash::Hash + Eq + Clone + TopLevelId<BundleExecutionId> + Copy,
+        D: Fn(&BundleExecutionId, &GraphNode<BundleExecutionId>) -> C,
+    >(
+        microblock_receiver: &crossbeam_channel::Receiver<Vec<Vec<SanitizedTransaction>>>,
+        prio_graph: &mut prio_graph::PrioGraph<BundleExecutionId, Pubkey, C, D>,
+        microblock_count: &mut u64,
+        bundles: &mut Vec<Option<Vec<SanitizedTransaction>>>,
+        bundles_scheduled: &mut u64,
+        workers: &mut Vec<Worker>,
+    ) {
+        if let Ok(micro_block) = microblock_receiver.try_recv() {
+            *microblock_count += 1;
+            for transactions in micro_block {
+                let id = bundles.len();
+                let bundle_id = BundleExecutionId { id };
+                prio_graph.insert_transaction(
+                    bundle_id,
+                    Self::get_bundle_account_access(transactions.as_slice()),
+                );
+                bundles.push(Some(transactions));
+                Self::schedule_next_batch(prio_graph, bundles, bundles_scheduled, workers);
+            }
+        }
+    }
+
+    /// Schedules the next batch of transactions to workers, by checking if any worker is available.
+    /// If a worker is available, it pops the next bundle from the prio-graph and sends it to the worker.
+    fn schedule_next_batch<
+        C: std::hash::Hash + Eq + Clone + TopLevelId<BundleExecutionId> + Copy,
+        D: Fn(&BundleExecutionId, &GraphNode<BundleExecutionId>) -> C,
+    >(
+        prio_graph: &mut prio_graph::PrioGraph<BundleExecutionId, Pubkey, C, D>,
+        bundles: &mut Vec<Option<Vec<SanitizedTransaction>>>,
+        bundles_scheduled: &mut u64,
+        workers: &mut Vec<Worker>,
+    ) {
+        for worker in workers.iter_mut().filter(|w| !w.is_full()) {
+            for bundle_id in worker.get_unblocking_bundles() {
+                prio_graph.unblock(&bundle_id);
+            }
+
+            let (bundle_id, txns) = match prio_graph.pop() {
+                Some(bundle) => (bundle, bundles[bundle.id].take().unwrap()),
+                None => {
+                    return;
+                }
+            };
+
+            if worker.send(bundle_id, txns) {
+                *bundles_scheduled += 1;
+            }
+        }
+    }
+
+    fn spawn_workers(
+        worker_thread_count: usize,
+        poh_recorder: Arc<RwLock<PohRecorder>>,
+        bundle_committer: bundle_stage::committer::Committer,
+        transaction_commiter: banking_stage::committer::Committer,
+        exit: Arc<AtomicBool>,
+    ) -> (Vec<std::thread::JoinHandle<()>>, Vec<Worker>) {
+        let mut threads = Vec::new();
+        let mut workers = Vec::new();
+        for id in 0..worker_thread_count {
+            let (sender, receiver) = crossbeam_channel::bounded(1);
+            workers.push(Worker::new(sender));
+            let poh_recorder = poh_recorder.clone();
+            let bundle_committer = bundle_committer.clone();
+            let transaction_commiter = transaction_commiter.clone();
+            let exit = exit.clone();
+            threads.push(
+                std::thread::Builder::new()
+                    .name(format!("jss_executor_worker_{}", id))
+                    .spawn(move || {
+                        Self::spawn_worker(
+                            poh_recorder,
+                            bundle_committer.clone(),
+                            transaction_commiter.clone(),
+                            receiver,
+                            exit,
+                        );
+                    })
+                    .unwrap(),
+            );
+        }
+        (threads, workers)
+    }
+
+    /// Loop responsible for executing transactions and bundles
+    fn spawn_worker(
+        poh_recorder: Arc<RwLock<PohRecorder>>,
+        mut bundle_committer: bundle_stage::committer::Committer,
+        mut transaction_commiter: banking_stage::committer::Committer,
+        receiver: crossbeam_channel::Receiver<(BundleExecutionId, Vec<SanitizedTransaction>)>,
+        exit: Arc<AtomicBool>,
+    ) {
+        let recorder = poh_recorder.read().unwrap().new_recorder();
+        let mut bank_start = None;
+        while !exit.load(std::sync::atomic::Ordering::Relaxed) {
+            if bank_start.is_none() {
+                bank_start = poh_recorder.read().unwrap().bank_start();
+            }
+            let Some(current_bank_start) = bank_start.as_ref() else {
+                continue;
+            };
+            if !current_bank_start.should_working_bank_still_be_processing_txs() {
+                bank_start = None;
+                continue;
+            }
+            let Ok((_, txns)) = receiver.recv_timeout(Duration::from_millis(1)) else {
+                continue;
+            };
+            Self::execute_record_commit(
+                &current_bank_start.working_bank,
+                &recorder,
+                &mut bundle_committer,
+                &mut transaction_commiter,
+                txns,
+            );
+        }
+    }
+
+    /// Executes and records transactions or bundles; using the
+    /// length of the transactions to determine which branch to take
+    pub fn execute_record_commit(
+        bank: &Arc<Bank>,
+        recorder: &TransactionRecorder,
+        bundle_committer: &mut bundle_stage::committer::Committer,
+        transaction_commiter: &mut banking_stage::committer::Committer,
+        transactions: Vec<SanitizedTransaction>,
+    ) -> bool {
+        if transactions.len() == 1 {
+            Self::execute_commit_record_transactions(
+                bank,
+                recorder,
+                transaction_commiter,
+                transactions,
+            )
+        } else {
+            // TODO: properly handle jito tips
+            Self::execute_commit_record_bundle(bank, recorder, bundle_committer, transactions)
+        }
+    }
+
+    fn execute_commit_record_bundle(
+        bank: &Arc<Bank>,
+        recorder: &TransactionRecorder,
+        committer: &mut bundle_stage::committer::Committer,
+        transactions: Vec<SanitizedTransaction>,
+    ) -> bool {
+        let len = transactions.len();
+        let bundle_id = derive_bundle_id_from_sanitized_transactions(&transactions);
+        let sanitized_bundle = SanitizedBundle {
+            transactions,
+            bundle_id: bundle_id.clone(),
+        };
+
+        let default_accounts = vec![None; len];
+        let transaction_status_sender_enabled = committer.transaction_status_sender_enabled();
+        let mut bundle_execution_results = load_and_execute_bundle(
+            &bank,
+            &sanitized_bundle,
+            MAX_PROCESSING_AGE,
+            &MAX_BUNDLE_RETRY_DURATION,
+            transaction_status_sender_enabled,
+            &None,
+            false,
+            None,
+            &default_accounts,
+            &default_accounts,
         );
 
-        Self {
-            poh_recorder,
-            workers,
+        if let Err(err) = bundle_execution_results.result() {
+            error!("Error executing bundle {}: {:?}", bundle_id, err);
+            return false;
         }
+
+        let (executed_batches, _execution_results_to_transactions_us) =
+            measure_us!(bundle_execution_results.executed_transaction_batches());
+
+        let _freeze_lock = bank.freeze_lock();
+        let (last_blockhash, lamports_per_signature) =
+            bank.last_blockhash_and_lamports_per_signature();
+        let RecordTransactionsSummary {
+            result: record_transactions_result,
+            record_transactions_timings: _,
+            starting_transaction_index,
+        } = recorder.record_transactions(bank.slot(), executed_batches);
+        if record_transactions_result.is_err() {
+            return false;
+        }
+
+        let mut execute_and_commit_timings = LeaderExecuteAndCommitTimings::default();
+        committer.commit_bundle(
+            &mut bundle_execution_results,
+            last_blockhash,
+            lamports_per_signature,
+            starting_transaction_index,
+            &bank,
+            &mut execute_and_commit_timings,
+        );
+
+        true
+    }
+
+    fn execute_commit_record_transactions(
+        bank: &Arc<Bank>,
+        recorder: &TransactionRecorder,
+        committer: &mut banking_stage::committer::Committer,
+        transactions: Vec<SanitizedTransaction>,
+    ) -> bool {
+        assert_eq!(transactions.len(), 1);
+
+        let batch = bank.prepare_sanitized_batch_with_results(
+            &transactions,
+            std::iter::once(None).map(|_: Option<()>| Ok(())),
+            None,
+            None,
+        );
+
+        let mut pre_balance_info = PreBalanceInfo::default();
+        let transaction_status_sender_enabled = committer.transaction_status_sender_enabled();
+        if transaction_status_sender_enabled {
+            pre_balance_info.native = bank.collect_balances(&batch);
+            pre_balance_info.token =
+                collect_token_balances(bank, &batch, &mut pre_balance_info.mint_decimals, None)
+        }
+
+        let mut execute_and_commit_timings = LeaderExecuteAndCommitTimings::default();
+        let mut results = bank.load_and_execute_transactions(
+            &batch,
+            MAX_PROCESSING_AGE,
+            &mut execute_and_commit_timings.execute_timings,
+            TransactionProcessingConfig {
+                account_overrides: None,
+                check_program_modification_slot: bank.check_program_modification_slot(),
+                compute_budget: bank.compute_budget(),
+                log_messages_bytes_limit: None,
+                limit_to_load_programs: true,
+                recording_config: ExecutionRecordingConfig::new_single_setting(
+                    transaction_status_sender_enabled,
+                ),
+                transaction_account_lock_limit: Some(bank.get_transaction_account_lock_limit()),
+            },
+        );
+        if results.executed_transactions_count == 0 {
+            return false;
+        }
+
+        let _freeze_lock = bank.freeze_lock();
+        let (last_blockhash, lamports_per_signature) =
+            bank.last_blockhash_and_lamports_per_signature();
+
+        let executed_transactions = results
+            .execution_results
+            .iter()
+            .zip(batch.sanitized_transactions())
+            .filter_map(|(execution_result, tx)| {
+                if execution_result.was_executed() {
+                    Some(tx.to_versioned_transaction())
+                } else {
+                    None
+                }
+            })
+            .collect_vec();
+        let RecordTransactionsSummary {
+            result: record_transactions_result,
+            record_transactions_timings: _,
+            starting_transaction_index,
+        } = recorder.record_transactions(bank.slot(), vec![executed_transactions]);
+        if record_transactions_result.is_err() {
+            return false;
+        }
+
+        committer.commit_transactions(
+            &batch,
+            &mut results.loaded_transactions,
+            results.execution_results,
+            last_blockhash,
+            lamports_per_signature,
+            starting_transaction_index,
+            bank,
+            &mut pre_balance_info,
+            &mut execute_and_commit_timings,
+            results.signature_count,
+            results.executed_transactions_count,
+            results.executed_non_vote_transactions_count,
+            results.executed_with_successful_result_count,
+        );
+
+        true
     }
 
     fn parse_transactions<'a>(
@@ -121,488 +550,113 @@ impl JssExecutor {
         txns.into_iter().map(|x| x.unwrap()).collect_vec()
     }
 
-    fn is_lock_blocked(
-        locks: &[Lock],
-        write_locked: &IntSet<u32>,
-        read_locked: &IntMap<u32, usize>,
-    ) -> bool {
-        for lock in locks {
-            if lock.write {
-                if write_locked.contains(&lock.account_id) {
-                    return true;
-                }
-            } else {
-                if write_locked.contains(&lock.account_id)
-                    || read_locked.contains_key(&lock.account_id)
-                {
-                    return true;
-                }
-            }
-        }
-
-        false
-    }
-
-    fn get_locks(
+    /// Gets accessed accounts (resources) for use in `PrioGraph`.
+    fn get_bundle_account_access(
         transactions: &[SanitizedTransaction],
-        lock_id_assigner: &mut LockIdAssigner,
-    ) -> Vec<Lock> {
-        let mut result = vec![];
-        for txn in transactions {
-            for (index, account) in txn.message().account_keys().iter().enumerate() {
-                let account_id = lock_id_assigner.assign_or_get_id(*account);
-                result.push(Lock {
-                    account_id,
-                    write: txn.message().is_writable(index),
-                });
-            }
-        }
-        result
-    }
-
-    fn lock_accounts(
-        locks: &[Lock],
-        write_locked: &mut IntSet<u32>,
-        read_locked: &mut IntMap<u32, usize>,
-    ) {
-        for lock in locks {
-            if lock.write {
-                write_locked.insert(lock.account_id);
-            } else {
-                read_locked
-                    .entry(lock.account_id)
-                    .and_modify(|e| *e += 1)
-                    .or_insert(1);
-            }
-        }
-    }
-
-    fn unlock_accounts(
-        locks: &[Lock],
-        write_locked: &mut IntSet<u32>,
-        read_locked: &mut IntMap<u32, usize>,
-    ) {
-        for lock in locks {
-            if lock.write {
-                write_locked.remove(&lock.account_id);
-            } else {
-                let Some(count) = read_locked.get_mut(&lock.account_id) else {
-                    continue;
-                };
-                *count -= 1;
-                if *count == 0 {
-                    read_locked.remove(&lock.account_id);
-                }
-            }
-        }
-    }
-
-    fn spawn_worker_thread(
-        exit: Arc<AtomicBool>,
-        request_receiver: Receiver<BundleContext>,
-        response_sender: crossbeam_channel::Sender<JssExecutorWorkerExecutionResult>,
-        poh_recorder: Arc<RwLock<PohRecorder>>,
-        mut committer: bundle_stage::committer::Committer,
-    ) -> std::thread::JoinHandle<()> {
-        std::thread::spawn(move || {
-            let recorder = poh_recorder.read().unwrap().new_recorder();
-            while !exit.load(std::sync::atomic::Ordering::Relaxed) {
-                let Ok(context) = request_receiver.try_recv() else {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                    continue;
-                };
-                let Some(bank_start) = poh_recorder.read().unwrap().bank_start() else {
-                    continue;
-                };
-                if !bank_start.should_working_bank_still_be_processing_txs() {
-                    continue;
-                }
-                let success = Self::execute_commit_record_bundle(
-                    &bank_start.working_bank,
-                    &recorder,
-                    &mut committer,
-                    context.transactions.clone(),
-                );
-                if !bank_start.should_working_bank_still_be_processing_txs() {
-                    continue;
-                }
-                response_sender
-                    .send(JssExecutorWorkerExecutionResult { context, success })
-                    .unwrap();
-            }
-        })
-    }
-
-    fn prepare_workers(
-        num_workers: usize,
-        poh_recorder: Arc<RwLock<PohRecorder>>,
-        committer: bundle_stage::committer::Committer,
-        exit: Arc<AtomicBool>,
-    ) -> ExecutionWorkers {
-        let (request_sender, request_receiver) =
-            crossbeam_channel::bounded::<BundleContext>(num_workers);
-        let (response_sender, response_receiver) =
-            crossbeam_channel::bounded::<JssExecutorWorkerExecutionResult>(num_workers);
-        let worker_threads = (0..num_workers)
-            .into_iter()
-            .map(|_| {
-                Self::spawn_worker_thread(
-                    exit.clone(),
-                    request_receiver.clone(),
-                    response_sender.clone(),
-                    poh_recorder.clone(),
-                    committer.clone(),
-                )
-            })
-            .collect_vec();
-        ExecutionWorkers {
-            worker_threads,
-            exit,
-            request_sender,
-            response_receiver,
-        }
-    }
-
-    // Ideas for optimization:
-    // - start iteration from the min(last) completed bundle index
-    //   (this allows us to skip bundles that are already scheduled or still blocked)
-    // - schedule up to 2 in contention bundles at once (so worker thread is never idle)
-    // - Unblock locks with an 'ack' from the worker thread
-    // - Use prio-graph instead to determine the order of execution
-    fn schedule_next_bundles(
-        context: &mut MicroblockExecutionContext,
-        request_sender: &crossbeam_channel::Sender<BundleContext>,
-        response_receiver: &crossbeam_channel::Receiver<JssExecutorWorkerExecutionResult>,
-        worker_thread_count: usize,
-    ) {
-        // If we have enough inflight bundles, stop scheduling now
-        if context.inflight_bundles_count >= worker_thread_count {
-            return;
-        }
-
-        // Update the first unprocessed bundle index
-        let skip_ahead = context
-            .bundles
+    ) -> impl Iterator<Item = (Pubkey, AccessKind)> + '_ {
+        transactions
             .iter()
-            .skip(context.first_unprocessed_bundle_index)
-            .position(|b| !matches!(b, QueuedBundle::Scheduled));
-
-        if let Some(skip_ahead) = skip_ahead {
-            context.first_unprocessed_bundle_index += skip_ahead;
-        } else {
-            // Everything is scheduled
-            return;
-        }
-
-        for queued_bundle in context
-            .bundles
-            .iter_mut()
-            .skip(context.first_unprocessed_bundle_index)
-        {
-            // If the transaction has already been scheduled, skip it (obviously)
-            if matches!(queued_bundle, QueuedBundle::Scheduled) {
-                continue;
-            }
-
-            // If we have a completed bundle waiting; terminate the loop
-            // because there might be better bundles to schedule
-            if !response_receiver.is_empty() {
-                break;
-            }
-
-            if !context
-                .bank_start
-                .should_working_bank_still_be_processing_txs()
-            {
-                break;
-            }
-            let bank = context.bank_start.working_bank.as_ref();
-
-            // If these packets haven't been parsed yet, parse them and save them
-            // so that we never have to this again for this bundle
-            // Also hash all the locks and assign int ids to them
-            // This is kinda sad because I love parsing, re-parsing, serializing, and deserializing
-            // I think CPU registers should hold JSON strings
-            if let QueuedBundle::Unparsed(packets) = queued_bundle {
-                let transactions = Self::parse_transactions(bank, packets.iter());
-                let locks = Self::get_locks(&transactions, &mut context.lock_assigner);
-                *queued_bundle = QueuedBundle::Waiting {
-                    transactions,
-                    locks,
-                };
-            }
-            let QueuedBundle::Waiting {
-                transactions,
-                locks,
-            } = queued_bundle
-            else {
-                panic!("QueuedBundle::Waiting expected");
-            };
-
-            // Check if this bundle is blocked by any locks
-            if Self::is_lock_blocked(&locks, &context.write_locked, &context.read_locked) {
-                continue;
-            }
-
-            // Finally: lock the accounts, send the bundle, and mark it as scheduled
-            Self::lock_accounts(&locks, &mut context.write_locked, &mut context.read_locked);
-            request_sender
-                .send(BundleContext {
-                    transactions: std::mem::take(transactions),
-                    locks: std::mem::take(locks),
-                })
-                .unwrap();
-            *queued_bundle = QueuedBundle::Scheduled;
-            context.inflight_bundles_count += 1;
-            if context.inflight_bundles_count >= worker_thread_count {
-                break;
-            }
-        }
+            .flat_map(|tx| Self::get_transaction_account_access(tx))
     }
 
-    pub fn receive_finished_bundles(
-        context: &mut MicroblockExecutionContext,
-        response_receiver: &crossbeam_channel::Receiver<JssExecutorWorkerExecutionResult>,
-        executed_sender: &Sender<JssExecutorExecutionResult>,
-    ) {
-        while let Ok(executed_bundle) = response_receiver.try_recv() {
-            Self::unlock_accounts(
-                &executed_bundle.context.locks,
-                &mut context.write_locked,
-                &mut context.read_locked,
-            );
-            let msg = if executed_bundle.success {
-                JssExecutorExecutionResult::Success(derive_bundle_id_from_sanitized_transactions(
-                    &executed_bundle.context.transactions,
-                ))
-            } else {
-                JssExecutorExecutionResult::Failure {
-                    bundle_id: derive_bundle_id_from_sanitized_transactions(
-                        &executed_bundle.context.transactions,
-                    ),
-                    cus: 0,
+    /// Gets accessed accounts (resources) for use in `PrioGraph`.
+    fn get_transaction_account_access(
+        transaction: &SanitizedTransaction,
+    ) -> impl Iterator<Item = (Pubkey, AccessKind)> + '_ {
+        let message = transaction.message();
+        message
+            .account_keys()
+            .iter()
+            .enumerate()
+            .map(|(index, key)| {
+                if message.is_writable(index) {
+                    (*key, AccessKind::Write)
+                } else {
+                    (*key, AccessKind::Read)
                 }
+            })
+    }
+}
+
+/// Used to determine the priority of the bundle for execution.
+/// Since microblocks are already sorted, FIFO assignment of ids
+/// can be used to determine priority.
+#[derive(Hash, Eq, PartialEq, Clone, Copy)]
+struct BundleExecutionId {
+    id: usize,
+}
+
+impl TopLevelId<Self> for BundleExecutionId {
+    fn id(&self) -> Self {
+        *self
+    }
+}
+
+impl Ord for BundleExecutionId {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.id.cmp(&other.id).reverse()
+    }
+}
+
+impl PartialOrd for BundleExecutionId {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+// Worker management struct for scheduling thread
+struct Worker {
+    sender: crossbeam_channel::Sender<(BundleExecutionId, Vec<SanitizedTransaction>)>,
+    queue: VecDeque<BundleExecutionId>,
+}
+
+impl Worker {
+    /// Creates a new worker with the given sender.
+    fn new(
+        sender: crossbeam_channel::Sender<(BundleExecutionId, Vec<SanitizedTransaction>)>,
+    ) -> Self {
+        Self {
+            sender,
+            queue: VecDeque::new(),
+        }
+    }
+
+    /// Returns true if the worker's channel is currently full.
+    fn is_full(&self) -> bool {
+        self.sender.is_full()
+    }
+
+    /// Sends a bundle to the worker, while saving it in a local queue;
+    /// used later to unblock transactions when the worker has picked up the bundle.
+    fn send(&mut self, bundle_id: BundleExecutionId, txns: Vec<SanitizedTransaction>) -> bool {
+        if self.sender.try_send((bundle_id, txns)).is_ok() {
+            self.queue.push_back(bundle_id);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Gets the ids of bundles that have been picked up by the worker;
+    /// therefore opening the door for new transactions to be scheduled.
+    fn get_unblocking_bundles(&mut self) -> Vec<BundleExecutionId> {
+        let mut unblocked = Vec::new();
+        let diff = self.queue.len().saturating_sub(self.sender.len());
+        for _ in 0..diff {
+            let Some(blocking) = self.queue.pop_front() else {
+                break;
             };
-            executed_sender.send(msg).unwrap();
-            context.inflight_bundles_count = context.inflight_bundles_count.saturating_sub(1);
-            context.completed_bundles_count = context.completed_bundles_count.saturating_add(1);
-        }
-    }
-
-    pub fn schedule_microblock(
-        &mut self,
-        micro_block: MicroBlock,
-        executed_sender: Sender<JssExecutorExecutionResult>,
-    ) {
-        let Some(bank_start) = self.poh_recorder.read().unwrap().bank_start() else {
-            return;
-        };
-        let mut execution_context =
-            MicroblockExecutionContext::new(bank_start.clone(), micro_block);
-        while bank_start.should_working_bank_still_be_processing_txs()
-            && execution_context.keep_going()
-        {
-            Self::receive_finished_bundles(
-                &mut execution_context,
-                &self.workers.response_receiver,
-                &executed_sender,
-            );
-            Self::schedule_next_bundles(
-                &mut execution_context,
-                &self.workers.request_sender,
-                &self.workers.response_receiver,
-                WORKER_THREAD_COUNT,
-            );
+            unblocked.push(blocking);
         }
 
-        info!(
-            "Completed {}/{} bundles",
-            execution_context.completed_bundles_count(),
-            execution_context.total_bundles_count()
-        );
+        unblocked
     }
 
-    pub fn execute_and_commit_and_record_micro_block(
-        &mut self,
-        micro_block: MicroBlock,
-        executed_sender: Sender<JssExecutorExecutionResult>,
-    ) {
-        return self.schedule_microblock(micro_block, executed_sender);
-    }
-
-    pub fn execute_commit_record_bundle(
-        bank: &Arc<Bank>,
-        recorder: &TransactionRecorder,
-        committer: &mut bundle_stage::committer::Committer,
-        txns: Vec<SanitizedTransaction>,
-    ) -> bool {
-        let len = txns.len();
-        let bundle_id = derive_bundle_id_from_sanitized_transactions(&txns);
-        let sanitized_bundle = SanitizedBundle {
-            transactions: txns,
-            bundle_id: bundle_id.clone(),
-        };
-
-        let default_accounts = vec![None; len];
-        let transaction_status_sender_enabled = committer.transaction_status_sender_enabled();
-        let mut bundle_execution_results = load_and_execute_bundle(
-            &bank,
-            &sanitized_bundle,
-            MAX_PROCESSING_AGE,
-            &MAX_BUNDLE_RETRY_DURATION,
-            transaction_status_sender_enabled,
-            &None,
-            false,
-            None,
-            &default_accounts,
-            &default_accounts,
-        );
-
-        if let Err(err) = bundle_execution_results.result() {
-            error!("Error executing bundle {}: {:?}", bundle_id, err);
-            return false;
-        }
-
-        let (executed_batches, _execution_results_to_transactions_us) =
-            measure_us!(bundle_execution_results.executed_transaction_batches());
-
-        let _freeze_lock = bank.freeze_lock();
-        let (last_blockhash, lamports_per_signature) =
-            bank.last_blockhash_and_lamports_per_signature();
-        let RecordTransactionsSummary {
-            result: record_transactions_result,
-            record_transactions_timings: _,
-            starting_transaction_index,
-        } = recorder.record_transactions(bank.slot(), executed_batches);
-        if record_transactions_result.is_err() {
-            return false;
-        }
-
-        let mut execute_and_commit_timings = LeaderExecuteAndCommitTimings::default();
-        committer.commit_bundle(
-            &mut bundle_execution_results,
-            last_blockhash,
-            lamports_per_signature,
-            starting_transaction_index,
-            &bank,
-            &mut execute_and_commit_timings,
-        );
-
-        true
+    fn clear(&mut self) {
+        self.queue.clear();
     }
 }
 
-impl Drop for JssExecutor {
-    fn drop(&mut self) {
-        for worker in self.workers.worker_threads.drain(..) {
-            worker.join().unwrap();
-        }
-    }
-}
-
-pub struct JssExecutorWorkerExecutionResult {
-    context: BundleContext,
-    success: bool,
-}
-
-pub enum JssExecutorExecutionResult {
-    Success(String /*BundleId*/),
-    Failure { bundle_id: String, cus: u32 },
-}
-
-struct ExecutionWorkers {
-    worker_threads: Vec<std::thread::JoinHandle<()>>,
-    exit: Arc<AtomicBool>,
-    request_sender: crossbeam_channel::Sender<BundleContext>,
-    response_receiver: crossbeam_channel::Receiver<JssExecutorWorkerExecutionResult>,
-}
-
-struct Lock {
-    account_id: u32,
-    write: bool,
-}
-
-enum QueuedBundle {
-    Unparsed(Vec<Packet>),
-    Waiting {
-        transactions: Vec<SanitizedTransaction>,
-        locks: Vec<Lock>,
-    },
-    Scheduled,
-}
-
-struct BundleContext {
-    transactions: Vec<SanitizedTransaction>,
-    locks: Vec<Lock>,
-}
-
-pub struct MicroblockExecutionContext {
-    bank_start: BankStart,
-    bundles: Vec<QueuedBundle>,
-    lock_assigner: LockIdAssigner,
-    write_locked: IntSet<u32>,
-    read_locked: IntMap<u32, usize>,
-    total_bundles_count: usize,
-    inflight_bundles_count: usize,
-    completed_bundles_count: usize,
-    first_unprocessed_bundle_index: usize,
-}
-
-impl MicroblockExecutionContext {
-    pub fn new(bank_start: BankStart, microblock: MicroBlock) -> Self {
-        Self {
-            bank_start,
-            lock_assigner: LockIdAssigner::new(),
-            total_bundles_count: microblock.bundles.len(),
-            bundles: microblock
-                .bundles
-                .into_iter()
-                .map(|bundle| QueuedBundle::Unparsed(bundle.packets))
-                .collect_vec(),
-            write_locked: IntSet::new(),
-            read_locked: IntMap::new(),
-            inflight_bundles_count: 0,
-            completed_bundles_count: 0,
-            first_unprocessed_bundle_index: 0,
-        }
-    }
-
-    pub fn keep_going(&self) -> bool {
-        self.completed_bundles_count < self.total_bundles_count
-    }
-
-    pub fn completed_bundles_count(&self) -> usize {
-        self.completed_bundles_count
-    }
-
-    pub fn total_bundles_count(&self) -> usize {
-        self.total_bundles_count
-    }
-}
-
-struct LockIdAssigner {
-    next_id: u32,
-    mapping: HashMap<Pubkey, u32>,
-}
-
-impl LockIdAssigner {
-    pub fn new() -> Self {
-        Self {
-            next_id: 0,
-            mapping: HashMap::new(),
-        }
-    }
-
-    pub fn assign_or_get_id(&mut self, pubkey: Pubkey) -> u32 {
-        if let Some(id) = self.mapping.get(&pubkey) {
-            return *id;
-        }
-        let id = self.next_id;
-        self.next_id += 1;
-        self.mapping.insert(pubkey, id);
-        id
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -797,7 +851,7 @@ mod tests {
         let start = std::time::Instant::now();
         while start.elapsed() < wait {
             let Ok(WorkingBankEntry {
-                bank: wbe_bank,
+                bank: _wbe_bank,
                 entries_ticks,
             }) = entry_receiver.try_recv()
             else {
@@ -816,7 +870,7 @@ mod tests {
     fn test_execution_simple() {
         let TestFixture {
             genesis_config_info,
-            leader_keypair,
+            leader_keypair: _leader_keypair,
             bank,
             exit,
             poh_recorder,
@@ -828,7 +882,8 @@ mod tests {
         let (replay_vote_sender, _) = crossbeam_channel::unbounded();
 
         let mut executor = super::JssExecutor::new(
-            poh_recorder,
+            1,
+            poh_recorder.clone(),
             replay_vote_sender,
             None,
             Arc::new(PrioritizationFeeCache::default()),
@@ -867,21 +922,17 @@ mod tests {
             bundles: vec![successful_bundle, failed_bundle],
         };
 
-        let (executed_sender, _executed_receiver) = std::sync::mpsc::channel();
-
         // See if the transaction is executed
-        executor
-            .execute_and_commit_and_record_micro_block(microblock.clone(), executed_sender.clone());
+        executor.schedule_microblock(&bank, microblock.clone());
         let txns = get_executed_txns(&entry_receiver, Duration::from_secs(3));
         assert_eq!(txns.len(), 1);
 
         // Make sure if you try the same thing again, it doesn't work
-        executor.execute_and_commit_and_record_micro_block(microblock.clone(), executed_sender);
+        executor.schedule_microblock(&bank, microblock);
         let txns = get_executed_txns(&entry_receiver, Duration::from_secs(3));
         assert_eq!(txns.len(), 0);
 
-        executor
-            .poh_recorder
+        poh_recorder
             .write()
             .unwrap()
             .is_exited
