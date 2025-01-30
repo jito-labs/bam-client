@@ -52,11 +52,12 @@ impl Committer {
         }
     }
 
-    pub(super) fn transaction_status_sender_enabled(&self) -> bool {
+    pub fn transaction_status_sender_enabled(&self) -> bool {
         self.transaction_status_sender.is_some()
     }
 
-    pub(super) fn commit_transactions(
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit_transactions(
         &self,
         batch: &TransactionBatch<SanitizedTransaction>,
         processing_results: Vec<TransactionProcessingResult>,
