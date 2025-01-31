@@ -189,7 +189,7 @@ impl JssExecutor {
                 bank_start.working_bank.slot(),
                 microblock_count,
                 bundles_scheduled,
-                bundles.len()
+                bundles.len() - bundles_scheduled as usize
             );
             bundles_scheduled = 0;
             bundles.clear();
