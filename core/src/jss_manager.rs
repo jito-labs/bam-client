@@ -15,7 +15,7 @@ use jito_protos::proto::{
     jss_api::TpuConfigResp,
     jss_types::{LeaderState, MicroBlock, Socket},
 };
-use solana_gossip::cluster_info::ClusterInfo;
+use solana_gossip::{cluster_info::ClusterInfo, contact_info::Protocol};
 use solana_ledger::blockstore_processor::TransactionStatusSender;
 use solana_poh::poh_recorder::{BankStart, PohRecorder};
 use solana_runtime::{
@@ -134,8 +134,9 @@ impl JssManager {
         cluster_info: Arc<ClusterInfo>,
         micro_block_sender: std::sync::mpsc::Sender<(MicroBlock, u64)>,
     ) {
-        let mut jss_connection = None;
+        let mut jss_connection: Option<JssConnection> = None;
         let mut tpu_info = None;
+        let local_contact_info = cluster_info.my_contact_info();
 
         info!("JSS Manager started");
 
@@ -146,7 +147,15 @@ impl JssManager {
                 jss_enabled.store(false, std::sync::atomic::Ordering::Relaxed);
                 continue;
             } else {
-                jss_enabled.store(true, std::sync::atomic::Ordering::Relaxed);
+                if jss_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = cluster_info.set_tpu(local_contact_info.tpu(Protocol::UDP).unwrap()).inspect_err(|e| {
+                        warn!("Failed to set TPU: {:?}", e);
+                    });
+                    let _ = cluster_info.set_tpu_forwards(local_contact_info.tpu_forwards(Protocol::UDP).unwrap()).inspect_err(|e| {
+                        warn!("Failed to set TPU forwards: {:?}", e);
+                    });
+                    jss_enabled.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
             }
 
             let Some(mut jss_connection) = jss_connection.as_mut() else {
