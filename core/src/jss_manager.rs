@@ -231,7 +231,7 @@ impl JssManager {
 
             // If tick has increased, send leader state
             let tick = bank_start.working_bank.tick_height();
-            if prev_tick != tick && tick % 8 == 0 {
+            if prev_tick != tick {
                 prev_tick = tick;
                 send_leader_state(jss_connection, &bank_start.working_bank);
             }
