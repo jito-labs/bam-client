@@ -252,9 +252,13 @@ impl JssExecutor {
                 };
                 batch_for_execution.add(bundle_id, transactions);
             }
+            if batch_for_execution.is_empty() {
+                continue;
+            }
 
+            let batch_size = batch_for_execution.len();
             if worker.send(batch_for_execution) {
-                *bundles_scheduled += 1;
+                *bundles_scheduled += batch_size as u64;
             }
         }
     }
@@ -614,9 +618,17 @@ impl BatchForExecution {
         self.txns.len() == 64
     }
 
+    fn is_empty(&self) -> bool {
+        self.txns.is_empty()
+    }
+
     fn add(&mut self, id: BundleExecutionId, txns: Vec<SanitizedTransaction>) {
         self.ids.push(id);
         self.txns.extend(txns);
+    }
+
+    fn len(&self) -> usize {
+        self.txns.len()
     }
 }
 
