@@ -818,6 +818,7 @@ mod tests {
             PrioGraphScheduler::new(consume_work_senders, finished_consume_work_receiver),
             vec![], // no actual workers with metrics to report, this can be empty
             None,
+            Arc::new(AtomicBool::new(false)),
         );
 
         (test_frame, scheduler_controller)
