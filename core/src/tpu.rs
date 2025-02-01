@@ -325,6 +325,7 @@ impl Tpu {
             enable_block_production_forwarding,
             blacklisted_accounts,
             bundle_account_locker.clone(),
+            jss_enabled.clone(),
         );
 
         let bundle_stage = BundleStage::new(

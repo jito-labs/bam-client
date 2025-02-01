@@ -48,7 +48,7 @@ use {
         env,
         ops::Deref,
         sync::{
-            atomic::{AtomicU64, AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
             Arc, RwLock,
         },
         thread::{self, Builder, JoinHandle},
@@ -365,6 +365,7 @@ impl BankingStage {
         enable_forwarding: bool,
         blacklisted_accounts: HashSet<Pubkey>,
         bundle_account_locker: BundleAccountLocker,
+        jss_enabled: Arc<AtomicBool>,
     ) -> Self {
         Self::new_num_threads(
             block_production_method,
@@ -383,6 +384,7 @@ impl BankingStage {
             enable_forwarding,
             blacklisted_accounts,
             bundle_account_locker,
+            jss_enabled,
         )
     }
 
@@ -404,6 +406,7 @@ impl BankingStage {
         enable_forwarding: bool,
         blacklisted_accounts: HashSet<Pubkey>,
         bundle_account_locker: BundleAccountLocker,
+        jss_enabled: Arc<AtomicBool>,
     ) -> Self {
         match block_production_method {
             BlockProductionMethod::ThreadLocalMultiIterator => {
@@ -440,6 +443,7 @@ impl BankingStage {
                 enable_forwarding,
                 blacklisted_accounts,
                 bundle_account_locker,
+                jss_enabled,
             ),
         }
     }
@@ -551,6 +555,7 @@ impl BankingStage {
         enable_forwarding: bool,
         blacklisted_accounts: HashSet<Pubkey>,
         bundle_account_locker: BundleAccountLocker,
+        jss_enabled: Arc<AtomicBool>,
     ) -> Self {
         assert!(num_threads >= MIN_TOTAL_THREADS);
         // Single thread to generate entries from many banks.
@@ -659,6 +664,7 @@ impl BankingStage {
                 scheduler,
                 worker_metrics,
                 forwarder,
+                jss_enabled,
             );
             Builder::new()
                 .name("solBnkTxSched".to_string())
@@ -939,6 +945,7 @@ mod tests {
                 false,
                 HashSet::default(),
                 BundleAccountLocker::default(),
+                Arc::new(AtomicBool::new(false)),
             );
             drop(non_vote_sender);
             drop(tpu_vote_sender);
@@ -997,6 +1004,7 @@ mod tests {
                 false,
                 HashSet::default(),
                 BundleAccountLocker::default(),
+                Arc::new(AtomicBool::new(false)),
             );
             trace!("sending bank");
             drop(non_vote_sender);
@@ -1084,6 +1092,7 @@ mod tests {
                 false,
                 HashSet::default(),
                 BundleAccountLocker::default(),
+                Arc::new(AtomicBool::new(false)),
             );
 
             // fund another account so we can send 2 good transactions in a single batch.
@@ -1464,6 +1473,7 @@ mod tests {
                 false,
                 HashSet::default(),
                 BundleAccountLocker::default(),
+                Arc::new(AtomicBool::new(false)),
             );
 
             let keypairs = (0..100).map(|_| Keypair::new()).collect_vec();
