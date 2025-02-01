@@ -17,7 +17,7 @@ use jito_protos::proto::{
 };
 use solana_gossip::{cluster_info::ClusterInfo, contact_info::Protocol};
 use solana_ledger::blockstore_processor::TransactionStatusSender;
-use solana_poh::poh_recorder::{BankStart, PohRecorder};
+use solana_poh::poh_recorder::{self, BankStart, PohRecorder};
 use solana_runtime::{
     bank::Bank, prioritization_fee_cache::PrioritizationFeeCache,
     vote_sender_types::ReplayVoteSender,
@@ -64,8 +64,7 @@ impl JssManager {
 
                 while !exit_micro_block_execution_thread.load(std::sync::atomic::Ordering::Relaxed)
                 {
-                    let Some((micro_block, _slot)): Option<(MicroBlock, u64)> =
-                        micro_block_receiver.recv().ok()
+                    let Some(micro_block) : Option<MicroBlock> =  micro_block_receiver.recv().ok()
                     else {
                         continue;
                     };
@@ -120,7 +119,7 @@ impl JssManager {
         exit: Arc<AtomicBool>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         cluster_info: Arc<ClusterInfo>,
-        micro_block_sender: std::sync::mpsc::Sender<(MicroBlock, u64)>,
+        micro_block_sender: std::sync::mpsc::Sender<MicroBlock>,
     ) {
         let mut jss_connection: Option<JssConnection> = None;
         let mut tpu_info = None;
@@ -158,24 +157,12 @@ impl JssManager {
                 Self::update_tpu_config(tpu_info.as_ref(), &cluster_info).await;
             }
 
-            if Self::is_within_leader_slot_with_lookahead(&poh_recorder.read().unwrap(), 0) {
-                let Some(bank_start) = poh_recorder.read().unwrap().bank_start() else {
-                    continue;
-                };
-                if !bank_start.should_working_bank_still_be_processing_txs() {
-                    continue;
-                }
-
-                info!(
-                    "Entering leader slot mode slot={} tick={}",
-                    bank_start.working_bank.slot(),
-                    bank_start.working_bank.tick_height() as u64
-                        % bank_start.working_bank.ticks_per_slot()
-                );
+            const TICK_LOOKAHEAD: u64 = 8;
+            if Self::is_within_leader_slot_with_lookahead(&poh_recorder.read().unwrap(), TICK_LOOKAHEAD) {
                 Self::run_leader_slot_mode(
                     &mut jss_connection,
                     &cluster_info,
-                    &bank_start,
+                    &poh_recorder,
                     &micro_block_sender,
                 );
             }
@@ -188,9 +175,12 @@ impl JssManager {
     fn run_leader_slot_mode(
         jss_connection: &mut JssConnection,
         cluster_info: &Arc<ClusterInfo>,
-        bank_start: &BankStart,
-        micro_block_sender: &std::sync::mpsc::Sender<(MicroBlock, u64)>,
+        poh_recorder: &Arc<RwLock<PohRecorder>>,
+        micro_block_sender: &std::sync::mpsc::Sender<MicroBlock>,
     ) {
+        let current_slot = poh_recorder.read().unwrap().get_current_slot() + 1;
+        info!("Running leader slot mode for slot={}", current_slot);
+
         let send_leader_state = |jss_connection: &mut JssConnection, bank: &Bank| {
             let max_block_cu = bank.read_cost_tracker().unwrap().block_cost_limit();
             let consumed_block_cu = bank.read_cost_tracker().unwrap().block_cost();
@@ -210,18 +200,35 @@ impl JssManager {
 
         // Start off by sending the leader state
 
-        let mut prev_tick = bank_start.working_bank.tick_height();
-        while bank_start.should_working_bank_still_be_processing_txs() {
+        let mut sent_initial_leader_state = false;
+        let mut prev_tick = u64::MAX;
+        const TICK_LOOKAHEAD: u64 = 8;
+        while Self::is_within_leader_slot_with_lookahead(&poh_recorder.read().unwrap(), TICK_LOOKAHEAD) {
+            // Receive microblocks and foward them
             while let Some(micro_block) = jss_connection.try_recv_microblock() {
-                let current_slot = bank_start.working_bank.slot();
-                micro_block_sender.send((micro_block, current_slot)).ok();
+                micro_block_sender.send(micro_block).ok();
             }
 
-            // If tick has increased, send leader state
-            let tick = bank_start.working_bank.tick_height();
-            if prev_tick != tick {
-                prev_tick = tick;
-                send_leader_state(jss_connection, &bank_start.working_bank);
+            if let Some(bank_start) = poh_recorder.read().unwrap().bank_start() {
+                // If tick has increased, send leader state
+                let tick = bank_start.working_bank.tick_height();
+                if prev_tick != tick {
+                    prev_tick = tick;
+                    send_leader_state(jss_connection, &bank_start.working_bank);
+                }
+            } else if !sent_initial_leader_state {
+                sent_initial_leader_state = true;
+                let slot_account_cu_budget = vec![]; // TODO fill this
+                let slot = poh_recorder.read().unwrap().get_current_slot() + 1;
+                let leader_state = LeaderState {
+                    pubkey: cluster_info.keypair().pubkey().to_bytes().to_vec(),
+                    slot,
+                    tick: 0,
+                    slot_account_cu_budget,
+                    slot_cu_budget: 48_000_000, // Remove hardcoded value
+                    recently_executed_txn_signatures: vec![], // TODO; fill this (Maybe not needed for POC)
+                };
+                jss_connection.send_leader_state(leader_state);
             }
         }
     }
