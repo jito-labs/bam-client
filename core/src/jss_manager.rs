@@ -15,6 +15,7 @@ use jito_protos::proto::{
     jss_api::TpuConfigResp,
     jss_types::{LeaderState, MicroBlock, Socket},
 };
+use solana_entry::poh;
 use solana_gossip::{cluster_info::ClusterInfo, contact_info::Protocol};
 use solana_ledger::blockstore_processor::TransactionStatusSender;
 use solana_poh::poh_recorder::{self, BankStart, PohRecorder};
@@ -178,8 +179,9 @@ impl JssManager {
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         micro_block_sender: &std::sync::mpsc::Sender<MicroBlock>,
     ) {
-        let current_slot = poh_recorder.read().unwrap().get_current_slot() + 1;
-        info!("Running leader slot mode for slot={}", current_slot);
+        let current_slot = poh_recorder.read().unwrap().get_current_slot();
+        let current_tick = poh_recorder.read().unwrap().tick_height() % poh_recorder.read().unwrap().ticks_per_slot();
+        info!("Running leader slot mode for slot={} current_slot={} current_tick={}", current_slot + 1, current_slot, current_tick);
 
         let send_leader_state = |jss_connection: &mut JssConnection, bank: &Bank| {
             let max_block_cu = bank.read_cost_tracker().unwrap().block_cost_limit();
@@ -219,15 +221,15 @@ impl JssManager {
             } else if !sent_initial_leader_state {
                 sent_initial_leader_state = true;
                 let slot_account_cu_budget = vec![]; // TODO fill this
-                let slot = poh_recorder.read().unwrap().get_current_slot() + 1;
                 let leader_state = LeaderState {
                     pubkey: cluster_info.keypair().pubkey().to_bytes().to_vec(),
-                    slot,
+                    slot: current_slot + 1,
                     tick: 0,
                     slot_account_cu_budget,
                     slot_cu_budget: 48_000_000, // Remove hardcoded value
                     recently_executed_txn_signatures: vec![], // TODO; fill this (Maybe not needed for POC)
                 };
+                info!("Sending initial leader state slot={} tick={}", leader_state.slot, leader_state.tick);
                 jss_connection.send_leader_state(leader_state);
             }
         }
