@@ -144,16 +144,16 @@ impl JssManager {
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
             // Init and/or check health of connection
             if !Self::get_or_init_connection(jss_url.clone(), &mut jss_connection).await {
+                let _ = cluster_info.set_tpu(local_contact_info.tpu(Protocol::UDP).unwrap()).inspect_err(|e| {
+                    warn!("Failed to set TPU: {:?}", e);
+                });
+                let _ = cluster_info.set_tpu_forwards(local_contact_info.tpu_forwards(Protocol::UDP).unwrap()).inspect_err(|e| {
+                    warn!("Failed to set TPU forwards: {:?}", e);
+                });
                 jss_enabled.store(false, std::sync::atomic::Ordering::Relaxed);
                 continue;
             } else {
                 if jss_enabled.load(std::sync::atomic::Ordering::Relaxed) {
-                    let _ = cluster_info.set_tpu(local_contact_info.tpu(Protocol::UDP).unwrap()).inspect_err(|e| {
-                        warn!("Failed to set TPU: {:?}", e);
-                    });
-                    let _ = cluster_info.set_tpu_forwards(local_contact_info.tpu_forwards(Protocol::UDP).unwrap()).inspect_err(|e| {
-                        warn!("Failed to set TPU forwards: {:?}", e);
-                    });
                     jss_enabled.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
             }
