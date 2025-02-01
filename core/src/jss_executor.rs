@@ -15,7 +15,10 @@ use std::{
 use itertools::Itertools;
 use jito_protos::proto::jss_types::{MicroBlock, Packet};
 use prio_graph::{AccessKind, GraphNode, TopLevelId};
-use solana_bundle::{bundle_execution::load_and_execute_bundle, derive_bundle_id_from_sanitized_transactions, SanitizedBundle};
+use solana_bundle::{
+    bundle_execution::load_and_execute_bundle, derive_bundle_id_from_sanitized_transactions,
+    SanitizedBundle,
+};
 use solana_ledger::{
     blockstore_processor::TransactionStatusSender, token_balances::collect_token_balances,
 };
@@ -28,12 +31,14 @@ use solana_runtime::{
     vote_sender_types::ReplayVoteSender,
 };
 use solana_sdk::{
-    clock::MAX_PROCESSING_AGE,
-    packet::PacketFlags,
-    pubkey::Pubkey,
+    clock::MAX_PROCESSING_AGE, packet::PacketFlags, pubkey::Pubkey,
     transaction::SanitizedTransaction,
 };
-use solana_svm::{transaction_error_metrics::TransactionErrorMetrics, transaction_processing_result::TransactionProcessingResultExtensions, transaction_processor::{ExecutionRecordingConfig, TransactionProcessingConfig}};
+use solana_svm::{
+    transaction_error_metrics::TransactionErrorMetrics,
+    transaction_processing_result::TransactionProcessingResultExtensions,
+    transaction_processor::{ExecutionRecordingConfig, TransactionProcessingConfig},
+};
 use solana_transaction_status::PreBalanceInfo;
 
 use crate::{
@@ -480,7 +485,8 @@ impl JssExecutor {
             &bank,
             &mut pre_balance_info,
             &mut execute_and_commit_timings,
-            &results.processed_counts);
+            &results.processed_counts,
+        );
         true
     }
 

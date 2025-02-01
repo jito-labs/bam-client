@@ -94,6 +94,8 @@ pub struct Tpu {
     block_engine_stage: BlockEngineStage,
     fetch_stage_manager: FetchStageManager,
     bundle_stage: BundleStage,
+    jss_manager: Option<JssManager>,
+    quic_foward_filter: thread::JoinHandle<()>,
 }
 
 impl Tpu {
@@ -201,6 +203,33 @@ impl Tpu {
         )
         .unwrap();
 
+        let jss_enabled = Arc::new(AtomicBool::new(jss_url.is_some()));
+
+        // Prevent forwarding transactions if JSS is enabled
+        let exit_quic_foward_filter = exit.clone();
+        let jss_enabled_quic_foward_filter = jss_enabled.clone();
+        let (intercepted_forwarded_packet_sender, intercepted_forwarded_packet_receiver) =
+            unbounded();
+        let quic_foward_filter = std::thread::Builder::new()
+            .name("quic_foward_filter".to_string())
+            .spawn(move || {
+                while !exit_quic_foward_filter.load(std::sync::atomic::Ordering::Relaxed) {
+                    if jss_enabled_quic_foward_filter.load(std::sync::atomic::Ordering::Relaxed) {
+                        std::thread::sleep(Duration::from_millis(100));
+                        continue;
+                    }
+                    match intercepted_forwarded_packet_receiver
+                        .recv_timeout(Duration::from_millis(100))
+                    {
+                        Ok(packet) => {
+                            let _ = forwarded_packet_sender.send(packet);
+                        }
+                        Err(_) => {}
+                    }
+                }
+            })
+            .unwrap();
+
         let SpawnServerResult {
             endpoints: _,
             thread: tpu_forwards_quic_t,
@@ -210,7 +239,7 @@ impl Tpu {
             "quic_streamer_tpu_forwards",
             transactions_forwards_quic_sockets,
             keypair,
-            forwarded_packet_sender,
+            intercepted_forwarded_packet_sender,
             exit.clone(),
             MAX_QUIC_CONNECTIONS_PER_PEER,
             staked_nodes.clone(),
@@ -224,6 +253,7 @@ impl Tpu {
         .unwrap();
 
         let (packet_sender, packet_receiver) = unbounded();
+        let (bundle_sender, bundle_receiver) = unbounded();
 
         let sigverify_stage = {
             let verifier = TransactionSigVerifier::new(non_vote_sender.clone());
@@ -378,6 +408,8 @@ impl Tpu {
                 relayer_stage,
                 fetch_stage_manager,
                 bundle_stage,
+                jss_manager,
+                quic_foward_filter,
             },
             vec![key_updater, forwards_key_updater],
         )
