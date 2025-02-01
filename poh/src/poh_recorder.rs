@@ -383,6 +383,10 @@ impl PohRecorder {
         tick_height.saturating_sub(1) / self.ticks_per_slot
     }
 
+    pub fn get_current_slot(&self) -> Slot {
+        self.slot_for_tick_height(self.tick_height)
+    }
+
     pub fn leader_after_n_slots(&self, slots: u64) -> Option<Pubkey> {
         let current_slot = self.slot_for_tick_height(self.tick_height);
         self.leader_schedule_cache
