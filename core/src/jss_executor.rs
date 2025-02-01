@@ -241,14 +241,19 @@ impl JssExecutor {
                 prio_graph.unblock(&bundle_id);
             }
 
-            let (bundle_id, txns) = match prio_graph.pop() {
-                Some(bundle) => (bundle, bundles[bundle.id].take().unwrap()),
-                None => {
-                    return;
-                }
-            };
+            let mut batch_for_execution = BatchForExecution::default();
+            while !batch_for_execution.is_full() {
+                let Some(bundle_id) = prio_graph.pop() else {
+                    break;
+                };
+                let Some(transactions) = bundles[bundle_id.id].take() else {
+                    warn!("Bundle {} already scheduled", bundle_id.id);
+                    continue;
+                };
+                batch_for_execution.add(bundle_id, transactions);
+            }
 
-            if worker.send(bundle_id, txns) {
+            if worker.send(batch_for_execution) {
                 *bundles_scheduled += 1;
             }
         }
@@ -293,7 +298,7 @@ impl JssExecutor {
         poh_recorder: Arc<RwLock<PohRecorder>>,
         mut bundle_committer: bundle_stage::committer::Committer,
         mut transaction_commiter: banking_stage::committer::Committer,
-        receiver: crossbeam_channel::Receiver<(BundleExecutionId, Vec<SanitizedTransaction>)>,
+        receiver: crossbeam_channel::Receiver<BatchForExecution>,
         exit: Arc<AtomicBool>,
     ) {
         let recorder = poh_recorder.read().unwrap().new_recorder();
@@ -309,7 +314,7 @@ impl JssExecutor {
                 bank_start = None;
                 continue;
             }
-            let Ok((_, txns)) = receiver.recv_timeout(Duration::from_millis(1)) else {
+            let Ok(BatchForExecution{ ids: _, txns }) = receiver.recv_timeout(Duration::from_millis(1)) else {
                 continue;
             };
             Self::execute_record_commit(
@@ -331,17 +336,16 @@ impl JssExecutor {
         transaction_commiter: &mut banking_stage::committer::Committer,
         transactions: Vec<SanitizedTransaction>,
     ) -> bool {
-        if transactions.len() == 1 {
-            Self::execute_commit_record_transactions(
-                bank,
-                recorder,
-                transaction_commiter,
-                transactions,
-            )
-        } else {
-            // TODO: properly handle jito tips
-            Self::execute_commit_record_bundle(bank, recorder, bundle_committer, transactions)
-        }
+        Self::execute_commit_record_transactions(
+            bank,
+            recorder,
+            transaction_commiter,
+            transactions,
+        )
+        
+
+        // TODO: handle bundles
+        //Self::execute_commit_record_bundle(bank, recorder, bundle_committer, transactions)
     }
 
     fn execute_commit_record_bundle(
@@ -409,11 +413,9 @@ impl JssExecutor {
         committer: &mut banking_stage::committer::Committer,
         transactions: Vec<SanitizedTransaction>,
     ) -> bool {
-        assert_eq!(transactions.len(), 1);
-
         let batch = bank.prepare_sanitized_batch_with_results(
             &transactions,
-            std::iter::once(None).map(|_: Option<()>| Ok(())),
+            transactions.iter().map(|_| Ok(())),
             None,
             None,
         );
@@ -593,16 +595,41 @@ impl PartialOrd for BundleExecutionId {
     }
 }
 
+struct BatchForExecution {
+    ids: Vec<BundleExecutionId>,
+    txns: Vec<SanitizedTransaction>,
+}
+
+impl Default for BatchForExecution {
+    fn default() -> Self {
+        Self {
+            ids: Vec::new(),
+            txns: Vec::new(),
+        }
+    }
+}
+
+impl BatchForExecution {
+    fn is_full(&self) -> bool {
+        self.txns.len() == 64
+    }
+
+    fn add(&mut self, id: BundleExecutionId, txns: Vec<SanitizedTransaction>) {
+        self.ids.push(id);
+        self.txns.extend(txns);
+    }
+}
+
 // Worker management struct for scheduling thread
 struct Worker {
-    sender: crossbeam_channel::Sender<(BundleExecutionId, Vec<SanitizedTransaction>)>,
-    queue: VecDeque<BundleExecutionId>,
+    sender: crossbeam_channel::Sender<BatchForExecution>,
+    queue: VecDeque<Vec<BundleExecutionId>>,
 }
 
 impl Worker {
     /// Creates a new worker with the given sender.
     fn new(
-        sender: crossbeam_channel::Sender<(BundleExecutionId, Vec<SanitizedTransaction>)>,
+        sender: crossbeam_channel::Sender<BatchForExecution>,
     ) -> Self {
         Self {
             sender,
@@ -617,9 +644,10 @@ impl Worker {
 
     /// Sends a bundle to the worker, while saving it in a local queue;
     /// used later to unblock transactions when the worker has picked up the bundle.
-    fn send(&mut self, bundle_id: BundleExecutionId, txns: Vec<SanitizedTransaction>) -> bool {
-        if self.sender.try_send((bundle_id, txns)).is_ok() {
-            self.queue.push_back(bundle_id);
+    fn send(&mut self, batch: BatchForExecution) -> bool {
+        let bundle_ids = batch.ids.clone();
+        if self.sender.try_send(batch).is_ok() {
+            self.queue.push_back(bundle_ids);
             true
         } else {
             false
@@ -635,7 +663,7 @@ impl Worker {
             let Some(blocking) = self.queue.pop_front() else {
                 break;
             };
-            unblocked.push(blocking);
+            unblocked.extend(blocking);
         }
 
         unblocked
@@ -913,7 +941,7 @@ mod tests {
         // See if the transaction is executed
         executor.schedule_microblock(&bank, microblock.clone());
         let txns = get_executed_txns(&entry_receiver, Duration::from_secs(3));
-        assert_eq!(txns.len(), 1);
+        assert_eq!(txns.len(), 2);
 
         // Make sure if you try the same thing again, it doesn't work
         executor.schedule_microblock(&bank, microblock);
