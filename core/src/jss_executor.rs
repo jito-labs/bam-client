@@ -252,9 +252,9 @@ impl JssExecutor {
                 };
                 batch_for_execution.add(bundle_id, transactions);
             }
-            //if !batch_for_execution.is_full() {
-            //    continue;
-            //}
+            if batch_for_execution.is_empty() {
+                continue;
+            }
 
             let batch_size = batch_for_execution.len();
             if worker.send(batch_for_execution) {
