@@ -64,39 +64,27 @@ impl JssManager {
 
                 while !exit_micro_block_execution_thread.load(std::sync::atomic::Ordering::Relaxed)
                 {
-                    let Some((micro_block, slot)): Option<(MicroBlock, u64)> =
+                    let Some((micro_block, _slot)): Option<(MicroBlock, u64)> =
                         micro_block_receiver.recv().ok()
                     else {
                         continue;
                     };
-                    let Some(current_slot) = poh_recorder_micro_block_execution_thread
-                        .read()
-                        .unwrap()
-                        .working_slot()
-                    else {
-                        continue;
-                    };
-                    if slot != current_slot {
-                        info!(
-                            "Received micro block for slot={} but current slot is={}; skipping",
-                            slot, current_slot
-                        );
-                        continue;
-                    }
                     let poh = poh_recorder_micro_block_execution_thread.read().unwrap();
-                    let current_tick = poh.tick_height() % poh.ticks_per_slot();
-                    info!(
-                        "Received micro block; slot={}, tick={}, bundle_count: {}",
-                        current_slot,
-                        current_tick,
-                        micro_block.bundles.len()
-                    );
                     let Some(bank) = poh.bank_start() else {
                         continue;
                     };
                     if !bank.should_working_bank_still_be_processing_txs() {
                         continue;
                     }
+                    let current_slot = bank.working_bank.slot();
+                    let current_tick = bank.working_bank.tick_height() as u64
+                        % bank.working_bank.ticks_per_slot();
+                    info!(
+                        "Received micro block; slot={}, tick={}, bundle_count: {}",
+                        current_slot,
+                        current_tick,
+                        micro_block.bundles.len()
+                    );
                     executor.schedule_microblock(&bank.working_bank, micro_block);
                 }
             })
