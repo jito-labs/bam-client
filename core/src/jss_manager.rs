@@ -50,7 +50,7 @@ impl JssManager {
         let micro_block_execution_thread = Builder::new()
             .name("micro_block_execution_thread".to_string())
             .spawn(move || {
-                const WORKER_THREAD_COUNT: usize = 4;
+                const WORKER_THREAD_COUNT: usize = 20;
                 let mut executor = JssExecutor::new(
                     WORKER_THREAD_COUNT,
                     poh_recorder_micro_block_execution_thread.clone(),
