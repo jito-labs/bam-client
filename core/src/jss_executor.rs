@@ -236,7 +236,7 @@ impl JssExecutor {
         bundles_scheduled: &mut u64,
         workers: &mut Vec<Worker>,
     ) {
-        for worker in workers.iter_mut().filter(|w| !w.is_full()) {
+        for (i, worker) in workers.iter_mut().enumerate().filter(|(_,w)| !w.is_full()) {
             for bundle_id in worker.get_unblocking_bundles() {
                 prio_graph.unblock(&bundle_id);
             }
@@ -258,7 +258,7 @@ impl JssExecutor {
 
             let batch_size = batch_for_execution.len();
             if worker.send(batch_for_execution) {
-                info!("Scheduled {} transactions", batch_size);
+                info!("worker={} scheduled={}", i, batch_size);
                 *bundles_scheduled += batch_size as u64;
             }
         }
