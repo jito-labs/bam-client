@@ -630,7 +630,7 @@ impl Default for BatchForExecution {
 
 impl BatchForExecution {
     fn is_full(&self) -> bool {
-        self.txns.len() == 64
+        self.txns.len() == 1
     }
 
     fn is_empty(&self) -> bool {
