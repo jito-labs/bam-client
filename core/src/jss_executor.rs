@@ -457,7 +457,7 @@ impl JssExecutor {
 
         results.processing_results.iter().for_each(|result| {
             if let Err(err) = result {
-                error!("Error executing transaction: {:?}", err);
+                error!("    Error executing transaction: {:?}", err);
             }
         });
 
