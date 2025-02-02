@@ -461,6 +461,14 @@ impl JssExecutor {
             }
         });
 
+        info!(
+            "slot={} total={} processed={} success={}",
+            bank.slot(),
+            transactions.len(),
+            results.processed_counts.processed_non_vote_transactions_count,
+            results.processed_counts.processed_with_successful_result_count
+        );
+
         let _freeze_lock = bank.freeze_lock();
         let (last_blockhash, lamports_per_signature) =
             bank.last_blockhash_and_lamports_per_signature();
