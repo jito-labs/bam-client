@@ -434,7 +434,7 @@ impl JssExecutor {
         }
 
         let mut execute_and_commit_timings = LeaderExecuteAndCommitTimings::default();
-        let mut results = bank.load_and_execute_transactions(
+        let results = bank.load_and_execute_transactions(
             &batch,
             MAX_PROCESSING_AGE,
             &mut execute_and_commit_timings.execute_timings,
@@ -454,6 +454,12 @@ impl JssExecutor {
         if results.processed_counts.processed_transactions_count == 0 {
             return false;
         }
+
+        results.processing_results.iter().for_each(|result| {
+            if let Err(err) = result {
+                error!("Error executing transaction: {:?}", err);
+            }
+        });
 
         let _freeze_lock = bank.freeze_lock();
         let (last_blockhash, lamports_per_signature) =
