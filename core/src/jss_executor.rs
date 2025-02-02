@@ -8,7 +8,7 @@
 
 use std::{
     collections::VecDeque,
-    sync::{atomic::AtomicBool, Arc, RwLock},
+    sync::{atomic::{AtomicBool, AtomicUsize, Ordering}, Arc, RwLock},
     time::Duration,
 };
 
@@ -64,12 +64,15 @@ impl JssExecutor {
             prioritization_fee_cache.clone(),
         );
 
+        let successful_count = Arc::new(AtomicUsize::new(0));
+
         let (worker_threads, worker_handles) = Self::spawn_workers(
             worker_thread_count,
             poh_recorder.clone(),
             bundle_committer.clone(),
             transaction_commiter.clone(),
             exit.clone(),
+            successful_count.clone(),
         );
 
         const MICROBLOCK_CHANNEL_SIZE: usize = 50;
@@ -83,6 +86,7 @@ impl JssExecutor {
                     poh_recorder,
                     worker_handles,
                     exit,
+                    successful_count,
                 );
             })
             .unwrap();
@@ -150,6 +154,7 @@ impl JssExecutor {
         poh_recorder: Arc<RwLock<PohRecorder>>,
         mut workers: Vec<Worker>,
         exit: Arc<AtomicBool>,
+        successful_count: Arc<AtomicUsize>,
     ) {
         let mut bundles_scheduled = 0;
         let mut bundles = Vec::new();
@@ -185,14 +190,16 @@ impl JssExecutor {
             }
 
             info!(
-                "slot={} microblock_count={} scheduled={} unscheduled={}",
+                "slot={} microblock_count={} scheduled={} unscheduled={} successful={}",
                 bank_start.working_bank.slot(),
                 microblock_count,
                 bundles_scheduled,
-                bundles.len() - bundles_scheduled as usize
+                bundles.len() - bundles_scheduled as usize,
+                successful_count.load(Ordering::Relaxed),
             );
             bundles_scheduled = 0;
             bundles.clear();
+            successful_count.store(0, Ordering::Relaxed);
         }
     }
 
@@ -270,6 +277,7 @@ impl JssExecutor {
         bundle_committer: bundle_stage::committer::Committer,
         transaction_commiter: banking_stage::committer::Committer,
         exit: Arc<AtomicBool>,
+        successful_count: Arc<AtomicUsize>,
     ) -> (Vec<std::thread::JoinHandle<()>>, Vec<Worker>) {
         let mut threads = Vec::new();
         let mut workers = Vec::new();
@@ -280,6 +288,7 @@ impl JssExecutor {
             let bundle_committer = bundle_committer.clone();
             let transaction_commiter = transaction_commiter.clone();
             let exit = exit.clone();
+            let successful_count = successful_count.clone();
             threads.push(
                 std::thread::Builder::new()
                     .name(format!("jss_executor_worker_{}", id))
@@ -290,6 +299,7 @@ impl JssExecutor {
                             transaction_commiter.clone(),
                             receiver,
                             exit,
+                            successful_count,
                         );
                     })
                     .unwrap(),
@@ -305,6 +315,7 @@ impl JssExecutor {
         mut transaction_commiter: banking_stage::committer::Committer,
         receiver: crossbeam_channel::Receiver<BatchForExecution>,
         exit: Arc<AtomicBool>,
+        successful_count: Arc<AtomicUsize>,
     ) {
         let recorder = poh_recorder.read().unwrap().new_recorder();
         let mut bank_start = None;
@@ -322,13 +333,15 @@ impl JssExecutor {
             let Ok(BatchForExecution{ ids: _, txns }) = receiver.recv_timeout(Duration::from_millis(1)) else {
                 continue;
             };
-            Self::execute_record_commit(
+            if Self::execute_record_commit(
                 &current_bank_start.working_bank,
                 &recorder,
                 &mut bundle_committer,
                 &mut transaction_commiter,
                 txns,
-            );
+            ){
+                successful_count.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
@@ -451,9 +464,6 @@ impl JssExecutor {
                 transaction_account_lock_limit: Some(bank.get_transaction_account_lock_limit()),
             },
         );
-        if results.processed_counts.processed_transactions_count == 0 {
-            return false;
-        }
 
         results.processing_results.iter().for_each(|result| {
             if let Err(err) = result {
@@ -461,13 +471,9 @@ impl JssExecutor {
             }
         });
 
-        info!(
-            "slot={} total={} processed={} success={}",
-            bank.slot(),
-            transactions.len(),
-            results.processed_counts.processed_non_vote_transactions_count,
-            results.processed_counts.processed_with_successful_result_count
-        );
+        if results.processed_counts.processed_transactions_count == 0 {
+            return false;
+        }
 
         let _freeze_lock = bank.freeze_lock();
         let (last_blockhash, lamports_per_signature) =
