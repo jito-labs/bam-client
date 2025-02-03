@@ -231,7 +231,7 @@ impl JssExecutor {
                     Self::get_bundle_account_access(transactions.as_slice()),
                 );
                 bundles.push(Some(transactions));
-                //Self::schedule_next_batch(prio_graph, bundles, bundles_scheduled, workers);
+                Self::schedule_next_batch(prio_graph, bundles, bundles_scheduled, workers);
             }
         }
     }
