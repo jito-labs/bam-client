@@ -265,7 +265,6 @@ impl JssExecutor {
 
             let batch_size = batch_for_execution.len();
             if worker.send(batch_for_execution) {
-                info!("worker={} scheduled={}", i, batch_size);
                 *bundles_scheduled += batch_size as u64;
             }
         }
