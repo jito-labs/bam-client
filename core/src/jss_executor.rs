@@ -189,6 +189,11 @@ impl JssExecutor {
                 worker.wait_til_finish();
             }
 
+            if microblock_count == 0 {
+                std::thread::sleep(Duration::from_millis(1));
+                continue;
+            }
+
             info!(
                 "microblock_count={} scheduled={} unscheduled={} successful={}",
                 microblock_count,
