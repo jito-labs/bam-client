@@ -283,7 +283,8 @@ impl JssExecutor {
         let mut workers = Vec::new();
         for id in 0..worker_thread_count {
             let (sender, receiver) = crossbeam_channel::bounded(1);
-            workers.push(Worker::new(sender));
+            let (result_sender, result_receiver) = crossbeam_channel::bounded(1);
+            workers.push(Worker::new(sender, result_receiver));
             let poh_recorder = poh_recorder.clone();
             let bundle_committer = bundle_committer.clone();
             let transaction_commiter = transaction_commiter.clone();
@@ -298,6 +299,7 @@ impl JssExecutor {
                             bundle_committer.clone(),
                             transaction_commiter.clone(),
                             receiver,
+                            result_sender,
                             exit,
                             successful_count,
                         );
@@ -314,6 +316,7 @@ impl JssExecutor {
         mut bundle_committer: bundle_stage::committer::Committer,
         mut transaction_commiter: banking_stage::committer::Committer,
         receiver: crossbeam_channel::Receiver<BatchForExecution>,
+        sender: crossbeam_channel::Sender<Vec<BundleExecutionId>>,
         exit: Arc<AtomicBool>,
         successful_count: Arc<AtomicUsize>,
     ) {
@@ -330,7 +333,7 @@ impl JssExecutor {
                 bank_start = None;
                 continue;
             }
-            let Ok(BatchForExecution{ ids: _, txns }) = receiver.recv_timeout(Duration::from_millis(1)) else {
+            let Ok(BatchForExecution{ ids, txns }) = receiver.recv_timeout(Duration::from_millis(1)) else {
                 continue;
             };
             if Self::execute_record_commit(
@@ -342,6 +345,7 @@ impl JssExecutor {
             ){
                 successful_count.fetch_add(1, Ordering::Relaxed);
             }
+            sender.send(ids).unwrap();
         }
     }
 
@@ -656,17 +660,18 @@ impl BatchForExecution {
 // Worker management struct for scheduling thread
 struct Worker {
     sender: crossbeam_channel::Sender<BatchForExecution>,
-    queue: VecDeque<Vec<BundleExecutionId>>,
+    receiver: crossbeam_channel::Receiver<Vec<BundleExecutionId>>,
 }
 
 impl Worker {
     /// Creates a new worker with the given sender.
     fn new(
         sender: crossbeam_channel::Sender<BatchForExecution>,
+        receiver: crossbeam_channel::Receiver<Vec<BundleExecutionId>>,
     ) -> Self {
         Self {
             sender,
-            queue: VecDeque::new(),
+            receiver,
         }
     }
 
@@ -678,32 +683,17 @@ impl Worker {
     /// Sends a bundle to the worker, while saving it in a local queue;
     /// used later to unblock transactions when the worker has picked up the bundle.
     fn send(&mut self, batch: BatchForExecution) -> bool {
-        let bundle_ids = batch.ids.clone();
-        if self.sender.try_send(batch).is_ok() {
-            self.queue.push_back(bundle_ids);
-            true
-        } else {
-            false
-        }
+        self.sender.try_send(batch).is_ok()
     }
 
     /// Gets the ids of bundles that have been picked up by the worker;
     /// therefore opening the door for new transactions to be scheduled.
     fn get_unblocking_bundles(&mut self) -> Vec<BundleExecutionId> {
-        let mut unblocked = Vec::new();
-        let diff = self.queue.len().saturating_sub(self.sender.len());
-        for _ in 0..diff {
-            let Some(blocking) = self.queue.pop_front() else {
-                break;
-            };
-            unblocked.extend(blocking);
-        }
-
-        unblocked
+        self.receiver.try_recv().unwrap_or_default()
     }
 
     fn clear(&mut self) {
-        self.queue.clear();
+        while let Ok(_) = self.receiver.try_recv() {}
     }
 }
 
