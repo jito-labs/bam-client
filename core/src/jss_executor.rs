@@ -160,7 +160,10 @@ impl JssExecutor {
         let mut bundles = Vec::new();
 
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
-            let Some(bank_start) = Self::get_working_bank_start(&poh_recorder) else {
+            if !poh_recorder.read().unwrap().would_be_leader(0) {
+                continue;
+            }
+            let Some(_) = Self::get_working_bank_start(&poh_recorder) else {
                 continue;
             };
 
@@ -168,7 +171,11 @@ impl JssExecutor {
                 prio_graph::PrioGraph::new(|id: &BundleExecutionId, _graph_node| *id);
             let mut microblock_count = 0;
 
-            while bank_start.should_working_bank_still_be_processing_txs() {
+            while poh_recorder.read().unwrap().would_be_leader(0) {
+                let Some(bank_start) = Self::get_working_bank_start(&poh_recorder) else {
+                    continue;
+                };
+
                 Self::maybe_ingest_new_microblock(
                     &microblock_receiver,
                     &mut prio_graph,
@@ -190,8 +197,7 @@ impl JssExecutor {
             }
 
             info!(
-                "slot={} microblock_count={} scheduled={} unscheduled={} successful={}",
-                bank_start.working_bank.slot(),
+                "microblock_count={} scheduled={} unscheduled={} successful={}",
                 microblock_count,
                 bundles_scheduled,
                 bundles.len() - bundles_scheduled as usize,
