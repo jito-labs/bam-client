@@ -186,7 +186,7 @@ impl JssExecutor {
             }
 
             for worker in workers.iter_mut() {
-                worker.clear();
+                worker.wait_til_finish();
             }
 
             info!(
@@ -660,6 +660,7 @@ impl BatchForExecution {
 // Worker management struct for scheduling thread
 struct Worker {
     sender: crossbeam_channel::Sender<BatchForExecution>,
+    in_flight: usize,
     receiver: crossbeam_channel::Receiver<Vec<BundleExecutionId>>,
 }
 
@@ -671,6 +672,7 @@ impl Worker {
     ) -> Self {
         Self {
             sender,
+            in_flight: 0,
             receiver,
         }
     }
@@ -683,17 +685,29 @@ impl Worker {
     /// Sends a bundle to the worker, while saving it in a local queue;
     /// used later to unblock transactions when the worker has picked up the bundle.
     fn send(&mut self, batch: BatchForExecution) -> bool {
-        self.sender.try_send(batch).is_ok()
+        if let Ok(_) = self.sender.send(batch) {
+            self.in_flight += 1;
+            true
+        } else {
+            false
+        }
     }
 
     /// Gets the ids of bundles that have been picked up by the worker;
     /// therefore opening the door for new transactions to be scheduled.
     fn get_unblocking_bundles(&mut self) -> Vec<BundleExecutionId> {
-        self.receiver.try_recv().unwrap_or_default()
+        let mut result = Vec::new();
+        while let Ok(ids) = self.receiver.try_recv() {
+            self.in_flight -= 1;
+            result.extend(ids);
+        }
+        result
     }
 
-    fn clear(&mut self) {
-        while let Ok(_) = self.receiver.try_recv() {}
+    fn wait_til_finish(&mut self) {
+        while self.in_flight > 0 {
+            self.get_unblocking_bundles();
+        }
     }
 }
 
