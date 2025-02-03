@@ -160,7 +160,7 @@ impl JssExecutor {
         let mut bundles = Vec::new();
 
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
-            if !poh_recorder.read().unwrap().would_be_leader(0) {
+            if !poh_recorder.read().unwrap().would_be_leader(1) {
                 continue;
             }
 
@@ -168,7 +168,7 @@ impl JssExecutor {
                 prio_graph::PrioGraph::new(|id: &BundleExecutionId, _graph_node| *id);
             let mut microblock_count = 0;
 
-            while poh_recorder.read().unwrap().would_be_leader(0) {
+            while poh_recorder.read().unwrap().would_be_leader(1) {
                 Self::maybe_ingest_new_microblock(
                     &microblock_receiver,
                     &mut prio_graph,
