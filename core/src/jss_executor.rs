@@ -163,19 +163,12 @@ impl JssExecutor {
             if !poh_recorder.read().unwrap().would_be_leader(0) {
                 continue;
             }
-            let Some(_) = Self::get_working_bank_start(&poh_recorder) else {
-                continue;
-            };
 
             let mut prio_graph =
                 prio_graph::PrioGraph::new(|id: &BundleExecutionId, _graph_node| *id);
             let mut microblock_count = 0;
 
             while poh_recorder.read().unwrap().would_be_leader(0) {
-                let Some(bank_start) = Self::get_working_bank_start(&poh_recorder) else {
-                    continue;
-                };
-
                 Self::maybe_ingest_new_microblock(
                     &microblock_receiver,
                     &mut prio_graph,
