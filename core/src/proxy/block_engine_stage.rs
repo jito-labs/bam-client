@@ -414,6 +414,7 @@ impl BlockEngineStage {
                     info!("jss enabled, pausing block engine stage");
                 } else {
                     info!("jss disabled, resuming block engine stage");
+                    return Ok(());
                 }
                 jss_enabled_prev = jss_enabled;
             }
