@@ -7,6 +7,7 @@ use std::{
     collections::VecDeque, net::{Ipv4Addr, SocketAddr, SocketAddrV4}, str::FromStr, sync::{atomic::AtomicBool, Arc, RwLock}, thread::Builder, time::{Instant, SystemTime, UNIX_EPOCH}
 };
 
+use anchor_lang::solana_program::pubkey;
 use jito_protos::proto::{
     jss_api::TpuConfigResp,
     jss_types::{LeaderState, MicroBlock, Socket},
@@ -19,7 +20,7 @@ use solana_runtime::{
     bank::Bank, prioritization_fee_cache::PrioritizationFeeCache,
     vote_sender_types::ReplayVoteSender,
 };
-use solana_sdk::signer::Signer;
+use solana_sdk::{pubkey::Pubkey, signer::Signer};
 
 use crate::{jss_connection::JssConnection, jss_executor::JssExecutor};
 
@@ -132,7 +133,8 @@ impl JssManager {
         // Run until (our) world ends
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
             // Init and/or check health of connection
-            if !Self::get_or_init_connection(jss_url.clone(), &mut jss_connection).await {
+            let pubkey = cluster_info.keypair().pubkey();
+            if !Self::get_or_init_connection(jss_url.clone(), &mut jss_connection, pubkey).await {
                 if jss_enabled.load(std::sync::atomic::Ordering::Relaxed) {
                     let _ = cluster_info.set_tpu(local_contact_info.tpu(Protocol::UDP).unwrap()).inspect_err(|e| {
                         warn!("Failed to set TPU: {:?}", e);
@@ -240,9 +242,10 @@ impl JssManager {
     async fn get_or_init_connection(
         jss_url: String,
         jss_connection: &mut Option<JssConnection>,
+        pubkey: Pubkey,
     ) -> bool {
         if jss_connection.is_none() {
-            *jss_connection = JssConnection::try_init(jss_url.clone()).await;
+            *jss_connection = JssConnection::try_init(jss_url.clone(), pubkey).await;
             if jss_connection.is_none() {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 return false;
