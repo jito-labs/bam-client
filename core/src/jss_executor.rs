@@ -516,16 +516,16 @@ impl JssExecutor {
                 transaction_account_lock_limit: Some(bank.get_transaction_account_lock_limit()),
             },
         );
+        if results.processed_counts.processed_transactions_count == 0 {
+            QosService::remove_or_update_costs(transaction_qos_cost_results.iter(), None, bank);
+            return false;
+        }
 
         results.processing_results.iter().for_each(|result| {
             if let Err(err) = result {
                 error!("    Error executing transaction: {:?}", err);
             }
         });
-
-        if results.processed_counts.processed_transactions_count == 0 {
-            return false;
-        }
 
         let _freeze_lock = bank.freeze_lock();
 
@@ -547,10 +547,11 @@ impl JssExecutor {
             starting_transaction_index,
         } = recorder.record_transactions(bank.slot(), vec![processed_transactions]);
         if record_transactions_result.is_err() {
+            QosService::remove_or_update_costs(transaction_qos_cost_results.iter(), None, bank);
             return false;
         }
 
-        committer.commit_transactions(
+        let (_, commit_transactions_result) = committer.commit_transactions(
             &batch,
             results.processing_results,
             starting_transaction_index,
@@ -559,6 +560,13 @@ impl JssExecutor {
             &mut execute_and_commit_timings,
             &results.processed_counts,
         );
+
+        QosService::remove_or_update_costs(
+            transaction_qos_cost_results.iter(),
+            Some(&commit_transactions_result),
+            bank,
+        );
+
         true
     }
 
