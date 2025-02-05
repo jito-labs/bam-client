@@ -947,6 +947,7 @@ mod tests {
         );
 
         let successful_bundle = Bundle {
+            revert_on_error: false,
             packets: vec![jds_packet_from_versioned_tx(&VersionedTransaction::from(
                 transfer(
                     &genesis_config_info.mint_keypair,
@@ -957,6 +958,7 @@ mod tests {
             ))],
         };
         let failed_bundle = Bundle {
+            revert_on_error: false,
             packets: vec![
                 // This one would go through
                 jds_packet_from_versioned_tx(&VersionedTransaction::from(transfer(
