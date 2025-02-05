@@ -484,16 +484,16 @@ impl JssExecutor {
         committer: &mut bundle_stage::committer::Committer,
         sanitized_bundle: SanitizedBundle,
     ) -> bool {
-        // Lock all transactions in the bundle
-        let batch = bank.prepare_sanitized_batch_with_results(
-            &sanitized_bundle.transactions,
-            std::iter::repeat(Ok(())),
-            None,
-            None,
-        );
-        if batch.lock_results().iter().any(|r| r.is_err()) {
-            return false;
-        }
+        //// Lock all transactions in the bundle
+        //let batch = bank.prepare_sanitized_batch_with_results(
+        //    &sanitized_bundle.transactions,
+        //    std::iter::repeat(Ok(())),
+        //    None,
+        //    None,
+        //);
+        //if batch.lock_results().iter().any(|r| r.is_err()) {
+        //    return false;
+        //}
 
         // See if we have enough room in the block to execute the bundle
         let (transaction_qos_cost_results, skipped_count) = qos_service
@@ -525,7 +525,6 @@ impl JssExecutor {
             &default_accounts,
         );
         if let Err(err) = bundle_execution_results.result() {
-            error!("Error executing bundle {}: {:?}", sanitized_bundle.bundle_id, err);
             QosService::remove_or_update_costs(transaction_qos_cost_results.iter(), None, bank);
             return false;
         }
@@ -551,6 +550,8 @@ impl JssExecutor {
             &bank,
             &mut execute_and_commit_timings,
         );
+
+        // TODO: update costs?
 
         true
     }
@@ -852,16 +853,16 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use std::{
-        sync::{
+        str::FromStr, sync::{
             atomic::{AtomicBool, Ordering},
             Arc, RwLock,
-        },
-        thread::{Builder, JoinHandle},
-        time::Duration,
+        }, thread::{Builder, JoinHandle}, time::Duration
     };
 
     use crossbeam_channel::Receiver;
     use jito_protos::proto::jss_types::{self, Bundle, MicroBlock};
+    use jito_tip_distribution::sdk::derive_tip_distribution_account_address;
+    use solana_gossip::cluster_info::ClusterInfo;
     use solana_ledger::{
         blockstore::Blockstore, genesis_utils::GenesisConfigInfo, get_tmp_ledger_path_auto_delete,
         leader_schedule_cache::LeaderScheduleCache,
@@ -888,9 +889,10 @@ mod tests {
         system_transaction::transfer,
         transaction::VersionedTransaction,
     };
+    use solana_streamer::socket::SocketAddrSpace;
     use solana_vote_program::vote_state::VoteState;
 
-    use crate::tip_manager::{TipManager, TipManagerConfig};
+    use crate::tip_manager::{TipDistributionAccountConfig, TipManager, TipManagerConfig};
 
     pub(crate) fn simulate_poh(
         record_receiver: Receiver<Record>,
@@ -1128,6 +1130,125 @@ mod tests {
         executor.schedule_microblock(&bank, microblock);
         let txns = get_executed_txns(&entry_receiver, Duration::from_secs(3));
         assert_eq!(txns.len(), 0);
+
+        poh_recorder
+            .write()
+            .unwrap()
+            .is_exited
+            .store(true, Ordering::Relaxed);
+        exit.store(true, Ordering::Relaxed);
+        poh_simulator.join().unwrap();
+    }
+
+    fn get_tip_manager(vote_account: &Pubkey) -> TipManager {
+        TipManager::new(TipManagerConfig {
+            tip_payment_program_id: Pubkey::from_str("T1pyyaTNZsKv2WcRAB8oVnk93mLJw2XzjtVYqCsaHqt")
+                .unwrap(),
+            tip_distribution_program_id: Pubkey::from_str(
+                "4R3gSG8BpU4t19KYj8CfnbtRpnT8gtk4dvTHxVRwc2r7",
+            )
+            .unwrap(),
+            tip_distribution_account_config: TipDistributionAccountConfig {
+                merkle_root_upload_authority: Pubkey::new_unique(),
+                vote_account: *vote_account,
+                commission_bps: 10,
+            },
+        })
+    }
+
+    #[test]
+    fn test_handle_tip_programs() {
+        let TestFixture {
+            genesis_config_info,
+            leader_keypair,
+            bank,
+            exit,
+            poh_recorder,
+            poh_simulator,
+            entry_receiver,
+            bank_forks: _bank_forks,
+        } = create_test_fixture(1);
+
+        let (replay_vote_sender, _) = crossbeam_channel::unbounded();
+        let keypair = Arc::new(leader_keypair);
+        let block_builder_pubkey = Pubkey::from_str("feeywn2ffX8DivmRvBJ9i9YZnss7WBouTmujfQcEdeY").unwrap();
+
+        let tip_manager = get_tip_manager(&genesis_config_info.voting_keypair.pubkey());
+        let mut executor = super::JssExecutor::new(
+            1,
+            poh_recorder.clone(),
+            replay_vote_sender,
+            None,
+            Arc::new(PrioritizationFeeCache::default()),
+            tip_manager.clone(),
+            exit.clone(),
+            keypair.clone(),
+        );
+
+        let tip_accounts = tip_manager.get_tip_accounts();
+        let tip_account = tip_accounts.iter().collect::<Vec<_>>()[0];
+        let successful_bundle = Bundle {
+            revert_on_error: true,
+            packets: vec![jds_packet_from_versioned_tx(&VersionedTransaction::from(
+                transfer(
+                    &genesis_config_info.mint_keypair,
+                    &tip_account,
+                    100000,
+                    genesis_config_info.genesis_config.hash(),
+                ),
+            ))],
+        };
+
+        let microblock = MicroBlock {
+            bundles: vec![successful_bundle],
+        };
+        executor.schedule_microblock(&bank, microblock);
+        let transactions = get_executed_txns(&entry_receiver, Duration::from_secs(3));
+
+        // expect to see initialize tip payment program, tip distribution program,
+        // initialize tip distribution account, change tip receiver + change block builder
+        assert_eq!(
+            transactions[0],
+            tip_manager
+                .initialize_tip_payment_program_tx(&bank, &keypair)
+                .to_versioned_transaction()
+        );
+        assert_eq!(
+            transactions[1],
+            tip_manager
+                .initialize_tip_distribution_config_tx(&bank, &keypair)
+                .to_versioned_transaction()
+        );
+        assert_eq!(
+            transactions[2],
+            tip_manager
+                .initialize_tip_distribution_account_tx(&bank, &keypair)
+                .to_versioned_transaction()
+        );
+        // the first tip receiver + block builder are the initializer (keypair.pubkey()) as set by the
+        // TipPayment program during initialization
+        let bank_start = poh_recorder.read().unwrap().bank_start().unwrap();
+        assert_eq!(
+            transactions[3],
+            tip_manager
+                .build_change_tip_receiver_and_block_builder_tx(
+                    &keypair.pubkey(),
+                    &derive_tip_distribution_account_address(
+                        &tip_manager.tip_distribution_program_id(),
+                        &genesis_config_info.validator_pubkey,
+                        bank_start.working_bank.epoch()
+                    )
+                    .0,
+                    &bank_start.working_bank,
+                    &keypair,
+                    &keypair.pubkey(),
+                    &block_builder_pubkey,
+                    5
+                )
+                .to_versioned_transaction()
+        );
+
+        assert_eq!(transactions.len(), 5);
 
         poh_recorder
             .write()
