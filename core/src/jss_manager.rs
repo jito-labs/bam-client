@@ -7,7 +7,7 @@ use std::{
     collections::VecDeque,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     str::FromStr,
-    sync::{atomic::AtomicBool, Arc, RwLock},
+    sync::{atomic::AtomicBool, Arc, Mutex, RwLock},
     thread::Builder,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -25,7 +25,7 @@ use solana_runtime::{
 };
 use solana_sdk::{pubkey::Pubkey, signer::Signer};
 
-use crate::{jss_connection::JssConnection, jss_executor::JssExecutor, tip_manager::TipManager};
+use crate::{jss_connection::JssConnection, jss_executor::JssExecutor, proxy::block_engine_stage::BlockBuilderFeeInfo, tip_manager::TipManager};
 
 pub(crate) struct JssManager {
     threads: Vec<std::thread::JoinHandle<()>>,
@@ -63,7 +63,11 @@ impl JssManager {
                     tip_manager,
                     exit_micro_block_execution_thread.clone(),
                     cluster_info_execution.keypair().to_owned(),
-                );
+                    Arc::new(Mutex::new(BlockBuilderFeeInfo{
+                        block_builder: Pubkey::from_str("feeywn2ffX8DivmRvBJ9i9YZnss7WBouTmujfQcEdeY").unwrap(),
+                        block_builder_commission: 5,
+                    }
+                )));
 
                 info!("Micro block execution thread started");
 
