@@ -332,7 +332,7 @@ impl Tpu {
             replay_vote_sender,
             log_messages_bytes_limit,
             exit.clone(),
-            tip_manager,
+            tip_manager.clone(),
             bundle_account_locker,
             &block_builder_fee_info,
             preallocated_bundle_cost,
@@ -365,6 +365,23 @@ impl Tpu {
             turbine_quic_endpoint_sender,
             shred_receiver_address,
         );
+
+        let exit_for_jss: Arc<AtomicBool> = exit.clone();
+        let jss_manager = jss_enabled
+            .load(std::sync::atomic::Ordering::SeqCst)
+            .then(|| {
+                JssManager::new(
+                    jss_url.unwrap(),
+                    jss_enabled,
+                    poh_recorder.clone(),
+                    exit_for_jss,
+                    cluster_info.clone(),
+                    replay_vote_sender.clone(),
+                    transaction_status_sender.clone(),
+                    prioritization_fee_cache.clone(),
+                    tip_manager.clone(),
+                )
+            });
 
         (
             Self {
