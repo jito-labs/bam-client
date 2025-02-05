@@ -125,10 +125,18 @@ impl JssConnection {
         // Will update last_heartbeat if a new one is received
         self.housekeeping().await;
 
-        !self.its_over
+        let is_healthy = !self.its_over
             && self
                 .last_heartbeat
-                .map_or(true, |heartbeat| heartbeat.elapsed().as_secs() < 10)
+                .map_or(true, |heartbeat| heartbeat.elapsed().as_secs() < 10);
+
+        if !is_healthy {
+            info!("jss_unhealthy is_over={} no_heartbeat={}",
+                self.its_over,
+                self.last_heartbeat.map_or(true, |heartbeat| heartbeat.elapsed().as_secs() >= 10));
+        }
+
+        is_healthy
     }
 
     async fn housekeeping(&mut self) {
