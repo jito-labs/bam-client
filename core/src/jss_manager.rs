@@ -46,10 +46,16 @@ impl JssManager {
         prioritization_fee_cache: Arc<PrioritizationFeeCache>,
         tip_manager: TipManager,
     ) -> Self {
+        let block_builder_fee_info = Arc::new(Mutex::new(BlockBuilderFeeInfo {
+            block_builder: Pubkey::from_str("feeywn2ffX8DivmRvBJ9i9YZnss7WBouTmujfQcEdeY").unwrap(),
+            block_builder_commission: 5,
+        }));
+
         let (micro_block_sender, micro_block_receiver) = std::sync::mpsc::channel();
         let exit_micro_block_execution_thread = exit.clone();
         let poh_recorder_micro_block_execution_thread = poh_recorder.clone();
         let cluster_info_execution = cluster_info.clone();
+        let block_builder_fee_info_execution = block_builder_fee_info.clone();
         let micro_block_execution_thread = Builder::new()
             .name("micro_block_execution_thread".to_string())
             .spawn(move || {
@@ -63,11 +69,8 @@ impl JssManager {
                     tip_manager,
                     exit_micro_block_execution_thread.clone(),
                     cluster_info_execution.keypair().to_owned(),
-                    Arc::new(Mutex::new(BlockBuilderFeeInfo{
-                        block_builder: Pubkey::from_str("feeywn2ffX8DivmRvBJ9i9YZnss7WBouTmujfQcEdeY").unwrap(),
-                        block_builder_commission: 5,
-                    }
-                )));
+                    block_builder_fee_info_execution,
+                );
 
                 info!("Micro block execution thread started");
 
@@ -126,6 +129,7 @@ impl JssManager {
                     poh_recorder,
                     cluster_info,
                     micro_block_sender,
+                    block_builder_fee_info,
                 ));
             })
             .unwrap();
@@ -143,6 +147,7 @@ impl JssManager {
         poh_recorder: Arc<RwLock<PohRecorder>>,
         cluster_info: Arc<ClusterInfo>,
         micro_block_sender: std::sync::mpsc::Sender<MicroBlock>,
+        block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
     ) {
         let mut jss_connection: Option<JssConnection> = None;
         let mut tpu_info = None;
