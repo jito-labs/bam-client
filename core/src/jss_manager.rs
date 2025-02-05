@@ -25,7 +25,7 @@ use solana_runtime::{
 };
 use solana_sdk::{pubkey::Pubkey, signer::Signer};
 
-use crate::{jss_connection::JssConnection, jss_executor::JssExecutor};
+use crate::{jss_connection::JssConnection, jss_executor::JssExecutor, tip_manager::TipManager};
 
 pub(crate) struct JssManager {
     threads: Vec<std::thread::JoinHandle<()>>,
@@ -44,10 +44,12 @@ impl JssManager {
         replay_vote_sender: ReplayVoteSender,
         transaction_status_sender: Option<TransactionStatusSender>,
         prioritization_fee_cache: Arc<PrioritizationFeeCache>,
+        tip_manager: TipManager,
     ) -> Self {
         let (micro_block_sender, micro_block_receiver) = std::sync::mpsc::channel();
         let exit_micro_block_execution_thread = exit.clone();
         let poh_recorder_micro_block_execution_thread = poh_recorder.clone();
+        let cluster_info_execution = cluster_info.clone();
         let micro_block_execution_thread = Builder::new()
             .name("micro_block_execution_thread".to_string())
             .spawn(move || {
@@ -58,7 +60,9 @@ impl JssManager {
                     replay_vote_sender,
                     transaction_status_sender,
                     prioritization_fee_cache,
+                    tip_manager,
                     exit_micro_block_execution_thread.clone(),
+                    cluster_info_execution.keypair().to_owned(),
                 );
 
                 info!("Micro block execution thread started");

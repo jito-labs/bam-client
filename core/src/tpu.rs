@@ -336,7 +336,7 @@ impl Tpu {
             replay_vote_sender.clone(),
             log_messages_bytes_limit,
             exit.clone(),
-            tip_manager,
+            tip_manager.clone(),
             bundle_account_locker,
             &block_builder_fee_info,
             preallocated_bundle_cost,
@@ -383,6 +383,7 @@ impl Tpu {
                     replay_vote_sender.clone(),
                     transaction_status_sender.clone(),
                     prioritization_fee_cache.clone(),
+                    tip_manager.clone(),
                 )
             });
 

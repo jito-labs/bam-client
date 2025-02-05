@@ -7,11 +7,9 @@
 // - When the working bank is no longer valid; the Prio-graph and mempool are drained. Thinking about a feedback loop for JSS to know it scheduled too much.
 
 use std::{
-    sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, RwLock,
-    },
-    time::Duration,
+    collections::HashSet, str::FromStr, sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering}, Arc, Mutex, RwLock
+    }, time::Duration
 };
 
 use itertools::Itertools;
@@ -24,15 +22,13 @@ use solana_bundle::{
 use solana_ledger::{
     blockstore_processor::TransactionStatusSender, token_balances::collect_token_balances,
 };
-use solana_measure::measure_us;
-use solana_poh::poh_recorder::{PohRecorder, RecordTransactionsSummary, TransactionRecorder};
+use solana_poh::poh_recorder::{BankStart, PohRecorder, RecordTransactionsSummary, TransactionRecorder};
 use solana_runtime::{
     bank::Bank, prioritization_fee_cache::PrioritizationFeeCache,
     vote_sender_types::ReplayVoteSender,
 };
 use solana_sdk::{
-    clock::MAX_PROCESSING_AGE, packet::PacketFlags, pubkey::Pubkey,
-    transaction::SanitizedTransaction,
+    clock::MAX_PROCESSING_AGE, packet::PacketFlags, pubkey::Pubkey, signature::Keypair, transaction::SanitizedTransaction
 };
 use solana_svm::{
     transaction_error_metrics::TransactionErrorMetrics,
@@ -45,8 +41,7 @@ use crate::{
     banking_stage::{
         self, immutable_deserialized_packet::ImmutableDeserializedPacket,
         leader_slot_timing_metrics::LeaderExecuteAndCommitTimings, qos_service::QosService,
-    },
-    bundle_stage::{self, MAX_BUNDLE_RETRY_DURATION},
+    }, bundle_stage::{self, MAX_BUNDLE_RETRY_DURATION}, proxy::block_engine_stage::BlockBuilderFeeInfo, tip_manager::TipManager
 };
 
 pub struct JssExecutor {
@@ -61,7 +56,9 @@ impl JssExecutor {
         replay_vote_sender: ReplayVoteSender,
         transaction_status_sender: Option<TransactionStatusSender>,
         prioritization_fee_cache: Arc<PrioritizationFeeCache>,
+        tip_manager: TipManager,
         exit: Arc<AtomicBool>,
+        keypair: Arc<Keypair>,
     ) -> Self {
         let (bundle_committer, transaction_commiter) = Self::build_committers(
             replay_vote_sender.clone(),
@@ -77,7 +74,9 @@ impl JssExecutor {
             bundle_committer.clone(),
             transaction_commiter.clone(),
             exit.clone(),
+            tip_manager.clone(),
             successful_count.clone(),
+            keypair,
         );
 
         const MICROBLOCK_CHANNEL_SIZE: usize = 50;
@@ -271,10 +270,13 @@ impl JssExecutor {
         bundle_committer: bundle_stage::committer::Committer,
         transaction_commiter: banking_stage::committer::Committer,
         exit: Arc<AtomicBool>,
+        tip_manager: TipManager,
         successful_count: Arc<AtomicUsize>,
+        keypair: Arc<Keypair>,
     ) -> (Vec<std::thread::JoinHandle<()>>, Vec<Worker>) {
         let mut threads = Vec::new();
         let mut workers = Vec::new();
+        let last_tip_updated_slot = Arc::new(Mutex::new(0));
         for id in 0..worker_thread_count {
             let (sender, receiver) = crossbeam_channel::bounded(1);
             let (result_sender, result_receiver) = crossbeam_channel::bounded(1);
@@ -283,7 +285,10 @@ impl JssExecutor {
             let bundle_committer = bundle_committer.clone();
             let transaction_commiter = transaction_commiter.clone();
             let exit = exit.clone();
+            let tip_manager = tip_manager.clone();
             let successful_count = successful_count.clone();
+            let keypair = keypair.clone();
+            let last_tip_updated_slot = last_tip_updated_slot.clone();
             threads.push(
                 std::thread::Builder::new()
                     .name(format!("jss_executor_worker_{}", id))
@@ -296,7 +301,10 @@ impl JssExecutor {
                             receiver,
                             result_sender,
                             exit,
+                            tip_manager,
                             successful_count,
+                            keypair,
+                            last_tip_updated_slot,
                         );
                     })
                     .unwrap(),
@@ -314,7 +322,10 @@ impl JssExecutor {
         receiver: crossbeam_channel::Receiver<ParsedBundleWithId>,
         sender: crossbeam_channel::Sender<BundleExecutionId>,
         exit: Arc<AtomicBool>,
+        tip_manager: TipManager,
         successful_count: Arc<AtomicUsize>,
+        keypair: Arc<Keypair>,
+        last_tip_updated_slot: Arc<Mutex<u64>>,
     ) {
         let qos_service = QosService::new(id as u32);
         let recorder = poh_recorder.read().unwrap().new_recorder();
@@ -342,13 +353,16 @@ impl JssExecutor {
                 continue;
             };
             if Self::execute_record_commit(
-                &current_bank_start.working_bank,
+                &current_bank_start,
                 &qos_service,
                 &recorder,
                 &mut bundle_committer,
                 &mut transaction_commiter,
                 revert_on_error,
                 txns,
+                &tip_manager,
+                &keypair,
+                &last_tip_updated_slot,
             ) {
                 successful_count.fetch_add(1, Ordering::Relaxed);
             }
@@ -359,25 +373,55 @@ impl JssExecutor {
     /// Executes and records transactions or bundles; using the
     /// length of the transactions to determine which branch to take
     pub fn execute_record_commit(
-        bank: &Arc<Bank>,
+        bank_start: &BankStart,
         qos_service: &QosService,
         recorder: &TransactionRecorder,
         bundle_committer: &mut bundle_stage::committer::Committer,
         transaction_commiter: &mut banking_stage::committer::Committer,
         revert_on_error: bool,
         transactions: Vec<SanitizedTransaction>,
+        tip_manager: &TipManager,
+        keypair: &Keypair,
+        last_tip_updated_slot: &Mutex<u64>,
     ) -> bool {
         if revert_on_error {
-            Self::execute_commit_record_revertable(
-                bank,
+            let bundle_id = derive_bundle_id_from_sanitized_transactions(&transactions);
+            let sanitized_bundle = SanitizedBundle {
+                transactions,
+                bundle_id,
+            };
+
+            let mut last_tip_updated_slot_guard = last_tip_updated_slot.lock().unwrap();
+            if bank_start.working_bank.slot() != *last_tip_updated_slot_guard
+                && Self::bundle_touches_tip_pdas(
+                    &sanitized_bundle,
+                    &tip_manager.get_tip_accounts(),
+                )
+            {
+                if !Self::handle_tip_programs(
+                    &bank_start,
+                    &qos_service,
+                    &recorder,
+                    bundle_committer,
+                    tip_manager,
+                    keypair,
+                ) {
+                    return false;
+                }
+                *last_tip_updated_slot_guard = bank_start.working_bank.slot();
+            }
+            drop(last_tip_updated_slot_guard);
+
+            Self::execute_commit_record_bundle(
+                &bank_start.working_bank,
                 qos_service,
                 recorder,
                 bundle_committer,
-                transactions,
+                sanitized_bundle,
             )
         } else {
             Self::execute_commit_record_transactions(
-                bank,
+                &bank_start.working_bank,
                 qos_service,
                 recorder,
                 transaction_commiter,
@@ -386,20 +430,60 @@ impl JssExecutor {
         }
     }
 
-    fn execute_commit_record_revertable(
+    fn handle_tip_programs(
+        bank_start: &BankStart,
+        qos_service: &QosService,
+        recorder: &TransactionRecorder,
+        bundle_committer: &mut bundle_stage::committer::Committer,
+        tip_manager: &TipManager,
+        keypair: &Keypair,
+    ) -> bool {
+        let initialize_tip_programs_bundle =
+            tip_manager.get_initialize_tip_programs_bundle(&bank_start.working_bank, keypair);
+        if let Some(init_bundle) = initialize_tip_programs_bundle {
+            if !Self::execute_commit_record_bundle(
+                &bank_start.working_bank,
+                qos_service,
+                recorder,
+                bundle_committer,
+                init_bundle,
+            ) {
+                info!("Failed to initialize tip programs");
+                return false;
+            }
+        }
+
+        let tip_crank_bundle = tip_manager.get_tip_programs_crank_bundle(
+            &bank_start.working_bank,
+            keypair,
+            &BlockBuilderFeeInfo{
+                block_builder: Pubkey::from_str("feeywn2ffX8DivmRvBJ9i9YZnss7WBouTmujfQcEdeY").unwrap(),
+                block_builder_commission: 5,
+            }
+        );
+        if let Ok(Some(crank_bundle)) = tip_crank_bundle {
+            if !Self::execute_commit_record_bundle(
+                &bank_start.working_bank,
+                qos_service,
+                recorder,
+                bundle_committer,
+                crank_bundle,
+            ) {
+                info!("Failed to crank tip programs");
+                return false;
+            }
+        }
+
+        true
+    }
+
+    fn execute_commit_record_bundle(
         bank: &Arc<Bank>,
         qos_service: &QosService,
         recorder: &TransactionRecorder,
         committer: &mut bundle_stage::committer::Committer,
-        transactions: Vec<SanitizedTransaction>,
+        sanitized_bundle: SanitizedBundle,
     ) -> bool {
-        let len = transactions.len();
-        let bundle_id = derive_bundle_id_from_sanitized_transactions(&transactions);
-        let sanitized_bundle = SanitizedBundle {
-            transactions,
-            bundle_id: bundle_id.clone(),
-        };
-
         // Lock all transactions in the bundle
         let batch = bank.prepare_sanitized_batch_with_results(
             &sanitized_bundle.transactions,
@@ -426,7 +510,7 @@ impl JssExecutor {
         }
 
         // Execute the bundle
-        let default_accounts = vec![None; len];
+        let default_accounts = vec![None; sanitized_bundle.transactions.len()];
         let transaction_status_sender_enabled = committer.transaction_status_sender_enabled();
         let mut bundle_execution_results = load_and_execute_bundle(
             &bank,
@@ -441,7 +525,7 @@ impl JssExecutor {
             &default_accounts,
         );
         if let Err(err) = bundle_execution_results.result() {
-            error!("Error executing bundle {}: {:?}", bundle_id, err);
+            error!("Error executing bundle {}: {:?}", sanitized_bundle.bundle_id, err);
             QosService::remove_or_update_costs(transaction_qos_cost_results.iter(), None, bank);
             return false;
         }
@@ -581,6 +665,15 @@ impl JssExecutor {
         );
 
         true
+    }
+    
+    fn bundle_touches_tip_pdas(bundle: &SanitizedBundle, tip_pdas: &HashSet<Pubkey>) -> bool {
+        bundle.transactions.iter().any(|tx| {
+            tx.message()
+                .account_keys()
+                .iter()
+                .any(|a| tip_pdas.contains(a))
+        })
     }
 
     fn parse_transactions<'a>(
@@ -797,6 +890,8 @@ mod tests {
     };
     use solana_vote_program::vote_state::VoteState;
 
+    use crate::tip_manager::{TipManager, TipManagerConfig};
+
     pub(crate) fn simulate_poh(
         record_receiver: Receiver<Record>,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
@@ -985,7 +1080,9 @@ mod tests {
             replay_vote_sender,
             None,
             Arc::new(PrioritizationFeeCache::default()),
+            TipManager::new(TipManagerConfig::default()),
             exit.clone(),
+            Arc::new(Keypair::new()),
         );
 
         let successful_bundle = Bundle {
