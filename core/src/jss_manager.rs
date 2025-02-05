@@ -4,18 +4,21 @@
 /// - Executing the received microblocks
 /// - Disabling JSS and re-enabling standard txn processing when health check fails
 use std::{
-    collections::VecDeque, net::{Ipv4Addr, SocketAddr, SocketAddrV4}, str::FromStr, sync::{atomic::AtomicBool, Arc, RwLock}, thread::Builder, time::{Instant, SystemTime, UNIX_EPOCH}
+    collections::VecDeque,
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+    str::FromStr,
+    sync::{atomic::AtomicBool, Arc, RwLock},
+    thread::Builder,
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-use anchor_lang::solana_program::pubkey;
 use jito_protos::proto::{
     jss_api::TpuConfigResp,
     jss_types::{LeaderState, MicroBlock, Socket},
 };
-use solana_entry::poh;
 use solana_gossip::{cluster_info::ClusterInfo, contact_info::Protocol};
 use solana_ledger::blockstore_processor::TransactionStatusSender;
-use solana_poh::poh_recorder::{self, BankStart, PohRecorder};
+use solana_poh::poh_recorder::PohRecorder;
 use solana_runtime::{
     bank::Bank, prioritization_fee_cache::PrioritizationFeeCache,
     vote_sender_types::ReplayVoteSender,
@@ -63,13 +66,22 @@ impl JssManager {
                 let mut buffered_micro_blocks = VecDeque::new();
                 while !exit_micro_block_execution_thread.load(std::sync::atomic::Ordering::Relaxed)
                 {
-                    let Some(micro_block) : Option<MicroBlock> =  micro_block_receiver.recv().ok()
+                    let Some(micro_block): Option<MicroBlock> = micro_block_receiver.recv().ok()
                     else {
                         continue;
                     };
-                    let current_slot = poh_recorder_micro_block_execution_thread.read().unwrap().get_current_slot();
-                    let current_tick = poh_recorder_micro_block_execution_thread.read().unwrap().tick_height()
-                        % poh_recorder_micro_block_execution_thread.read().unwrap().ticks_per_slot();
+                    let current_slot = poh_recorder_micro_block_execution_thread
+                        .read()
+                        .unwrap()
+                        .get_current_slot();
+                    let current_tick = poh_recorder_micro_block_execution_thread
+                        .read()
+                        .unwrap()
+                        .tick_height()
+                        % poh_recorder_micro_block_execution_thread
+                            .read()
+                            .unwrap()
+                            .ticks_per_slot();
                     info!(
                         "Received micro block; slot={}, tick={}, bundle_count: {}",
                         current_slot,
@@ -136,12 +148,16 @@ impl JssManager {
             let pubkey = cluster_info.keypair().pubkey();
             if !Self::get_or_init_connection(jss_url.clone(), &mut jss_connection, pubkey).await {
                 if jss_enabled.load(std::sync::atomic::Ordering::Relaxed) {
-                    let _ = cluster_info.set_tpu(local_contact_info.tpu(Protocol::UDP).unwrap()).inspect_err(|e| {
-                        warn!("Failed to set TPU: {:?}", e);
-                    });
-                    let _ = cluster_info.set_tpu_forwards(local_contact_info.tpu_forwards(Protocol::UDP).unwrap()).inspect_err(|e| {
-                        warn!("Failed to set TPU forwards: {:?}", e);
-                    });
+                    let _ = cluster_info
+                        .set_tpu(local_contact_info.tpu(Protocol::UDP).unwrap())
+                        .inspect_err(|e| {
+                            warn!("Failed to set TPU: {:?}", e);
+                        });
+                    let _ = cluster_info
+                        .set_tpu_forwards(local_contact_info.tpu_forwards(Protocol::UDP).unwrap())
+                        .inspect_err(|e| {
+                            warn!("Failed to set TPU forwards: {:?}", e);
+                        });
                     jss_enabled.store(false, std::sync::atomic::Ordering::Relaxed);
                 }
                 continue;
@@ -162,7 +178,10 @@ impl JssManager {
             }
 
             const TICK_LOOKAHEAD: u64 = 8;
-            if Self::is_within_leader_slot_with_lookahead(&poh_recorder.read().unwrap(), TICK_LOOKAHEAD) {
+            if Self::is_within_leader_slot_with_lookahead(
+                &poh_recorder.read().unwrap(),
+                TICK_LOOKAHEAD,
+            ) {
                 Self::run_leader_slot_mode(
                     &mut jss_connection,
                     &cluster_info,
@@ -183,8 +202,14 @@ impl JssManager {
         micro_block_sender: &std::sync::mpsc::Sender<MicroBlock>,
     ) {
         let current_slot = poh_recorder.read().unwrap().get_current_slot();
-        let current_tick = poh_recorder.read().unwrap().tick_height() % poh_recorder.read().unwrap().ticks_per_slot();
-        info!("Running leader slot mode for slot={} current_slot={} current_tick={}", current_slot + 1, current_slot, current_tick);
+        let current_tick = poh_recorder.read().unwrap().tick_height()
+            % poh_recorder.read().unwrap().ticks_per_slot();
+        info!(
+            "Running leader slot mode for slot={} current_slot={} current_tick={}",
+            current_slot + 1,
+            current_slot,
+            current_tick
+        );
 
         let send_leader_state = |jss_connection: &mut JssConnection, bank: &Bank| {
             let max_block_cu = bank.read_cost_tracker().unwrap().block_cost_limit();
@@ -208,7 +233,10 @@ impl JssManager {
         let mut sent_initial_leader_state = false;
         let mut prev_tick = u64::MAX;
         const TICK_LOOKAHEAD: u64 = 8;
-        while Self::is_within_leader_slot_with_lookahead(&poh_recorder.read().unwrap(), TICK_LOOKAHEAD) {
+        while Self::is_within_leader_slot_with_lookahead(
+            &poh_recorder.read().unwrap(),
+            TICK_LOOKAHEAD,
+        ) {
             // Receive microblocks and foward them
             while let Some(micro_block) = jss_connection.try_recv_microblock() {
                 micro_block_sender.send(micro_block).ok();
@@ -232,7 +260,10 @@ impl JssManager {
                     slot_cu_budget: 48_000_000, // Remove hardcoded value
                     recently_executed_txn_signatures: vec![], // TODO; fill this (Maybe not needed for POC)
                 };
-                info!("Sending initial leader state slot={} tick={}", leader_state.slot, leader_state.tick);
+                info!(
+                    "Sending initial leader state slot={} tick={}",
+                    leader_state.slot, leader_state.tick
+                );
                 jss_connection.send_leader_state(leader_state);
             }
         }

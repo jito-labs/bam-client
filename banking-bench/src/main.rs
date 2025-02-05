@@ -39,7 +39,10 @@ use {
     solana_tpu_client::tpu_client::DEFAULT_TPU_CONNECTION_POOL_SIZE,
     std::{
         collections::HashSet,
-        sync::{atomic::{AtomicBool, Ordering}, Arc, RwLock},
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc, RwLock,
+        },
         thread::sleep,
         time::{Duration, Instant},
     },
