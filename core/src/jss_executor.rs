@@ -39,8 +39,7 @@ use solana_transaction_status::PreBalanceInfo;
 
 use crate::{
     banking_stage::{
-        self, immutable_deserialized_packet::ImmutableDeserializedPacket,
-        leader_slot_timing_metrics::LeaderExecuteAndCommitTimings, qos_service::QosService,
+        self, committer::CommitTransactionDetails, immutable_deserialized_packet::ImmutableDeserializedPacket, leader_slot_timing_metrics::LeaderExecuteAndCommitTimings, qos_service::QosService
     }, bundle_stage::{self, bundle_account_locker::BundleAccountLocker, MAX_BUNDLE_RETRY_DURATION}, proxy::block_engine_stage::BlockBuilderFeeInfo, tip_manager::TipManager
 };
 
@@ -565,14 +564,29 @@ impl JssExecutor {
 
         // Commit the transactions
         let mut execute_and_commit_timings = LeaderExecuteAndCommitTimings::default();
-        committer.commit_bundle(
+        let (_, commit_bundle_details) = committer.commit_bundle(
             &mut bundle_execution_results,
             starting_transaction_index,
             &bank,
             &mut execute_and_commit_timings,
         );
 
-        // TODO: update costs?
+        let commit_transaction_details = commit_bundle_details
+            .commit_transaction_details
+            .into_iter()
+            .flat_map(|commit_details| {
+                commit_details
+                    .into_iter()
+                    .filter(|d| matches!(d, CommitTransactionDetails::Committed { .. }))
+            })
+            .collect();
+
+
+        QosService::remove_or_update_costs(
+            transaction_qos_cost_results.iter(),
+            Some(&commit_transaction_details),
+            bank,
+        );
 
         true
     }
