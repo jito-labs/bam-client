@@ -41,7 +41,7 @@ use crate::{
     banking_stage::{
         self, immutable_deserialized_packet::ImmutableDeserializedPacket,
         leader_slot_timing_metrics::LeaderExecuteAndCommitTimings, qos_service::QosService,
-    }, bundle_stage::{self, MAX_BUNDLE_RETRY_DURATION}, proxy::block_engine_stage::BlockBuilderFeeInfo, tip_manager::TipManager
+    }, bundle_stage::{self, bundle_account_locker::BundleAccountLocker, MAX_BUNDLE_RETRY_DURATION}, proxy::block_engine_stage::BlockBuilderFeeInfo, tip_manager::TipManager
 };
 
 pub struct JssExecutor {
@@ -60,6 +60,7 @@ impl JssExecutor {
         exit: Arc<AtomicBool>,
         keypair: Arc<Keypair>,
         block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
+        bundle_account_locker: BundleAccountLocker,
     ) -> Self {
         let (bundle_committer, transaction_commiter) = Self::build_committers(
             replay_vote_sender.clone(),
@@ -79,6 +80,7 @@ impl JssExecutor {
             successful_count.clone(),
             keypair,
             block_builder_fee_info,
+            bundle_account_locker,
         );
 
         const MICROBLOCK_CHANNEL_SIZE: usize = 50;
@@ -276,6 +278,7 @@ impl JssExecutor {
         successful_count: Arc<AtomicUsize>,
         keypair: Arc<Keypair>,
         block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
+        bundle_account_locker: BundleAccountLocker,
     ) -> (Vec<std::thread::JoinHandle<()>>, Vec<Worker>) {
         let mut threads = Vec::new();
         let mut workers = Vec::new();
@@ -293,6 +296,7 @@ impl JssExecutor {
             let keypair = keypair.clone();
             let last_tip_updated_slot = last_tip_updated_slot.clone();
             let block_builder_fee_info = block_builder_fee_info.clone();
+            let bundle_account_locker = bundle_account_locker.clone();
             threads.push(
                 std::thread::Builder::new()
                     .name(format!("jss_executor_worker_{}", id))
@@ -310,6 +314,7 @@ impl JssExecutor {
                             keypair,
                             last_tip_updated_slot,
                             block_builder_fee_info,
+                            bundle_account_locker,
                         );
                     })
                     .unwrap(),
@@ -332,6 +337,7 @@ impl JssExecutor {
         keypair: Arc<Keypair>,
         last_tip_updated_slot: Arc<Mutex<u64>>,
         block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
+        bundle_account_locker: BundleAccountLocker,
     ) {
         let qos_service = QosService::new(id as u32);
         let recorder = poh_recorder.read().unwrap().new_recorder();
@@ -375,6 +381,7 @@ impl JssExecutor {
                 &keypair,
                 &last_tip_updated_slot,
                 current_block_builder_fee_info.as_ref().unwrap(),
+                &bundle_account_locker,
             ) {
                 successful_count.fetch_add(1, Ordering::Relaxed);
             }
@@ -396,6 +403,7 @@ impl JssExecutor {
         keypair: &Keypair,
         last_tip_updated_slot: &Mutex<u64>,
         block_builder_fee_info: &BlockBuilderFeeInfo,
+        bundle_account_locker: &BundleAccountLocker,
     ) -> bool {
         if revert_on_error {
             let bundle_id = derive_bundle_id_from_sanitized_transactions(&transactions);
@@ -419,6 +427,7 @@ impl JssExecutor {
                     tip_manager,
                     keypair,
                     block_builder_fee_info,
+                    bundle_account_locker,
                 ) {
                     return false;
                 }
@@ -432,6 +441,7 @@ impl JssExecutor {
                 recorder,
                 bundle_committer,
                 sanitized_bundle,
+                bundle_account_locker,
             )
         } else {
             Self::execute_commit_record_transactions(
@@ -440,6 +450,7 @@ impl JssExecutor {
                 recorder,
                 transaction_commiter,
                 transactions,
+                bundle_account_locker,
             )
         }
     }
@@ -452,6 +463,7 @@ impl JssExecutor {
         tip_manager: &TipManager,
         keypair: &Keypair,
         block_builder_fee_info: &BlockBuilderFeeInfo,
+        bundle_account_locker: &BundleAccountLocker,
     ) -> bool {
         let initialize_tip_programs_bundle =
             tip_manager.get_initialize_tip_programs_bundle(&bank_start.working_bank, keypair);
@@ -462,6 +474,7 @@ impl JssExecutor {
                 recorder,
                 bundle_committer,
                 init_bundle,
+                bundle_account_locker,
             ) {
                 info!("Failed to initialize tip programs");
                 return false;
@@ -480,6 +493,7 @@ impl JssExecutor {
                 recorder,
                 bundle_committer,
                 crank_bundle,
+                bundle_account_locker,
             ) {
                 info!("Failed to crank tip programs");
                 return false;
@@ -495,17 +509,12 @@ impl JssExecutor {
         recorder: &TransactionRecorder,
         committer: &mut bundle_stage::committer::Committer,
         sanitized_bundle: SanitizedBundle,
+        bundle_account_locker: &BundleAccountLocker,
     ) -> bool {
-        //// Lock all transactions in the bundle
-        //let batch = bank.prepare_sanitized_batch_with_results(
-        //    &sanitized_bundle.transactions,
-        //    std::iter::repeat(Ok(())),
-        //    None,
-        //    None,
-        //);
-        //if batch.lock_results().iter().any(|r| r.is_err()) {
-        //    return false;
-        //}
+        let lock = bundle_account_locker.prepare_locked_bundle(&sanitized_bundle, &bank);
+        if lock.is_err() {
+            return false;
+        }
 
         // See if we have enough room in the block to execute the bundle
         let (transaction_qos_cost_results, skipped_count) = qos_service
@@ -574,6 +583,7 @@ impl JssExecutor {
         recorder: &TransactionRecorder,
         committer: &mut banking_stage::committer::Committer,
         transactions: Vec<SanitizedTransaction>,
+        bundle_account_locker: &BundleAccountLocker,
     ) -> bool {
         let (transaction_qos_cost_results, skipped_count) = qos_service
             .select_and_accumulate_transaction_costs(
@@ -589,15 +599,17 @@ impl JssExecutor {
             );
         }
 
+        let bundle_account_locks = bundle_account_locker.account_locks();
         let batch = bank.prepare_sanitized_batch_with_results(
             &transactions,
             transaction_qos_cost_results.iter().map(|r| match r {
                 Ok(_cost) => Ok(()),
                 Err(err) => Err(err.clone()),
             }),
-            None,
-            None,
+            Some(&bundle_account_locks.read_locks()),
+            Some(&bundle_account_locks.write_locks())
         );
+        drop(bundle_account_locks);
 
         let mut pre_balance_info = PreBalanceInfo::default();
         let transaction_status_sender_enabled = committer.transaction_status_sender_enabled();
@@ -902,7 +914,7 @@ mod tests {
     };
     use solana_vote_program::vote_state::VoteState;
 
-    use crate::{proxy::block_engine_stage::BlockBuilderFeeInfo, tip_manager::{TipDistributionAccountConfig, TipManager, TipManagerConfig}};
+    use crate::{bundle_stage::bundle_account_locker::BundleAccountLocker, proxy::block_engine_stage::BlockBuilderFeeInfo, tip_manager::{TipDistributionAccountConfig, TipManager, TipManagerConfig}};
 
     pub(crate) fn simulate_poh(
         record_receiver: Receiver<Record>,
@@ -1096,6 +1108,7 @@ mod tests {
             exit.clone(),
             Arc::new(Keypair::new()),
             Arc::new(Mutex::new(BlockBuilderFeeInfo::default())),
+            BundleAccountLocker::default(),
         );
 
         let successful_bundle = Bundle {
@@ -1198,6 +1211,7 @@ mod tests {
                 block_builder: block_builder_pubkey.clone(),
                 block_builder_commission: 5,
             })),
+            BundleAccountLocker::default(),
         );
 
         let tip_accounts = tip_manager.get_tip_accounts();
