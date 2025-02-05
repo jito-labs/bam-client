@@ -59,6 +59,7 @@ impl JssExecutor {
         tip_manager: TipManager,
         exit: Arc<AtomicBool>,
         keypair: Arc<Keypair>,
+        block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
     ) -> Self {
         let (bundle_committer, transaction_commiter) = Self::build_committers(
             replay_vote_sender.clone(),
@@ -77,6 +78,7 @@ impl JssExecutor {
             tip_manager.clone(),
             successful_count.clone(),
             keypair,
+            block_builder_fee_info,
         );
 
         const MICROBLOCK_CHANNEL_SIZE: usize = 50;
@@ -273,6 +275,7 @@ impl JssExecutor {
         tip_manager: TipManager,
         successful_count: Arc<AtomicUsize>,
         keypair: Arc<Keypair>,
+        block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
     ) -> (Vec<std::thread::JoinHandle<()>>, Vec<Worker>) {
         let mut threads = Vec::new();
         let mut workers = Vec::new();
@@ -289,6 +292,7 @@ impl JssExecutor {
             let successful_count = successful_count.clone();
             let keypair = keypair.clone();
             let last_tip_updated_slot = last_tip_updated_slot.clone();
+            let block_builder_fee_info = block_builder_fee_info.clone();
             threads.push(
                 std::thread::Builder::new()
                     .name(format!("jss_executor_worker_{}", id))
@@ -305,6 +309,7 @@ impl JssExecutor {
                             successful_count,
                             keypair,
                             last_tip_updated_slot,
+                            block_builder_fee_info,
                         );
                     })
                     .unwrap(),
@@ -326,12 +331,8 @@ impl JssExecutor {
         successful_count: Arc<AtomicUsize>,
         keypair: Arc<Keypair>,
         last_tip_updated_slot: Arc<Mutex<u64>>,
+        block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
     ) {
-        let block_builder_fee_info = BlockBuilderFeeInfo{
-            block_builder: Pubkey::from_str("feeywn2ffX8DivmRvBJ9i9YZnss7WBouTmujfQcEdeY").unwrap(),
-            block_builder_commission: 5,
-        };
-
         let qos_service = QosService::new(id as u32);
         let recorder = poh_recorder.read().unwrap().new_recorder();
         let mut bank_start = None;
@@ -357,6 +358,7 @@ impl JssExecutor {
             else {
                 continue;
             };
+            let block_builder_fee_info = block_builder_fee_info.lock().unwrap().clone();
             if Self::execute_record_commit(
                 &current_bank_start,
                 &qos_service,
@@ -860,8 +862,7 @@ impl Worker {
 mod tests {
     use std::{
         str::FromStr, sync::{
-            atomic::{AtomicBool, Ordering},
-            Arc, RwLock,
+            atomic::{AtomicBool, Ordering}, Arc, Mutex, RwLock
         }, thread::{Builder, JoinHandle}, time::Duration
     };
 
@@ -898,7 +899,7 @@ mod tests {
     use solana_streamer::socket::SocketAddrSpace;
     use solana_vote_program::vote_state::VoteState;
 
-    use crate::tip_manager::{TipDistributionAccountConfig, TipManager, TipManagerConfig};
+    use crate::{proxy::block_engine_stage::BlockBuilderFeeInfo, tip_manager::{TipDistributionAccountConfig, TipManager, TipManagerConfig}};
 
     pub(crate) fn simulate_poh(
         record_receiver: Receiver<Record>,
@@ -1091,6 +1092,7 @@ mod tests {
             TipManager::new(TipManagerConfig::default()),
             exit.clone(),
             Arc::new(Keypair::new()),
+            Arc::new(Mutex::new(BlockBuilderFeeInfo::default())),
         );
 
         let successful_bundle = Bundle {
@@ -1177,7 +1179,7 @@ mod tests {
 
         let (replay_vote_sender, _) = crossbeam_channel::unbounded();
         let keypair = Arc::new(leader_keypair);
-        let block_builder_pubkey = Pubkey::from_str("feeywn2ffX8DivmRvBJ9i9YZnss7WBouTmujfQcEdeY").unwrap();
+        let block_builder_pubkey = Pubkey::new_unique();
 
         let tip_manager = get_tip_manager(&genesis_config_info.voting_keypair.pubkey());
         let mut executor = super::JssExecutor::new(
@@ -1189,6 +1191,10 @@ mod tests {
             tip_manager.clone(),
             exit.clone(),
             keypair.clone(),
+            Arc::new(Mutex::new(BlockBuilderFeeInfo{
+                block_builder: block_builder_pubkey.clone(),
+                block_builder_commission: 5,
+            })),
         );
 
         let tip_accounts = tip_manager.get_tip_accounts();

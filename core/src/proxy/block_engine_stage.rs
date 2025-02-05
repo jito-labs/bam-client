@@ -69,6 +69,7 @@ impl BlockEngineStageStats {
     }
 }
 
+#[derive(Clone, Default)]
 pub struct BlockBuilderFeeInfo {
     pub block_builder: Pubkey,
     pub block_builder_commission: u64,
