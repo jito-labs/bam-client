@@ -336,6 +336,7 @@ impl JssExecutor {
         let qos_service = QosService::new(id as u32);
         let recorder = poh_recorder.read().unwrap().new_recorder();
         let mut bank_start = None;
+        let mut current_block_builder_fee_info = None;
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
             if bank_start.is_none() {
                 bank_start = poh_recorder.read().unwrap().bank_start();
@@ -345,6 +346,7 @@ impl JssExecutor {
             };
             if !current_bank_start.should_working_bank_still_be_processing_txs() {
                 bank_start = None;
+                current_block_builder_fee_info = None;
                 continue;
             }
             let Ok(ParsedBundleWithId {
@@ -358,7 +360,9 @@ impl JssExecutor {
             else {
                 continue;
             };
-            let block_builder_fee_info = block_builder_fee_info.lock().unwrap().clone();
+            if current_block_builder_fee_info.is_none() {
+                current_block_builder_fee_info = Some(block_builder_fee_info.lock().unwrap().clone());
+            }
             if Self::execute_record_commit(
                 &current_bank_start,
                 &qos_service,
@@ -370,7 +374,7 @@ impl JssExecutor {
                 &tip_manager,
                 &keypair,
                 &last_tip_updated_slot,
-                &block_builder_fee_info,
+                current_block_builder_fee_info.as_ref().unwrap(),
             ) {
                 successful_count.fetch_add(1, Ordering::Relaxed);
             }
