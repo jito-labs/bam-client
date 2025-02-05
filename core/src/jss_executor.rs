@@ -327,6 +327,11 @@ impl JssExecutor {
         keypair: Arc<Keypair>,
         last_tip_updated_slot: Arc<Mutex<u64>>,
     ) {
+        let block_builder_fee_info = BlockBuilderFeeInfo{
+            block_builder: Pubkey::from_str("feeywn2ffX8DivmRvBJ9i9YZnss7WBouTmujfQcEdeY").unwrap(),
+            block_builder_commission: 5,
+        };
+
         let qos_service = QosService::new(id as u32);
         let recorder = poh_recorder.read().unwrap().new_recorder();
         let mut bank_start = None;
@@ -363,6 +368,7 @@ impl JssExecutor {
                 &tip_manager,
                 &keypair,
                 &last_tip_updated_slot,
+                &block_builder_fee_info,
             ) {
                 successful_count.fetch_add(1, Ordering::Relaxed);
             }
@@ -383,6 +389,7 @@ impl JssExecutor {
         tip_manager: &TipManager,
         keypair: &Keypair,
         last_tip_updated_slot: &Mutex<u64>,
+        block_builder_fee_info: &BlockBuilderFeeInfo,
     ) -> bool {
         if revert_on_error {
             let bundle_id = derive_bundle_id_from_sanitized_transactions(&transactions);
@@ -405,6 +412,7 @@ impl JssExecutor {
                     bundle_committer,
                     tip_manager,
                     keypair,
+                    block_builder_fee_info,
                 ) {
                     return false;
                 }
@@ -437,6 +445,7 @@ impl JssExecutor {
         bundle_committer: &mut bundle_stage::committer::Committer,
         tip_manager: &TipManager,
         keypair: &Keypair,
+        block_builder_fee_info: &BlockBuilderFeeInfo,
     ) -> bool {
         let initialize_tip_programs_bundle =
             tip_manager.get_initialize_tip_programs_bundle(&bank_start.working_bank, keypair);
@@ -456,10 +465,7 @@ impl JssExecutor {
         let tip_crank_bundle = tip_manager.get_tip_programs_crank_bundle(
             &bank_start.working_bank,
             keypair,
-            &BlockBuilderFeeInfo{
-                block_builder: Pubkey::from_str("feeywn2ffX8DivmRvBJ9i9YZnss7WBouTmujfQcEdeY").unwrap(),
-                block_builder_commission: 5,
-            }
+            block_builder_fee_info,
         );
         if let Ok(Some(crank_bundle)) = tip_crank_bundle {
             if !Self::execute_commit_record_bundle(
