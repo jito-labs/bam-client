@@ -400,6 +400,18 @@ impl JssExecutor {
             bundle_id: bundle_id.clone(),
         };
 
+        // Lock all transactions in the bundle
+        let batch = bank.prepare_sanitized_batch_with_results(
+            &sanitized_bundle.transactions,
+            std::iter::repeat(Ok(())),
+            None,
+            None,
+        );
+        if batch.lock_results().iter().any(|r| r.is_err()) {
+            return false;
+        }
+
+        // See if we have enough room in the block to execute the bundle
         let (transaction_qos_cost_results, skipped_count) = qos_service
             .select_and_accumulate_transaction_costs(
                 bank,
@@ -413,6 +425,7 @@ impl JssExecutor {
             return false;
         }
 
+        // Execute the bundle
         let default_accounts = vec![None; len];
         let transaction_status_sender_enabled = committer.transaction_status_sender_enabled();
         let mut bundle_execution_results = load_and_execute_bundle(
@@ -427,16 +440,14 @@ impl JssExecutor {
             &default_accounts,
             &default_accounts,
         );
-
         if let Err(err) = bundle_execution_results.result() {
             error!("Error executing bundle {}: {:?}", bundle_id, err);
             QosService::remove_or_update_costs(transaction_qos_cost_results.iter(), None, bank);
             return false;
         }
 
-        let (executed_batches, _execution_results_to_transactions_us) =
-            measure_us!(bundle_execution_results.executed_transaction_batches());
-
+        // Record the transactions
+        let executed_batches = bundle_execution_results.executed_transaction_batches();
         let _freeze_lock = bank.freeze_lock();
         let RecordTransactionsSummary {
             result: record_transactions_result,
@@ -448,6 +459,7 @@ impl JssExecutor {
             return false;
         }
 
+        // Commit the transactions
         let mut execute_and_commit_timings = LeaderExecuteAndCommitTimings::default();
         committer.commit_bundle(
             &mut bundle_execution_results,
