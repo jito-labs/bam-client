@@ -516,16 +516,17 @@ impl JssExecutor {
                 transaction_account_lock_limit: Some(bank.get_transaction_account_lock_limit()),
             },
         );
-        if results.processed_counts.processed_transactions_count == 0 {
-            QosService::remove_or_update_costs(transaction_qos_cost_results.iter(), None, bank);
-            return false;
-        }
 
         results.processing_results.iter().for_each(|result| {
             if let Err(err) = result {
                 error!("    Error executing transaction: {:?}", err);
             }
         });
+
+        if results.processed_counts.processed_transactions_count == 0 {
+            QosService::remove_or_update_costs(transaction_qos_cost_results.iter(), None, bank);
+            return false;
+        }
 
         let _freeze_lock = bank.freeze_lock();
 
