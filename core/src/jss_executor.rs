@@ -896,7 +896,6 @@ mod tests {
         system_transaction::transfer,
         transaction::VersionedTransaction,
     };
-    use solana_streamer::socket::SocketAddrSpace;
     use solana_vote_program::vote_state::VoteState;
 
     use crate::{proxy::block_engine_stage::BlockBuilderFeeInfo, tip_manager::{TipDistributionAccountConfig, TipManager, TipManagerConfig}};
