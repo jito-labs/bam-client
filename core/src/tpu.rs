@@ -337,7 +337,7 @@ impl Tpu {
             log_messages_bytes_limit,
             exit.clone(),
             tip_manager.clone(),
-            bundle_account_locker,
+            bundle_account_locker.clone(),
             &block_builder_fee_info,
             preallocated_bundle_cost,
             prioritization_fee_cache,
@@ -384,6 +384,7 @@ impl Tpu {
                     transaction_status_sender.clone(),
                     prioritization_fee_cache.clone(),
                     tip_manager.clone(),
+                    bundle_account_locker,
                 )
             });
 

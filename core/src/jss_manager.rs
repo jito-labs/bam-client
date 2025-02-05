@@ -25,7 +25,7 @@ use solana_runtime::{
 };
 use solana_sdk::{pubkey::Pubkey, signer::Signer};
 
-use crate::{jss_connection::JssConnection, jss_executor::JssExecutor, proxy::block_engine_stage::BlockBuilderFeeInfo, tip_manager::TipManager};
+use crate::{bundle_stage::bundle_account_locker::BundleAccountLocker, jss_connection::JssConnection, jss_executor::JssExecutor, proxy::block_engine_stage::BlockBuilderFeeInfo, tip_manager::TipManager};
 
 pub(crate) struct JssManager {
     threads: Vec<std::thread::JoinHandle<()>>,
@@ -45,6 +45,7 @@ impl JssManager {
         transaction_status_sender: Option<TransactionStatusSender>,
         prioritization_fee_cache: Arc<PrioritizationFeeCache>,
         tip_manager: TipManager,
+        bundle_account_locker: BundleAccountLocker,
     ) -> Self {
         let block_builder_fee_info = Arc::new(Mutex::new(BlockBuilderFeeInfo {
             block_builder: Pubkey::from_str("feeywn2ffX8DivmRvBJ9i9YZnss7WBouTmujfQcEdeY").unwrap(),
@@ -70,6 +71,7 @@ impl JssManager {
                     exit_micro_block_execution_thread.clone(),
                     cluster_info_execution.keypair().to_owned(),
                     block_builder_fee_info_execution,
+                    bundle_account_locker,
                 );
 
                 info!("Micro block execution thread started");
