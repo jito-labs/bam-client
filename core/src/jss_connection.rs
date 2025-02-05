@@ -21,7 +21,7 @@ pub struct JssConnection {
 
     last_tpu_update: std::time::Instant,
     tpu_config: Option<TpuConfigResp>,
-    
+
     heartbeat_task: tokio::task::JoinHandle<()>,
 }
 
@@ -49,12 +49,11 @@ impl JssConnection {
         let sender_clone = outbound_sender.clone();
         let heartbeat_task = tokio::spawn(async move {
             loop {
-                let _ = sender_clone
-                    .unbounded_send(StartSchedulerMessage {
-                        msg: Some(Msg::HeartBeat(HeartBeat{
-                            pubkey: pubkey.to_string(),
-                        })),
-                    });
+                let _ = sender_clone.unbounded_send(StartSchedulerMessage {
+                    msg: Some(Msg::HeartBeat(HeartBeat {
+                        pubkey: pubkey.to_string(),
+                    })),
+                });
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             }
         });

@@ -7,45 +7,50 @@
 // - When the working bank is no longer valid; the Prio-graph and mempool are drained. Thinking about a feedback loop for JSS to know it scheduled too much.
 
 use std::{
-    collections::VecDeque,
-    sync::{atomic::{AtomicBool, AtomicUsize, Ordering}, Arc, RwLock},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, RwLock,
+    },
     time::Duration,
 };
 
 use itertools::Itertools;
 use jito_protos::proto::jss_types::{MicroBlock, Packet};
 use prio_graph::{AccessKind, GraphNode, TopLevelId};
-use solana_bundle::{bundle_execution::load_and_execute_bundle, derive_bundle_id_from_sanitized_transactions, SanitizedBundle};
+use solana_bundle::{
+    bundle_execution::load_and_execute_bundle, derive_bundle_id_from_sanitized_transactions,
+    SanitizedBundle,
+};
 use solana_ledger::{
     blockstore_processor::TransactionStatusSender, token_balances::collect_token_balances,
 };
 use solana_measure::measure_us;
-use solana_poh::poh_recorder::{
-    BankStart, PohRecorder, RecordTransactionsSummary, TransactionRecorder,
-};
+use solana_poh::poh_recorder::{PohRecorder, RecordTransactionsSummary, TransactionRecorder};
 use solana_runtime::{
     bank::Bank, prioritization_fee_cache::PrioritizationFeeCache,
     vote_sender_types::ReplayVoteSender,
 };
 use solana_sdk::{
-    clock::MAX_PROCESSING_AGE,
-    packet::PacketFlags,
-    pubkey::Pubkey,
+    clock::MAX_PROCESSING_AGE, packet::PacketFlags, pubkey::Pubkey,
     transaction::SanitizedTransaction,
 };
-use solana_svm::{transaction_error_metrics::TransactionErrorMetrics, transaction_processing_result::TransactionProcessingResultExtensions, transaction_processor::{ExecutionRecordingConfig, TransactionProcessingConfig}};
+use solana_svm::{
+    transaction_error_metrics::TransactionErrorMetrics,
+    transaction_processing_result::TransactionProcessingResultExtensions,
+    transaction_processor::{ExecutionRecordingConfig, TransactionProcessingConfig},
+};
 use solana_transaction_status::PreBalanceInfo;
 
 use crate::{
     banking_stage::{
         self, immutable_deserialized_packet::ImmutableDeserializedPacket,
-        leader_slot_timing_metrics::LeaderExecuteAndCommitTimings,
+        leader_slot_timing_metrics::LeaderExecuteAndCommitTimings, qos_service::QosService,
     },
     bundle_stage::{self, MAX_BUNDLE_RETRY_DURATION},
 };
 
 pub struct JssExecutor {
-    microblock_sender: crossbeam_channel::Sender<Vec<Vec<SanitizedTransaction>>>,
+    microblock_sender: crossbeam_channel::Sender<Vec<ParsedBundle>>,
     threads: Vec<std::thread::JoinHandle<()>>,
 }
 
@@ -120,17 +125,6 @@ impl JssExecutor {
         (bundle_committer, transaction_commiter)
     }
 
-    fn get_working_bank_start(poh_recorder: &Arc<RwLock<PohRecorder>>) -> Option<BankStart> {
-        let Some(bank_start) = poh_recorder.read().unwrap().bank_start() else {
-            return None;
-        };
-        if bank_start.should_working_bank_still_be_processing_txs() {
-            Some(bank_start)
-        } else {
-            None
-        }
-    }
-
     pub fn join(self) {
         for thread in self.threads.into_iter() {
             thread.join().unwrap();
@@ -142,15 +136,18 @@ impl JssExecutor {
         let bundles = micro_block
             .bundles
             .iter()
-            .map(|bundle| Self::parse_transactions(bank, bundle.packets.iter()))
-            .filter(|txns| !txns.is_empty())
+            .map(|bundle| ParsedBundle {
+                revert_on_error: bundle.revert_on_error,
+                transactions: Self::parse_transactions(bank, bundle.packets.iter()),
+            })
+            .filter(|b: &ParsedBundle| !b.transactions.is_empty())
             .collect_vec();
         self.microblock_sender.try_send(bundles).is_ok()
     }
 
     /// Loop responsible for scheduling transactions to workers
     fn spawn_management_thread(
-        microblock_receiver: crossbeam_channel::Receiver<Vec<Vec<SanitizedTransaction>>>,
+        microblock_receiver: crossbeam_channel::Receiver<Vec<ParsedBundle>>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         mut workers: Vec<Worker>,
         exit: Arc<AtomicBool>,
@@ -214,23 +211,26 @@ impl JssExecutor {
         C: std::hash::Hash + Eq + Clone + TopLevelId<BundleExecutionId> + Copy,
         D: Fn(&BundleExecutionId, &GraphNode<BundleExecutionId>) -> C,
     >(
-        microblock_receiver: &crossbeam_channel::Receiver<Vec<Vec<SanitizedTransaction>>>,
+        microblock_receiver: &crossbeam_channel::Receiver<Vec<ParsedBundle>>,
         prio_graph: &mut prio_graph::PrioGraph<BundleExecutionId, Pubkey, C, D>,
         microblock_count: &mut u64,
-        bundles: &mut Vec<Option<Vec<SanitizedTransaction>>>,
+        bundles: &mut Vec<Option<ParsedBundleWithId>>,
         bundles_scheduled: &mut u64,
         workers: &mut Vec<Worker>,
     ) {
         if let Ok(micro_block) = microblock_receiver.try_recv() {
             *microblock_count += 1;
-            for transactions in micro_block {
+            for bundle in micro_block {
                 let id = bundles.len();
                 let bundle_id = BundleExecutionId { id };
                 prio_graph.insert_transaction(
                     bundle_id,
-                    Self::get_bundle_account_access(transactions.as_slice()),
+                    Self::get_bundle_account_access(&bundle.transactions),
                 );
-                bundles.push(Some(transactions));
+                bundles.push(Some(ParsedBundleWithId {
+                    id: bundle_id,
+                    bundle,
+                }));
                 Self::schedule_next_batch(prio_graph, bundles, bundles_scheduled, workers);
             }
         }
@@ -243,33 +243,24 @@ impl JssExecutor {
         D: Fn(&BundleExecutionId, &GraphNode<BundleExecutionId>) -> C,
     >(
         prio_graph: &mut prio_graph::PrioGraph<BundleExecutionId, Pubkey, C, D>,
-        bundles: &mut Vec<Option<Vec<SanitizedTransaction>>>,
+        bundles: &mut Vec<Option<ParsedBundleWithId>>,
         bundles_scheduled: &mut u64,
         workers: &mut Vec<Worker>,
     ) {
-        for (i, worker) in workers.iter_mut().enumerate().filter(|(_,w)| !w.is_full()) {
+        for (_, worker) in workers.iter_mut().enumerate().filter(|(_, w)| !w.is_full()) {
             for bundle_id in worker.get_unblocking_bundles() {
                 prio_graph.unblock(&bundle_id);
             }
 
-            let mut batch_for_execution = BatchForExecution::default();
-            while !batch_for_execution.is_full() {
-                let Some(bundle_id) = prio_graph.pop() else {
-                    break;
-                };
-                let Some(transactions) = bundles[bundle_id.id].take() else {
-                    warn!("Bundle {} already scheduled", bundle_id.id);
-                    continue;
-                };
-                batch_for_execution.add(bundle_id, transactions);
-            }
-            if batch_for_execution.is_empty() {
+            let Some(bundle_id) = prio_graph.pop() else {
                 continue;
-            }
+            };
+            let Some(bundle) = bundles[bundle_id.id].take() else {
+                continue;
+            };
 
-            let batch_size = batch_for_execution.len();
-            if worker.send(batch_for_execution) {
-                *bundles_scheduled += batch_size as u64;
+            if worker.send(bundle) {
+                *bundles_scheduled += 1;
             }
         }
     }
@@ -298,6 +289,7 @@ impl JssExecutor {
                     .name(format!("jss_executor_worker_{}", id))
                     .spawn(move || {
                         Self::spawn_worker(
+                            id,
                             poh_recorder,
                             bundle_committer.clone(),
                             transaction_commiter.clone(),
@@ -315,14 +307,16 @@ impl JssExecutor {
 
     /// Loop responsible for executing transactions and bundles
     fn spawn_worker(
+        id: usize,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         mut bundle_committer: bundle_stage::committer::Committer,
         mut transaction_commiter: banking_stage::committer::Committer,
-        receiver: crossbeam_channel::Receiver<BatchForExecution>,
-        sender: crossbeam_channel::Sender<Vec<BundleExecutionId>>,
+        receiver: crossbeam_channel::Receiver<ParsedBundleWithId>,
+        sender: crossbeam_channel::Sender<BundleExecutionId>,
         exit: Arc<AtomicBool>,
         successful_count: Arc<AtomicUsize>,
     ) {
+        let qos_service = QosService::new(id as u32);
         let recorder = poh_recorder.read().unwrap().new_recorder();
         let mut bank_start = None;
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
@@ -336,16 +330,26 @@ impl JssExecutor {
                 bank_start = None;
                 continue;
             }
-            let Ok(BatchForExecution{ ids, txns }) = receiver.recv_timeout(Duration::from_millis(1)) else {
+            let Ok(ParsedBundleWithId {
+                id: ids,
+                bundle:
+                    ParsedBundle {
+                        revert_on_error,
+                        transactions: txns,
+                    },
+            }) = receiver.recv_timeout(Duration::from_millis(1))
+            else {
                 continue;
             };
             if Self::execute_record_commit(
                 &current_bank_start.working_bank,
+                &qos_service,
                 &recorder,
                 &mut bundle_committer,
                 &mut transaction_commiter,
+                revert_on_error,
                 txns,
-            ){
+            ) {
                 successful_count.fetch_add(1, Ordering::Relaxed);
             }
             sender.send(ids).unwrap();
@@ -356,25 +360,35 @@ impl JssExecutor {
     /// length of the transactions to determine which branch to take
     pub fn execute_record_commit(
         bank: &Arc<Bank>,
+        qos_service: &QosService,
         recorder: &TransactionRecorder,
         bundle_committer: &mut bundle_stage::committer::Committer,
         transaction_commiter: &mut banking_stage::committer::Committer,
+        revert_on_error: bool,
         transactions: Vec<SanitizedTransaction>,
     ) -> bool {
-        Self::execute_commit_record_transactions(
-            bank,
-            recorder,
-            transaction_commiter,
-            transactions,
-        )
-        
-
-        // TODO: handle bundles
-        //Self::execute_commit_record_bundle(bank, recorder, bundle_committer, transactions)
+        if revert_on_error {
+            Self::execute_commit_record_revertable(
+                bank,
+                qos_service,
+                recorder,
+                bundle_committer,
+                transactions,
+            )
+        } else {
+            Self::execute_commit_record_transactions(
+                bank,
+                qos_service,
+                recorder,
+                transaction_commiter,
+                transactions,
+            )
+        }
     }
 
-    fn execute_commit_record_bundle(
+    fn execute_commit_record_revertable(
         bank: &Arc<Bank>,
+        qos_service: &QosService,
         recorder: &TransactionRecorder,
         committer: &mut bundle_stage::committer::Committer,
         transactions: Vec<SanitizedTransaction>,
@@ -385,6 +399,19 @@ impl JssExecutor {
             transactions,
             bundle_id: bundle_id.clone(),
         };
+
+        let (transaction_qos_cost_results, skipped_count) = qos_service
+            .select_and_accumulate_transaction_costs(
+                bank,
+                &mut bank.write_cost_tracker().unwrap(),
+                &sanitized_bundle.transactions,
+                std::iter::repeat(Ok(())),
+            );
+        if skipped_count > 0 {
+            QosService::remove_or_update_costs(transaction_qos_cost_results.iter(), None, bank);
+            info!("Dropped bundle due to QoS constraints");
+            return false;
+        }
 
         let default_accounts = vec![None; len];
         let transaction_status_sender_enabled = committer.transaction_status_sender_enabled();
@@ -403,6 +430,7 @@ impl JssExecutor {
 
         if let Err(err) = bundle_execution_results.result() {
             error!("Error executing bundle {}: {:?}", bundle_id, err);
+            QosService::remove_or_update_costs(transaction_qos_cost_results.iter(), None, bank);
             return false;
         }
 
@@ -410,14 +438,13 @@ impl JssExecutor {
             measure_us!(bundle_execution_results.executed_transaction_batches());
 
         let _freeze_lock = bank.freeze_lock();
-        let (last_blockhash, lamports_per_signature) =
-            bank.last_blockhash_and_lamports_per_signature();
         let RecordTransactionsSummary {
             result: record_transactions_result,
             record_transactions_timings: _,
             starting_transaction_index,
         } = recorder.record_transactions(bank.slot(), executed_batches);
         if record_transactions_result.is_err() {
+            QosService::remove_or_update_costs(transaction_qos_cost_results.iter(), None, bank);
             return false;
         }
 
@@ -434,13 +461,31 @@ impl JssExecutor {
 
     fn execute_commit_record_transactions(
         bank: &Arc<Bank>,
+        qos_service: &QosService,
         recorder: &TransactionRecorder,
         committer: &mut banking_stage::committer::Committer,
         transactions: Vec<SanitizedTransaction>,
     ) -> bool {
+        let (transaction_qos_cost_results, skipped_count) = qos_service
+            .select_and_accumulate_transaction_costs(
+                bank,
+                &mut bank.write_cost_tracker().unwrap(),
+                &transactions,
+                std::iter::repeat(Ok(())),
+            );
+        if skipped_count > 0 {
+            info!(
+                "Skipped {} transactions due to QoS constraints",
+                skipped_count
+            );
+        }
+
         let batch = bank.prepare_sanitized_batch_with_results(
             &transactions,
-            transactions.iter().map(|_| Ok(())),
+            transaction_qos_cost_results.iter().map(|r| match r {
+                Ok(_cost) => Ok(()),
+                Err(err) => Err(err.clone()),
+            }),
             None,
             None,
         );
@@ -483,8 +528,6 @@ impl JssExecutor {
         }
 
         let _freeze_lock = bank.freeze_lock();
-        let (last_blockhash, lamports_per_signature) =
-            bank.last_blockhash_and_lamports_per_signature();
 
         let processed_transactions = results
             .processing_results
@@ -514,7 +557,8 @@ impl JssExecutor {
             &bank,
             &mut pre_balance_info,
             &mut execute_and_commit_timings,
-            &results.processed_counts);
+            &results.processed_counts,
+        );
         true
     }
 
@@ -627,51 +671,28 @@ impl PartialOrd for BundleExecutionId {
     }
 }
 
-struct BatchForExecution {
-    ids: Vec<BundleExecutionId>,
-    txns: Vec<SanitizedTransaction>,
+struct ParsedBundle {
+    revert_on_error: bool,
+    transactions: Vec<SanitizedTransaction>,
 }
 
-impl Default for BatchForExecution {
-    fn default() -> Self {
-        Self {
-            ids: Vec::new(),
-            txns: Vec::new(),
-        }
-    }
-}
-
-impl BatchForExecution {
-    fn is_full(&self) -> bool {
-        self.txns.len() == 1
-    }
-
-    fn is_empty(&self) -> bool {
-        self.txns.is_empty()
-    }
-
-    fn add(&mut self, id: BundleExecutionId, txns: Vec<SanitizedTransaction>) {
-        self.ids.push(id);
-        self.txns.extend(txns);
-    }
-
-    fn len(&self) -> usize {
-        self.txns.len()
-    }
+struct ParsedBundleWithId {
+    id: BundleExecutionId,
+    bundle: ParsedBundle,
 }
 
 // Worker management struct for scheduling thread
 struct Worker {
-    sender: crossbeam_channel::Sender<BatchForExecution>,
+    sender: crossbeam_channel::Sender<ParsedBundleWithId>,
     in_flight: usize,
-    receiver: crossbeam_channel::Receiver<Vec<BundleExecutionId>>,
+    receiver: crossbeam_channel::Receiver<BundleExecutionId>,
 }
 
 impl Worker {
     /// Creates a new worker with the given sender.
     fn new(
-        sender: crossbeam_channel::Sender<BatchForExecution>,
-        receiver: crossbeam_channel::Receiver<Vec<BundleExecutionId>>,
+        sender: crossbeam_channel::Sender<ParsedBundleWithId>,
+        receiver: crossbeam_channel::Receiver<BundleExecutionId>,
     ) -> Self {
         Self {
             sender,
@@ -687,8 +708,8 @@ impl Worker {
 
     /// Sends a bundle to the worker, while saving it in a local queue;
     /// used later to unblock transactions when the worker has picked up the bundle.
-    fn send(&mut self, batch: BatchForExecution) -> bool {
-        if let Ok(_) = self.sender.send(batch) {
+    fn send(&mut self, bundle: ParsedBundleWithId) -> bool {
+        if let Ok(_) = self.sender.send(bundle) {
             self.in_flight += 1;
             true
         } else {
@@ -702,7 +723,7 @@ impl Worker {
         let mut result = Vec::new();
         while let Ok(ids) = self.receiver.try_recv() {
             self.in_flight -= 1;
-            result.extend(ids);
+            result.push(ids);
         }
         result
     }
@@ -958,7 +979,7 @@ mod tests {
             ))],
         };
         let failed_bundle = Bundle {
-            revert_on_error: false,
+            revert_on_error: true,
             packets: vec![
                 // This one would go through
                 jds_packet_from_versioned_tx(&VersionedTransaction::from(transfer(
@@ -983,7 +1004,7 @@ mod tests {
         // See if the transaction is executed
         executor.schedule_microblock(&bank, microblock.clone());
         let txns = get_executed_txns(&entry_receiver, Duration::from_secs(3));
-        assert_eq!(txns.len(), 2);
+        assert_eq!(txns.len(), 1);
 
         // Make sure if you try the same thing again, it doesn't work
         executor.schedule_microblock(&bank, microblock);
