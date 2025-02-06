@@ -79,7 +79,6 @@ impl JssExecutor {
         );
 
         let successful_count = Arc::new(AtomicUsize::new(0));
-
         let (worker_threads, worker_handles) = Self::spawn_workers(
             worker_thread_count,
             poh_recorder.clone(),
@@ -166,6 +165,8 @@ impl JssExecutor {
         exit: Arc<AtomicBool>,
         successful_count: Arc<AtomicUsize>,
     ) {
+        info!("spawned management thread");
+
         let mut bundles_scheduled = 0;
         let mut bundles = Vec::new();
 
@@ -349,6 +350,8 @@ impl JssExecutor {
         block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
         bundle_account_locker: BundleAccountLocker,
     ) {
+        info!("spawned worker thread {}", id);
+
         let qos_service = QosService::new(id as u32);
         let recorder = poh_recorder.read().unwrap().new_recorder();
         let mut bank_start = None;
@@ -554,6 +557,7 @@ impl JssExecutor {
             &default_accounts,
         );
         if let Err(err) = bundle_execution_results.result() {
+            error!("Error executing bundle: {:?}", err);
             QosService::remove_or_update_costs(transaction_qos_cost_results.iter(), None, bank);
             return false;
         }
