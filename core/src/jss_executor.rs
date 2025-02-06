@@ -7,9 +7,12 @@
 // - When the working bank is no longer valid; the Prio-graph and mempool are drained. Thinking about a feedback loop for JSS to know it scheduled too much.
 
 use std::{
-    collections::HashSet, str::FromStr, sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering}, Arc, Mutex, RwLock
-    }, time::Duration
+    collections::HashSet,
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex, RwLock,
+    },
+    time::Duration,
 };
 
 use itertools::Itertools;
@@ -22,13 +25,16 @@ use solana_bundle::{
 use solana_ledger::{
     blockstore_processor::TransactionStatusSender, token_balances::collect_token_balances,
 };
-use solana_poh::poh_recorder::{BankStart, PohRecorder, RecordTransactionsSummary, TransactionRecorder};
+use solana_poh::poh_recorder::{
+    BankStart, PohRecorder, RecordTransactionsSummary, TransactionRecorder,
+};
 use solana_runtime::{
     bank::Bank, prioritization_fee_cache::PrioritizationFeeCache,
     vote_sender_types::ReplayVoteSender,
 };
 use solana_sdk::{
-    clock::MAX_PROCESSING_AGE, packet::PacketFlags, pubkey::Pubkey, signature::Keypair, transaction::SanitizedTransaction
+    clock::MAX_PROCESSING_AGE, packet::PacketFlags, pubkey::Pubkey, signature::Keypair,
+    transaction::SanitizedTransaction,
 };
 use solana_svm::{
     transaction_error_metrics::TransactionErrorMetrics,
@@ -39,8 +45,13 @@ use solana_transaction_status::PreBalanceInfo;
 
 use crate::{
     banking_stage::{
-        self, committer::CommitTransactionDetails, immutable_deserialized_packet::ImmutableDeserializedPacket, leader_slot_timing_metrics::LeaderExecuteAndCommitTimings, qos_service::QosService
-    }, bundle_stage::{self, bundle_account_locker::BundleAccountLocker, MAX_BUNDLE_RETRY_DURATION}, proxy::block_engine_stage::BlockBuilderFeeInfo, tip_manager::TipManager
+        self, committer::CommitTransactionDetails,
+        immutable_deserialized_packet::ImmutableDeserializedPacket,
+        leader_slot_timing_metrics::LeaderExecuteAndCommitTimings, qos_service::QosService,
+    },
+    bundle_stage::{self, bundle_account_locker::BundleAccountLocker, MAX_BUNDLE_RETRY_DURATION},
+    proxy::block_engine_stage::BlockBuilderFeeInfo,
+    tip_manager::TipManager,
 };
 
 pub struct JssExecutor {
@@ -366,7 +377,8 @@ impl JssExecutor {
                 continue;
             };
             if current_block_builder_fee_info.is_none() {
-                current_block_builder_fee_info = Some(block_builder_fee_info.lock().unwrap().clone());
+                current_block_builder_fee_info =
+                    Some(block_builder_fee_info.lock().unwrap().clone());
             }
             if Self::execute_record_commit(
                 &current_bank_start,
@@ -413,10 +425,7 @@ impl JssExecutor {
 
             let mut last_tip_updated_slot_guard = last_tip_updated_slot.lock().unwrap();
             if bank_start.working_bank.slot() != *last_tip_updated_slot_guard
-                && Self::bundle_touches_tip_pdas(
-                    &sanitized_bundle,
-                    &tip_manager.get_tip_accounts(),
-                )
+                && Self::bundle_touches_tip_pdas(&sanitized_bundle, &tip_manager.get_tip_accounts())
             {
                 if !Self::handle_tip_programs(
                     &bank_start,
@@ -581,7 +590,6 @@ impl JssExecutor {
             })
             .collect();
 
-
         QosService::remove_or_update_costs(
             transaction_qos_cost_results.iter(),
             Some(&commit_transaction_details),
@@ -621,7 +629,7 @@ impl JssExecutor {
                 Err(err) => Err(err.clone()),
             }),
             Some(&bundle_account_locks.read_locks()),
-            Some(&bundle_account_locks.write_locks())
+            Some(&bundle_account_locks.write_locks()),
         );
         drop(bundle_account_locks);
 
@@ -705,7 +713,7 @@ impl JssExecutor {
 
         true
     }
-    
+
     fn bundle_touches_tip_pdas(bundle: &SanitizedBundle, tip_pdas: &HashSet<Pubkey>) -> bool {
         bundle.transactions.iter().any(|tx| {
             tx.message()
@@ -891,9 +899,13 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use std::{
-        str::FromStr, sync::{
-            atomic::{AtomicBool, Ordering}, Arc, Mutex, RwLock
-        }, thread::{Builder, JoinHandle}, time::Duration
+        str::FromStr,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc, Mutex, RwLock,
+        },
+        thread::{Builder, JoinHandle},
+        time::Duration,
     };
 
     use crossbeam_channel::Receiver;
@@ -928,7 +940,11 @@ mod tests {
     };
     use solana_vote_program::vote_state::VoteState;
 
-    use crate::{bundle_stage::bundle_account_locker::BundleAccountLocker, proxy::block_engine_stage::BlockBuilderFeeInfo, tip_manager::{TipDistributionAccountConfig, TipManager, TipManagerConfig}};
+    use crate::{
+        bundle_stage::bundle_account_locker::BundleAccountLocker,
+        proxy::block_engine_stage::BlockBuilderFeeInfo,
+        tip_manager::{TipDistributionAccountConfig, TipManager, TipManagerConfig},
+    };
 
     pub(crate) fn simulate_poh(
         record_receiver: Receiver<Record>,
@@ -1221,7 +1237,7 @@ mod tests {
             tip_manager.clone(),
             exit.clone(),
             keypair.clone(),
-            Arc::new(Mutex::new(BlockBuilderFeeInfo{
+            Arc::new(Mutex::new(BlockBuilderFeeInfo {
                 block_builder: block_builder_pubkey.clone(),
                 block_builder_commission: 5,
             })),
