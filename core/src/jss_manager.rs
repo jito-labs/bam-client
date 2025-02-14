@@ -14,7 +14,7 @@ use std::{
 
 use jito_protos::proto::{
     jss_api::TpuConfigResp,
-    jss_types::{LeaderState, Socket},
+    jss_types::{AccountComputeUnitBudget, LeaderState, Socket},
 };
 use solana_gossip::{
     cluster_info::ClusterInfo,
@@ -197,7 +197,7 @@ impl JssManager {
         {
             // Send leader state every tick
             let current_tick = poh_recorder.read().unwrap().tick_height();
-            if current_tick != prev_tick {
+            if current_tick != prev_tick  && current_tick % 2 == 0 {
                 prev_tick = current_tick;
                 let leader_state = Self::generate_leader_state(cluster_info, poh_recorder);
                 jss_connection.send_leader_state(leader_state);
@@ -231,12 +231,29 @@ impl JssManager {
             let max_block_cu = bank.read_cost_tracker().unwrap().block_cost_limit();
             let consumed_block_cu = bank.read_cost_tracker().unwrap().block_cost();
             let slot_cu_budget = max_block_cu.saturating_sub(consumed_block_cu) as u32;
+
+            let account_cost_limit = bank.read_cost_tracker().unwrap().account_cost_limit;
+            let slot_account_cu_budget = bank
+                .read_cost_tracker()
+                .unwrap()
+                .cost_by_writable_accounts
+                .iter()
+                .map(|(pubkey, cost)| {
+                    let pubkey = pubkey.to_bytes().to_vec();
+                    let available_cus = account_cost_limit.saturating_sub(*cost);
+                    AccountComputeUnitBudget{
+                        pubkey,
+                        available_cus,
+                    }
+                })
+                .collect();
+
             return LeaderState {
                 pubkey: cluster_info.keypair().pubkey().to_bytes().to_vec(),
                 slot: bank.slot(),
                 tick: bank.tick_height() as u32,
                 slot_cu_budget,
-                slot_account_cu_budget: vec![],
+                slot_account_cu_budget,
                 recently_executed_txn_signatures: vec![],
             };
         } else {
