@@ -238,13 +238,20 @@ impl JssManager {
                 .unwrap()
                 .cost_by_writable_accounts
                 .iter()
-                .map(|(pubkey, cost)| {
+                .filter_map(|(pubkey, cost)| {
                     let pubkey = pubkey.to_bytes().to_vec();
                     let available_cus = account_cost_limit.saturating_sub(*cost);
-                    AccountComputeUnitBudget{
+
+                    // If available_cus is within 90% of the account_cost_limit, skip it
+                    // (Efficiency optimization)
+                    if available_cus > ((account_cost_limit / 10) * 9) {
+                        return None;
+                    }
+
+                    Some(AccountComputeUnitBudget{
                         pubkey,
                         available_cus,
-                    }
+                    })
                 })
                 .collect();
 
