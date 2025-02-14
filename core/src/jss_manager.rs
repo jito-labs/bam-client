@@ -197,7 +197,7 @@ impl JssManager {
         {
             // Send leader state every tick
             let current_tick = poh_recorder.read().unwrap().tick_height();
-            if current_tick != prev_tick  && current_tick % 2 == 0 {
+            if current_tick != prev_tick {
                 prev_tick = current_tick;
                 let leader_state = Self::generate_leader_state(cluster_info, poh_recorder);
                 jss_connection.send_leader_state(leader_state);
