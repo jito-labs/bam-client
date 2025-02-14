@@ -210,6 +210,7 @@ impl BundleStage {
         block_builder_fee_info: &Arc<Mutex<BlockBuilderFeeInfo>>,
         preallocated_bundle_cost: u64,
         prioritization_fee_cache: &Arc<PrioritizationFeeCache>,
+        jss_enabled: Arc<AtomicBool>,
     ) -> Self {
         Self::start_bundle_thread(
             cluster_info,
@@ -225,6 +226,7 @@ impl BundleStage {
             block_builder_fee_info,
             preallocated_bundle_cost,
             prioritization_fee_cache,
+            jss_enabled,
         )
     }
 
@@ -247,6 +249,7 @@ impl BundleStage {
         block_builder_fee_info: &Arc<Mutex<BlockBuilderFeeInfo>>,
         preallocated_bundle_cost: u64,
         prioritization_fee_cache: &Arc<PrioritizationFeeCache>,
+        jss_enabled: Arc<AtomicBool>,
     ) -> Self {
         const BUNDLE_STAGE_ID: u32 = 10_000;
         let poh_recorder = poh_recorder.clone();
@@ -301,6 +304,7 @@ impl BundleStage {
                     BUNDLE_STAGE_ID,
                     unprocessed_bundle_storage,
                     exit,
+                    jss_enabled,
                 );
             })
             .unwrap();
@@ -316,6 +320,7 @@ impl BundleStage {
         id: u32,
         mut unprocessed_bundle_storage: UnprocessedTransactionStorage,
         exit: Arc<AtomicBool>,
+        jss_enabled: Arc<AtomicBool>,
     ) {
         let mut last_metrics_update = Instant::now();
 
@@ -323,6 +328,11 @@ impl BundleStage {
         let mut bundle_stage_leader_metrics = BundleStageLeaderMetrics::new(id);
 
         while !exit.load(Ordering::Relaxed) {
+            if jss_enabled.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+
             if !unprocessed_bundle_storage.is_empty()
                 || last_metrics_update.elapsed() >= SLOT_BOUNDARY_CHECK_PERIOD
             {

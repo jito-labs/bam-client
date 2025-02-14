@@ -341,6 +341,7 @@ impl Tpu {
             &block_builder_fee_info,
             preallocated_bundle_cost,
             prioritization_fee_cache,
+            jss_enabled.clone(),
         );
 
         let (entry_receiver, tpu_entry_notifier) =
