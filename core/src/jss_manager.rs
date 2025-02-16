@@ -13,7 +13,7 @@ use std::{
 };
 
 use jito_protos::proto::{
-    jss_api::TpuConfigResp,
+    jss_api::BuilderConfigResp,
     jss_types::{AccountComputeUnitBudget, LeaderState, Socket},
 };
 use solana_gossip::{
@@ -113,12 +113,12 @@ impl JssManager {
             tip_manager,
             exit.clone(),
             cluster_info.keypair().to_owned(),
-            block_builder_fee_info,
+            block_builder_fee_info.clone(),
             bundle_account_locker,
         );
 
         let mut jss_connection: Option<JssConnection> = None;
-        let mut tpu_info = None;
+        let mut builder_info = None;
         let local_contact_info = cluster_info.my_contact_info();
 
         info!("JSS Manager started");
@@ -146,11 +146,12 @@ impl JssManager {
             };
 
             // Update TPU config (if new config is available)
-            let new_tpu_info = jss_connection.get_tpu_config();
-            if new_tpu_info != tpu_info {
-                tpu_info = new_tpu_info;
-                info!("TPU config updated: {:?}", tpu_info);
-                Self::update_tpu_config(tpu_info.as_ref(), &cluster_info);
+            let new_builder_info = jss_connection.get_builder_config();
+            if new_builder_info != builder_info {
+                builder_info = new_builder_info;
+                info!("Builder config updated: {:?}", builder_info);
+                Self::update_tpu_config(builder_info.as_ref(), &cluster_info);
+                Self::update_key_and_commission(builder_info.as_ref(), &block_builder_fee_info);
             }
 
             const TICK_LOOKAHEAD: u64 = 8;
@@ -248,7 +249,7 @@ impl JssManager {
                         return None;
                     }
 
-                    Some(AccountComputeUnitBudget{
+                    Some(AccountComputeUnitBudget {
                         pubkey,
                         available_cus,
                     })
@@ -325,7 +326,7 @@ impl JssManager {
     }
 
     /// Update the TPU config in the cluster info
-    pub fn update_tpu_config(tpu_info: Option<&TpuConfigResp>, cluster_info: &Arc<ClusterInfo>) {
+    fn update_tpu_config(tpu_info: Option<&BuilderConfigResp>, cluster_info: &Arc<ClusterInfo>) {
         if let Some(tpu_info) = tpu_info {
             if let Some(tpu) = Self::get_sockaddr(tpu_info.tpu_sock.as_ref()) {
                 let _ = cluster_info.set_tpu(tpu);
@@ -334,6 +335,19 @@ impl JssManager {
             if let Some(tpu_fwd) = Self::get_sockaddr(tpu_info.tpu_fwd_sock.as_ref()) {
                 let _ = cluster_info.set_tpu_forwards(tpu_fwd);
             }
+        }
+    }
+
+    fn update_key_and_commission(
+        builder_info: Option<&BuilderConfigResp>,
+        block_builder_fee_info: &Arc<Mutex<BlockBuilderFeeInfo>>,
+    ) {
+        if let Some(builder_info) = builder_info {
+            let pubkey = Pubkey::from_str(&builder_info.builder_pubkey).unwrap();
+            let commission = builder_info.builder_commission as u64;
+            let mut block_builder_fee_info = block_builder_fee_info.lock().unwrap();
+            block_builder_fee_info.block_builder = pubkey;
+            block_builder_fee_info.block_builder_commission = commission;
         }
     }
 
