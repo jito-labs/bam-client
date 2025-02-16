@@ -5,8 +5,8 @@ use futures::{channel::mpsc, StreamExt};
 use jito_protos::proto::{
     jss_api::{
         jss_node_api_client::JssNodeApiClient, start_scheduler_message::Msg,
-        start_scheduler_response::Resp, GetTpuConfigRequest, StartSchedulerMessage,
-        StartSchedulerResponse, TpuConfigResp,
+        start_scheduler_response::Resp, BuilderConfigResp, GetBuilderConfigRequest,
+        StartSchedulerMessage, StartSchedulerResponse,
     },
     jss_types::{HeartBeat, LeaderState, MicroBlock},
 };
@@ -18,7 +18,7 @@ use tokio::time::{interval, timeout};
 pub struct JssConnection {
     outbound_sender: mpsc::UnboundedSender<StartSchedulerMessage>,
     last_heartbeat: Arc<Mutex<std::time::Instant>>,
-    tpu_config: Arc<Mutex<Option<TpuConfigResp>>>,
+    builder_config: Arc<Mutex<Option<BuilderConfigResp>>>,
     microblock_receiver: Receiver<MicroBlock>,
     background_task: tokio::task::JoinHandle<()>,
 }
@@ -27,7 +27,7 @@ impl JssConnection {
     pub async fn try_init(url: String, pubkey: Pubkey) -> Option<Self> {
         let backend_endpoint = tonic::transport::Endpoint::from_shared(url).ok()?;
         let connection_timeout = std::time::Duration::from_secs(5);
-        let tpu_config = Arc::new(Mutex::new(None));
+        let builder_config = Arc::new(Mutex::new(None));
 
         let channel = timeout(connection_timeout, backend_endpoint.connect())
             .await
@@ -53,14 +53,14 @@ impl JssConnection {
             validator_client,
             pubkey,
             last_heartbeat.clone(),
-            tpu_config.clone(),
+            builder_config.clone(),
             microblock_sender,
         ));
 
         Some(Self {
             outbound_sender,
             last_heartbeat,
-            tpu_config,
+            builder_config,
             background_task,
             microblock_receiver,
         })
@@ -72,7 +72,7 @@ impl JssConnection {
         mut validator_client: JssNodeApiClient<tonic::transport::channel::Channel>,
         pubkey: Pubkey,
         last_heartbeat_clone: Arc<Mutex<std::time::Instant>>,
-        tpu_config_clone: Arc<Mutex<Option<TpuConfigResp>>>,
+        builder_config: Arc<Mutex<Option<BuilderConfigResp>>>,
         microblock_sender: crossbeam_channel::Sender<MicroBlock>,
     ) {
         let mut heartbeat_interval = interval(std::time::Duration::from_secs(5));
@@ -84,10 +84,10 @@ impl JssConnection {
                             pubkey: pubkey.to_string(),
                         })),
                     });
-                    let Ok(resp) = validator_client.get_tpu_config(GetTpuConfigRequest {}).await else {
+                    let Ok(resp) = validator_client.get_builder_config(GetBuilderConfigRequest {}).await else {
                         break;
                     };
-                    *tpu_config_clone.lock().unwrap() = Some(resp.into_inner());
+                    *builder_config.lock().unwrap() = Some(resp.into_inner());
                 }
                 inbound = inbound_stream.message() => {
                     let Ok(inbound) = inbound else {
@@ -124,17 +124,21 @@ impl JssConnection {
 
     // Check if the connection is healthy
     pub fn is_healthy(&mut self) -> bool {
-        let is_healthy = self.last_heartbeat.lock().unwrap().elapsed() < std::time::Duration::from_secs(6);
+        let is_healthy =
+            self.last_heartbeat.lock().unwrap().elapsed() < std::time::Duration::from_secs(6);
 
         if !is_healthy {
-            info!("dead_heartbeat={}", self.last_heartbeat.lock().unwrap().elapsed().as_secs());
+            info!(
+                "dead_heartbeat={}",
+                self.last_heartbeat.lock().unwrap().elapsed().as_secs()
+            );
         }
 
         is_healthy
     }
 
-    pub fn get_tpu_config(&self) -> Option<TpuConfigResp> {
-        self.tpu_config.lock().unwrap().clone()
+    pub fn get_builder_config(&self) -> Option<BuilderConfigResp> {
+        self.builder_config.lock().unwrap().clone()
     }
 }
 
