@@ -688,6 +688,7 @@ impl BankingStage {
                             scheduler,
                             worker_metrics,
                             forwarder,
+                            blacklisted_accounts.clone(),
                         );
 
                         match scheduler_controller.run() {
@@ -714,6 +715,7 @@ impl BankingStage {
                             scheduler,
                             worker_metrics,
                             forwarder,
+                            blacklisted_accounts.clone(),
                         );
 
                         match scheduler_controller.run() {
