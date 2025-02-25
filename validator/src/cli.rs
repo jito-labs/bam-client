@@ -1743,6 +1743,14 @@ pub fn app<'a>(version: &'a str, default_args: &'a DefaultArgs) -> App<'a, 'a> {
                     May get stuck if the leader used is different from others.",
                 ),
         )
+        .arg(
+            Arg::with_name("jss_url")
+                .long("jss-url")
+                .help(
+                    "URL of JSS Node; leave empty to disable JSS"
+                )
+                .takes_value(true)
+        )
         .args(&thread_args(&default_args.thread_args))
         .args(&get_deprecated_arguments())
         .after_help("The default subcommand is run")

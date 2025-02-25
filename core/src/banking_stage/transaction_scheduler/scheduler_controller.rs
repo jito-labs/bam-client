@@ -40,7 +40,7 @@ use {
     solana_svm::transaction_error_metrics::TransactionErrorMetrics,
     solana_svm_transaction::svm_message::SVMMessage,
     std::{
-        sync::{Arc, RwLock},
+        sync::{atomic::AtomicBool, Arc, RwLock},
         time::{Duration, Instant},
     },
 };
@@ -71,6 +71,8 @@ pub(crate) struct SchedulerController<T: LikeClusterInfo> {
     worker_metrics: Vec<Arc<ConsumeWorkerMetrics>>,
     /// State for forwarding packets to the leader, if enabled.
     forwarder: Option<Forwarder<T>>,
+    /// Whether JSS is enabled.
+    jss_enabled: Arc<AtomicBool>,
 }
 
 impl<T: LikeClusterInfo> SchedulerController<T> {
@@ -81,6 +83,7 @@ impl<T: LikeClusterInfo> SchedulerController<T> {
         scheduler: PrioGraphScheduler,
         worker_metrics: Vec<Arc<ConsumeWorkerMetrics>>,
         forwarder: Option<Forwarder<T>>,
+        jss_enabled: Arc<AtomicBool>,
     ) -> Self {
         Self {
             decision_maker,
@@ -94,11 +97,17 @@ impl<T: LikeClusterInfo> SchedulerController<T> {
             timing_metrics: SchedulerTimingMetrics::default(),
             worker_metrics,
             forwarder,
+            jss_enabled,
         }
     }
 
     pub fn run(mut self) -> Result<(), SchedulerError> {
         loop {
+            if self.jss_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+
             // BufferedPacketsDecision is shared with legacy BankingStage, which will forward
             // packets. Initially, not renaming these decision variants but the actions taken
             // are different, since new BankingStage will not forward packets.
@@ -809,6 +818,7 @@ mod tests {
             PrioGraphScheduler::new(consume_work_senders, finished_consume_work_receiver),
             vec![], // no actual workers with metrics to report, this can be empty
             None,
+            Arc::new(AtomicBool::new(false)),
         );
 
         (test_frame, scheduler_controller)
