@@ -1,7 +1,9 @@
 //! The `tpu` module implements the Transaction Processing Unit, a
 //! multi-stage transaction processing pipeline in software.
 
+use crate::jss_manager::JssManager;
 pub use solana_sdk::net::DEFAULT_TPU_COALESCE;
+
 use {
     crate::{
         banking_stage::BankingStage,
@@ -140,6 +142,7 @@ impl Tpu {
         tip_manager_config: TipManagerConfig,
         shred_receiver_address: Arc<RwLock<Option<SocketAddr>>>,
         preallocated_bundle_cost: u64,
+        jss_url: Option<String>,
     ) -> (Self, Vec<Arc<dyn NotifyKeyUpdate + Sync + Send>>) {
         let TpuSockets {
             transactions: transactions_sockets,
@@ -254,7 +257,6 @@ impl Tpu {
             block_builder_commission: 0,
         }));
 
-        let (bundle_sender, bundle_receiver) = unbounded();
         let block_engine_stage = BlockEngineStage::new(
             block_engine_config,
             bundle_sender,
@@ -263,6 +265,7 @@ impl Tpu {
             non_vote_sender.clone(),
             exit.clone(),
             &block_builder_fee_info,
+            jss_enabled.clone(),
         );
 
         let (heartbeat_tx, heartbeat_rx) = unbounded();
@@ -272,6 +275,7 @@ impl Tpu {
             packet_intercept_receiver,
             packet_sender.clone(),
             exit.clone(),
+            jss_enabled.clone(),
         );
 
         let relayer_stage = RelayerStage::new(
@@ -310,7 +314,7 @@ impl Tpu {
             cluster_info,
             poh_recorder,
             non_vote_receiver,
-            tpu_vote_receiver,
+            tpu_vote_receiver.clone(),
             gossip_vote_receiver,
             transaction_status_sender.clone(),
             replay_vote_sender.clone(),
@@ -328,8 +332,8 @@ impl Tpu {
             cluster_info,
             poh_recorder,
             bundle_receiver,
-            transaction_status_sender,
-            replay_vote_sender,
+            transaction_status_sender.clone(),
+            replay_vote_sender.clone(),
             log_messages_bytes_limit,
             exit.clone(),
             tip_manager.clone(),
@@ -359,9 +363,9 @@ impl Tpu {
             cluster_info.clone(),
             entry_receiver,
             retransmit_slots_receiver,
-            exit,
+            exit.clone(),
             blockstore,
-            bank_forks,
+            bank_forks.clone(),
             shred_version,
             turbine_quic_endpoint_sender,
             shred_receiver_address,
@@ -429,6 +433,9 @@ impl Tpu {
         }
         if let Some(tpu_entry_notifier) = self.tpu_entry_notifier {
             tpu_entry_notifier.join()?;
+        }
+        if let Some(jss_manager) = self.jss_manager {
+            jss_manager.join()?;
         }
         let _ = broadcast_result?;
         if let Some(tracer_thread_hdl) = self.tracer_thread_hdl {
