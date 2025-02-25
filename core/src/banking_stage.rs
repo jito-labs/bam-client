@@ -48,7 +48,7 @@ use {
         env,
         ops::Deref,
         sync::{
-            atomic::{AtomicU64, AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
             Arc, RwLock,
         },
         thread::{self, Builder, JoinHandle},
@@ -368,6 +368,7 @@ impl BankingStage {
         bundle_account_locker: BundleAccountLocker,
         // callback function for compute space reservation for BundleStage
         block_cost_limit_block_cost_limit_reservation_cb: impl Fn(&Bank) -> u64 + Clone + Send + 'static,
+        jss_enabled: Arc<AtomicBool>,
     ) -> Self {
         Self::new_num_threads(
             block_production_method,
@@ -387,6 +388,7 @@ impl BankingStage {
             blacklisted_accounts,
             bundle_account_locker,
             block_cost_limit_block_cost_limit_reservation_cb,
+            jss_enabled,
         )
     }
 
@@ -409,6 +411,7 @@ impl BankingStage {
         blacklisted_accounts: HashSet<Pubkey>,
         bundle_account_locker: BundleAccountLocker,
         block_cost_limit_reservation_cb: impl Fn(&Bank) -> u64 + Clone + Send + 'static,
+        jss_enabled: Arc<AtomicBool>,
     ) -> Self {
         match block_production_method {
             BlockProductionMethod::ThreadLocalMultiIterator => {
@@ -454,6 +457,7 @@ impl BankingStage {
                     blacklisted_accounts,
                     bundle_account_locker,
                     block_cost_limit_reservation_cb,
+                    jss_enabled,
                 )
             }
         }
@@ -570,6 +574,7 @@ impl BankingStage {
         blacklisted_accounts: HashSet<Pubkey>,
         bundle_account_locker: BundleAccountLocker,
         block_cost_limit_reservation_cb: impl Fn(&Bank) -> u64 + Clone + Send + 'static,
+        jss_enabled: Arc<AtomicBool>,
     ) -> Self {
         assert!(num_threads >= MIN_TOTAL_THREADS);
         // Single thread to generate entries from many banks.
@@ -689,6 +694,7 @@ impl BankingStage {
                             worker_metrics,
                             forwarder,
                             blacklisted_accounts.clone(),
+                            jss_enabled,
                         );
 
                         match scheduler_controller.run() {
@@ -716,6 +722,7 @@ impl BankingStage {
                             worker_metrics,
                             forwarder,
                             blacklisted_accounts.clone(),
+                            jss_enabled,
                         );
 
                         match scheduler_controller.run() {
@@ -1004,6 +1011,7 @@ mod tests {
                 HashSet::default(),
                 BundleAccountLocker::default(),
                 |_| 0,
+                Arc::new(AtomicBool::new(false)),
             );
             drop(non_vote_sender);
             drop(tpu_vote_sender);
@@ -1063,6 +1071,7 @@ mod tests {
                 HashSet::default(),
                 BundleAccountLocker::default(),
                 |_| 0,
+                Arc::new(AtomicBool::new(false)),
             );
             trace!("sending bank");
             drop(non_vote_sender);
@@ -1151,6 +1160,7 @@ mod tests {
                 HashSet::default(),
                 BundleAccountLocker::default(),
                 |_| 0,
+                Arc::new(AtomicBool::new(false)),
             );
 
             // fund another account so we can send 2 good transactions in a single batch.
@@ -1533,6 +1543,7 @@ mod tests {
                 HashSet::default(),
                 BundleAccountLocker::default(),
                 |_| 0,
+                Arc::new(AtomicBool::new(false)),
             );
 
             let keypairs = (0..100).map(|_| Keypair::new()).collect_vec();

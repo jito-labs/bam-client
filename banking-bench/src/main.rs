@@ -39,7 +39,10 @@ use {
     solana_tpu_client::tpu_client::DEFAULT_TPU_CONNECTION_POOL_SIZE,
     std::{
         collections::HashSet,
-        sync::{atomic::Ordering, Arc, RwLock},
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc, RwLock,
+        },
         thread::sleep,
         time::{Duration, Instant},
     },
@@ -486,6 +489,7 @@ fn main() {
         HashSet::default(),
         BundleAccountLocker::default(),
         |_| 0,
+        Arc::new(AtomicBool::new(false)),
     );
 
     // This is so that the signal_receiver does not go out of scope after the closure.

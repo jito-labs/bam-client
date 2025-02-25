@@ -22,4 +22,12 @@ pub mod proto {
     pub mod shared {
         tonic::include_proto!("shared");
     }
+
+    pub mod jss_types {
+        tonic::include_proto!("jss_types");
+    }
+
+    pub mod jss_api {
+        tonic::include_proto!("jss_api");
+    }
 }

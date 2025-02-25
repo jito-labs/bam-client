@@ -42,7 +42,7 @@ use {
     solana_svm_transaction::svm_message::SVMMessage,
     std::{
         collections::HashSet,
-        sync::{Arc, RwLock},
+        sync::{atomic::AtomicBool, Arc, RwLock},
         time::{Duration, Instant},
     },
 };
@@ -78,6 +78,7 @@ where
     /// State for forwarding packets to the leader, if enabled.
     forwarder: Option<Forwarder<C>>,
     blacklisted_accounts: HashSet<Pubkey>,
+    jss_enabled: Arc<AtomicBool>,
 }
 
 impl<C, S> SchedulerController<C, S>
@@ -93,6 +94,7 @@ where
         worker_metrics: Vec<Arc<ConsumeWorkerMetrics>>,
         forwarder: Option<Forwarder<C>>,
         blacklisted_accounts: HashSet<Pubkey>,
+        jss_enabled: Arc<AtomicBool>,
     ) -> Self {
         Self {
             decision_maker,
@@ -107,11 +109,17 @@ where
             worker_metrics,
             forwarder,
             blacklisted_accounts,
+            jss_enabled,
         }
     }
 
     pub fn run(mut self) -> Result<(), SchedulerError> {
         loop {
+            if self.jss_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+
             // BufferedPacketsDecision is shared with legacy BankingStage, which will forward
             // packets. Initially, not renaming these decision variants but the actions taken
             // are different, since new BankingStage will not forward packets.
@@ -851,6 +859,7 @@ mod tests {
             vec![], // no actual workers with metrics to report, this can be empty
             None,
             HashSet::default(),
+            Arc::new(AtomicBool::new(false)),
         );
 
         (test_frame, scheduler_controller)
