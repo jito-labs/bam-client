@@ -130,7 +130,7 @@ impl JssConnection {
     }
 
     fn sign_slot(slot: u64, keypair: &Keypair) -> Option<String> {
-        let slot_signature = keypair.try_sign_message(slot.to_string().as_bytes()).ok()?;
+        let slot_signature = keypair.try_sign_message(&slot.to_le_bytes()).ok()?;
         let slot_signature = slot_signature.to_string();
         Some(slot_signature)
     }
