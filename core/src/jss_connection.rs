@@ -12,7 +12,7 @@ use jito_protos::proto::{
 };
 use solana_gossip::cluster_info::ClusterInfo;
 use solana_poh::poh_recorder::PohRecorder;
-use solana_sdk::{pubkey::Pubkey, signature::Keypair, signer::Signer};
+use solana_sdk::{signature::Keypair, signer::Signer};
 use tokio::time::{interval, timeout};
 
 // Maintains a connection to the JSS Node and handles sending and receiving messages
@@ -28,7 +28,6 @@ pub struct JssConnection {
 impl JssConnection {
     pub async fn try_init(
         url: String,
-        pubkey: Pubkey,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         cluster_info: Arc<ClusterInfo>,
     ) -> Option<Self> {
@@ -58,7 +57,6 @@ impl JssConnection {
             inbound_stream,
             outbound_sender.clone(),
             validator_client,
-            pubkey,
             last_heartbeat.clone(),
             builder_config.clone(),
             microblock_sender,
@@ -79,7 +77,6 @@ impl JssConnection {
         mut inbound_stream: tonic::Streaming<StartSchedulerResponse>,
         sender_clone: mpsc::UnboundedSender<StartSchedulerMessage>,
         mut validator_client: JssNodeApiClient<tonic::transport::channel::Channel>,
-        pubkey: Pubkey,
         last_heartbeat_clone: Arc<Mutex<std::time::Instant>>,
         builder_config: Arc<Mutex<Option<BuilderConfigResp>>>,
         microblock_sender: crossbeam_channel::Sender<MicroBlock>,
@@ -90,17 +87,12 @@ impl JssConnection {
         loop {
             tokio::select! {
                 _ = heartbeat_interval.tick() => {
-                    let slot = poh_recorder.read().unwrap().get_current_slot();
-                    let Some(slot_signature) = Self::sign_slot(slot, cluster_info.keypair().as_ref()) else {
-                        error!("Failed to sign slot");
+                    let Some(signed_heartbeat) = Self::create_signed_heartbeat(poh_recorder.read().unwrap().get_current_slot(), cluster_info.as_ref()) else {
+                        error!("Failed to create signed heartbeat");
                         break;
                     };
                     let _ = sender_clone.unbounded_send(StartSchedulerMessage {
-                        msg: Some(Msg::HeartBeat(ValidatorHeartBeat {
-                            pubkey: pubkey.to_string(),
-                            slot,
-                            slot_signature,
-                        })),
+                        msg: Some(Msg::HeartBeat(signed_heartbeat)),
                     });
                     let Ok(resp) = validator_client.get_builder_config(GetBuilderConfigRequest {}).await else {
                         break;
@@ -127,6 +119,18 @@ impl JssConnection {
                 }
             }
         }
+    }
+
+    fn create_signed_heartbeat(
+        slot: u64,
+        cluster_info: &ClusterInfo,
+    ) -> Option<ValidatorHeartBeat> {
+        let slot_signature = Self::sign_slot(slot, cluster_info.keypair().as_ref())?;
+        Some(ValidatorHeartBeat {
+            pubkey: cluster_info.keypair().pubkey().to_string(),
+            slot,
+            slot_signature,
+        })
     }
 
     fn sign_slot(slot: u64, keypair: &Keypair) -> Option<String> {

@@ -25,7 +25,7 @@ use solana_poh::poh_recorder::PohRecorder;
 use solana_runtime::{
     prioritization_fee_cache::PrioritizationFeeCache, vote_sender_types::ReplayVoteSender,
 };
-use solana_sdk::{pubkey::Pubkey, signer::Signer};
+use solana_sdk::pubkey::Pubkey;
 
 use crate::{
     bundle_stage::bundle_account_locker::BundleAccountLocker, jss_connection::JssConnection,
@@ -120,13 +120,10 @@ impl JssManager {
 
         // Run until (our) world ends
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
-            // Init and/or check health of connection
-            let pubkey = cluster_info.keypair().pubkey();
             if !Self::get_or_init_connection(
                 &runtime,
                 jss_url.clone(),
                 &mut jss_connection,
-                pubkey,
                 &poh_recorder,
                 &cluster_info,
             ) {
@@ -272,7 +269,6 @@ impl JssManager {
         runtime: &tokio::runtime::Runtime,
         jss_url: String,
         jss_connection: &mut Option<JssConnection>,
-        pubkey: Pubkey,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         cluster_info: &Arc<ClusterInfo>,
     ) -> bool {
@@ -280,7 +276,6 @@ impl JssManager {
         if jss_connection.is_none() {
             *jss_connection = runtime.block_on(JssConnection::try_init(
                 jss_url.clone(),
-                pubkey,
                 poh_recorder.clone(),
                 cluster_info.clone(),
             ));
