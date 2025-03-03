@@ -122,8 +122,14 @@ impl JssManager {
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
             // Init and/or check health of connection
             let pubkey = cluster_info.keypair().pubkey();
-            if !Self::get_or_init_connection(&runtime, jss_url.clone(), &mut jss_connection, pubkey)
-            {
+            if !Self::get_or_init_connection(
+                &runtime,
+                jss_url.clone(),
+                &mut jss_connection,
+                pubkey,
+                &poh_recorder,
+                &cluster_info,
+            ) {
                 if jss_enabled.load(std::sync::atomic::Ordering::Relaxed) {
                     jss_enabled.store(false, std::sync::atomic::Ordering::Relaxed);
                     Self::revert_tpu_config(&cluster_info, &local_contact_info);
@@ -154,12 +160,7 @@ impl JssManager {
                 &poh_recorder.read().unwrap(),
                 TICK_LOOKAHEAD,
             ) {
-                Self::run_leader_slot_mode(
-                    &mut jss_connection,
-                    &cluster_info,
-                    &poh_recorder,
-                    &mut executor,
-                );
+                Self::run_leader_slot_mode(&mut jss_connection, &poh_recorder, &mut executor);
             }
         }
 
@@ -169,7 +170,6 @@ impl JssManager {
     // Run the leader slot mode
     fn run_leader_slot_mode(
         jss_connection: &mut JssConnection,
-        cluster_info: &Arc<ClusterInfo>,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         executor: &mut JssExecutor,
     ) {
@@ -195,7 +195,7 @@ impl JssManager {
             let current_tick = poh_recorder.read().unwrap().tick_height();
             if current_tick != prev_tick {
                 prev_tick = current_tick;
-                let leader_state = Self::generate_leader_state(cluster_info, poh_recorder);
+                let leader_state = Self::generate_leader_state(poh_recorder);
                 jss_connection.send_leader_state(leader_state);
             }
 
@@ -218,10 +218,7 @@ impl JssManager {
         }
     }
 
-    fn generate_leader_state(
-        cluster_info: &Arc<ClusterInfo>,
-        poh_recorder: &Arc<RwLock<PohRecorder>>,
-    ) -> LeaderState {
+    fn generate_leader_state(poh_recorder: &Arc<RwLock<PohRecorder>>) -> LeaderState {
         if let Some(bank_start) = poh_recorder.read().unwrap().bank_start() {
             let bank = bank_start.working_bank;
             let max_block_cu = bank.read_cost_tracker().unwrap().block_cost_limit();
@@ -252,7 +249,6 @@ impl JssManager {
                 .collect();
 
             return LeaderState {
-                pubkey: cluster_info.keypair().pubkey().to_bytes().to_vec(),
                 slot: bank.slot(),
                 tick: bank.tick_height() as u32,
                 slot_cu_budget,
@@ -262,7 +258,6 @@ impl JssManager {
         } else {
             let current_slot = poh_recorder.read().unwrap().get_current_slot();
             return LeaderState {
-                pubkey: cluster_info.keypair().pubkey().to_bytes().to_vec(),
                 slot: current_slot + 1,
                 tick: 0,
                 slot_cu_budget: 48_000_000,
@@ -278,10 +273,17 @@ impl JssManager {
         jss_url: String,
         jss_connection: &mut Option<JssConnection>,
         pubkey: Pubkey,
+        poh_recorder: &Arc<RwLock<PohRecorder>>,
+        cluster_info: &Arc<ClusterInfo>,
     ) -> bool {
         // If we have no connection object; start from scratch
         if jss_connection.is_none() {
-            *jss_connection = runtime.block_on(JssConnection::try_init(jss_url.clone(), pubkey));
+            *jss_connection = runtime.block_on(JssConnection::try_init(
+                jss_url.clone(),
+                pubkey,
+                poh_recorder.clone(),
+                cluster_info.clone(),
+            ));
             if jss_connection.is_none() {
                 return false;
             }

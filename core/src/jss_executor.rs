@@ -92,7 +92,7 @@ impl JssExecutor {
             bundle_account_locker,
         );
 
-        const MICROBLOCK_CHANNEL_SIZE: usize = 50;
+        const MICROBLOCK_CHANNEL_SIZE: usize = 100;
         let (microblock_sender, microblock_receiver) =
             crossbeam_channel::bounded(MICROBLOCK_CHANNEL_SIZE);
         let manager_thread = std::thread::Builder::new()
