@@ -250,7 +250,6 @@ impl JssManager {
                 tick: bank.tick_height() as u32,
                 slot_cu_budget,
                 slot_account_cu_budget,
-                recently_executed_txn_signatures: vec![],
             };
         } else {
             let current_slot = poh_recorder.read().unwrap().get_current_slot();
@@ -259,7 +258,6 @@ impl JssManager {
                 tick: 0,
                 slot_cu_budget: 48_000_000,
                 slot_account_cu_budget: vec![],
-                recently_executed_txn_signatures: vec![],
             };
         }
     }
