@@ -167,8 +167,8 @@ impl JssExecutor {
     ) {
         info!("spawned management thread");
 
-        let mut bundles_scheduled = 0;
         let mut bundles = Vec::new();
+        let mut prio_graph = prio_graph::PrioGraph::new(|id: &BundleExecutionId, _graph_node| *id);
 
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
             if !poh_recorder.read().unwrap().would_be_leader(1) {
@@ -176,9 +176,8 @@ impl JssExecutor {
                 continue;
             }
 
-            let mut prio_graph =
-                prio_graph::PrioGraph::new(|id: &BundleExecutionId, _graph_node| *id);
             let mut microblock_count = 0;
+            let mut bundles_scheduled = 0;
 
             while poh_recorder.read().unwrap().would_be_leader(1) {
                 Self::maybe_ingest_new_microblock(
@@ -213,8 +212,8 @@ impl JssExecutor {
                 bundles.len() - bundles_scheduled as usize,
                 successful_count.load(Ordering::Relaxed),
             );
-            bundles_scheduled = 0;
             bundles.clear();
+            prio_graph.clear();
             successful_count.store(0, Ordering::Relaxed);
         }
     }
