@@ -100,10 +100,7 @@ impl JssConnection {
                     *builder_config.lock().unwrap() = Some(resp.into_inner());
                 }
                 inbound = inbound_stream.message() => {
-                    let Ok(inbound) = inbound else {
-                        break;
-                    };
-                    let Some(inbound) = inbound else {
+                    let Ok(Some(inbound)) = inbound else {
                         break;
                     };
 
