@@ -151,11 +151,13 @@ impl JssManager {
             }
 
             const TICK_LOOKAHEAD: u64 = 8;
-            if Self::is_within_leader_slot_with_lookahead(
-                &poh_recorder.read().unwrap(),
-                TICK_LOOKAHEAD,
-            ) {
-                Self::run_leader_slot_mode(&mut jss_connection, &poh_recorder, &mut executor);
+            if poh_recorder.read().unwrap().would_be_leader(TICK_LOOKAHEAD) {
+                Self::run_leader_slot_mode(
+                    &mut jss_connection,
+                    &poh_recorder,
+                    &mut executor,
+                    TICK_LOOKAHEAD,
+                );
             }
         }
 
@@ -167,6 +169,7 @@ impl JssManager {
         jss_connection: &mut JssConnection,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         executor: &mut JssExecutor,
+        tick_lookahead: u64,
     ) {
         let current_slot = poh_recorder.read().unwrap().get_current_slot();
         let current_tick = poh_recorder.read().unwrap().tick_height()
@@ -180,11 +183,8 @@ impl JssManager {
 
         let mut buffered_micro_blocks = VecDeque::new();
         let mut prev_tick = 0;
-        const TICK_LOOKAHEAD: u64 = 8;
-        while Self::is_within_leader_slot_with_lookahead(
-            &poh_recorder.read().unwrap(),
-            TICK_LOOKAHEAD,
-        ) && jss_connection.is_healthy()
+        while poh_recorder.read().unwrap().would_be_leader(tick_lookahead)
+            && jss_connection.is_healthy()
         {
             // Send leader state every tick
             let current_tick = poh_recorder.read().unwrap().tick_height();
@@ -346,15 +346,6 @@ impl JssManager {
             thread.join()?;
         }
         Ok(())
-    }
-
-    // Check if it's time for an auction
-    // This is decided based on the PohRecorder's current slot and the lookahead
-    pub fn is_within_leader_slot_with_lookahead(
-        poh_recorder: &PohRecorder,
-        tick_lookahead: u64,
-    ) -> bool {
-        poh_recorder.would_be_leader(tick_lookahead) || poh_recorder.would_be_leader(0)
     }
 }
 
