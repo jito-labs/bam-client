@@ -16,6 +16,7 @@ use jito_protos::proto::{
     jss_api::BuilderConfigResp,
     jss_types::{AccountComputeUnitBudget, LeaderState, Socket},
 };
+use solana_cost_model::block_cost_limits::MAX_BLOCK_UNITS;
 use solana_gossip::{
     cluster_info::ClusterInfo,
     contact_info::{ContactInfo, Protocol},
@@ -37,7 +38,6 @@ pub(crate) struct JssManager {
     threads: Vec<std::thread::JoinHandle<()>>,
 }
 
-// The (woah)man of the hour; the JSS Manager
 // Runs based on timeouts and messages received from the JSS block engine
 impl JssManager {
     // Create and run a new instance of the JSS Manager
@@ -98,7 +98,7 @@ impl JssManager {
         transaction_status_sender: Option<TransactionStatusSender>,
         prioritization_fee_cache: Arc<PrioritizationFeeCache>,
     ) {
-        const WORKER_THREAD_COUNT: usize = 4;
+        const WORKER_THREAD_COUNT: usize = 6;
         let mut executor = JssExecutor::new(
             WORKER_THREAD_COUNT,
             poh_recorder.clone(),
@@ -127,15 +127,13 @@ impl JssManager {
                 &poh_recorder,
                 &cluster_info,
             ) {
-                if jss_enabled.load(std::sync::atomic::Ordering::Relaxed) {
-                    jss_enabled.store(false, std::sync::atomic::Ordering::Relaxed);
+                if jss_enabled.swap(false, std::sync::atomic::Ordering::Relaxed) {
                     Self::revert_tpu_config(&cluster_info, &local_contact_info);
                 }
+                std::thread::sleep(std::time::Duration::from_millis(500));
                 continue;
             } else {
-                if !jss_enabled.load(std::sync::atomic::Ordering::Relaxed) {
-                    jss_enabled.store(true, std::sync::atomic::Ordering::Relaxed);
-                }
+                jss_enabled.store(true, std::sync::atomic::Ordering::Relaxed)
             }
 
             // Grab the connection object
@@ -257,7 +255,7 @@ impl JssManager {
             return LeaderState {
                 slot: current_slot + if in_leader_slot { 0 } else { 1 },
                 tick: 0,
-                slot_cu_budget: 48_000_000,
+                slot_cu_budget: MAX_BLOCK_UNITS as u32,
                 slot_account_cu_budget: vec![],
             };
         }

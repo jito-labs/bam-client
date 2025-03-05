@@ -18,7 +18,7 @@ use tokio::time::{interval, timeout};
 // Maintains a connection to the JSS Node and handles sending and receiving messages
 // Keeps track of last received heartbeat 'behind the scenes' and will mark itself as unhealthy if no heartbeat is received
 pub struct JssConnection {
-    outbound_sender: mpsc::UnboundedSender<StartSchedulerMessage>,
+    outbound_sender: mpsc::Sender<StartSchedulerMessage>,
     last_heartbeat: Arc<Mutex<std::time::Instant>>,
     builder_config: Arc<Mutex<Option<BuilderConfigResp>>>,
     microblock_receiver: Receiver<MicroBlock>,
@@ -42,7 +42,7 @@ impl JssConnection {
 
         let mut validator_client = JssNodeApiClient::new(channel);
 
-        let (outbound_sender, outbound_receiver) = mpsc::unbounded();
+        let (outbound_sender, outbound_receiver) = mpsc::channel(1000);
         let outbound_stream =
             tonic::Request::new(outbound_receiver.map(|req: StartSchedulerMessage| req));
         let inbound_stream = validator_client
@@ -75,7 +75,7 @@ impl JssConnection {
 
     async fn background_task(
         mut inbound_stream: tonic::Streaming<StartSchedulerResponse>,
-        sender_clone: mpsc::UnboundedSender<StartSchedulerMessage>,
+        mut sender: mpsc::Sender<StartSchedulerMessage>,
         mut validator_client: JssNodeApiClient<tonic::transport::channel::Channel>,
         last_heartbeat_clone: Arc<Mutex<std::time::Instant>>,
         builder_config: Arc<Mutex<Option<BuilderConfigResp>>>,
@@ -91,7 +91,7 @@ impl JssConnection {
                         error!("Failed to create signed heartbeat");
                         break;
                     };
-                    let _ = sender_clone.unbounded_send(StartSchedulerMessage {
+                    let _ = sender.try_send(StartSchedulerMessage {
                         msg: Some(Msg::HeartBeat(signed_heartbeat)),
                     });
                     let Ok(resp) = validator_client.get_builder_config(GetBuilderConfigRequest {}).await else {
@@ -145,7 +145,7 @@ impl JssConnection {
 
     // Send a signed slot tick to the JSS instance
     pub fn send_leader_state(&mut self, leader_state: LeaderState) {
-        let _ = self.outbound_sender.unbounded_send(StartSchedulerMessage {
+        let _ = self.outbound_sender.try_send(StartSchedulerMessage {
             msg: Some(Msg::LeaderState(leader_state)),
         });
     }

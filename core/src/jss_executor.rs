@@ -92,7 +92,7 @@ impl JssExecutor {
             bundle_account_locker,
         );
 
-        const MICROBLOCK_CHANNEL_SIZE: usize = 100;
+        const MICROBLOCK_CHANNEL_SIZE: usize = 10000;
         let (microblock_sender, microblock_receiver) =
             crossbeam_channel::bounded(MICROBLOCK_CHANNEL_SIZE);
         let manager_thread = std::thread::Builder::new()
@@ -172,6 +172,7 @@ impl JssExecutor {
 
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
             if !poh_recorder.read().unwrap().would_be_leader(1) {
+                std::thread::sleep(Duration::from_millis(1));
                 continue;
             }
 
@@ -403,8 +404,7 @@ impl JssExecutor {
         }
     }
 
-    /// Executes and records transactions or bundles; using the
-    /// length of the transactions to determine which branch to take
+    /// Executes and records transactions or bundles
     pub fn execute_record_commit(
         bank_start: &BankStart,
         qos_service: &QosService,
@@ -871,8 +871,7 @@ impl Worker {
         self.sender.is_full()
     }
 
-    /// Sends a bundle to the worker, while saving it in a local queue;
-    /// used later to unblock transactions when the worker has picked up the bundle.
+    /// Sends a bundle to the worker; while incrementing the in-flight count.
     fn send(&mut self, bundle: ParsedBundleWithId) -> bool {
         if let Ok(_) = self.sender.send(bundle) {
             self.in_flight += 1;
