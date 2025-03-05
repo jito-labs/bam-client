@@ -253,8 +253,9 @@ impl JssManager {
             };
         } else {
             let current_slot = poh_recorder.read().unwrap().get_current_slot();
+            let in_leader_slot = poh_recorder.read().unwrap().would_be_leader(0);
             return LeaderState {
-                slot: current_slot + 1,
+                slot: current_slot + if in_leader_slot { 0 } else { 1 },
                 tick: 0,
                 slot_cu_budget: 48_000_000,
                 slot_account_cu_budget: vec![],
