@@ -361,11 +361,13 @@ impl JssExecutor {
                 bank_start = poh_recorder.read().unwrap().bank_start();
             }
             let Some(current_bank_start) = bank_start.as_ref() else {
+                std::thread::sleep(Duration::from_micros(500));
                 continue;
             };
             if !current_bank_start.should_working_bank_still_be_processing_txs() {
                 bank_start = None;
                 current_block_builder_fee_info = None;
+                std::thread::sleep(Duration::from_micros(500));
                 continue;
             }
             let Ok(ParsedBundleWithId {
