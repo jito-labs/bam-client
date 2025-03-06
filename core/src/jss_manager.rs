@@ -209,7 +209,6 @@ impl JssManager {
                 continue;
             }
             while let Some(micro_block) = buffered_micro_blocks.pop_front() {
-                info!("micro_block bundles={}", micro_block.bundles.len());
                 executor.schedule_microblock(&bank_start.working_bank, micro_block);
             }
         }
