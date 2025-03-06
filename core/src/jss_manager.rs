@@ -158,6 +158,8 @@ impl JssManager {
                     &mut executor,
                     TICK_LOOKAHEAD,
                 );
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(5));
             }
         }
 
