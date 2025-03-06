@@ -98,6 +98,7 @@ impl JssManager {
         transaction_status_sender: Option<TransactionStatusSender>,
         prioritization_fee_cache: Arc<PrioritizationFeeCache>,
     ) {
+        let (retry_bundle_sender, retry_bundle_receiver) = crossbeam_channel::bounded(10_000);
         const WORKER_THREAD_COUNT: usize = 6;
         let mut executor = JssExecutor::new(
             WORKER_THREAD_COUNT,
@@ -110,6 +111,7 @@ impl JssManager {
             cluster_info.keypair().to_owned(),
             block_builder_fee_info.clone(),
             bundle_account_locker,
+            retry_bundle_sender,
         );
 
         let mut jss_connection: Option<JssConnection> = None;
@@ -157,6 +159,7 @@ impl JssManager {
                     &poh_recorder,
                     &mut executor,
                     TICK_LOOKAHEAD,
+                    &retry_bundle_receiver,
                 );
             } else {
                 std::thread::sleep(std::time::Duration::from_millis(5));
@@ -172,6 +175,7 @@ impl JssManager {
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         executor: &mut JssExecutor,
         tick_lookahead: u64,
+        retry_bundle_receiver: &crossbeam_channel::Receiver<[u8; 32]>,
     ) {
         let current_slot = poh_recorder.read().unwrap().get_current_slot();
         let current_tick = poh_recorder.read().unwrap().tick_height()
@@ -183,7 +187,12 @@ impl JssManager {
             current_tick
         );
 
+        // Drain out the micro-blocks and retryable bundle IDs
+        jss_connection.drain_microblocks();
+        retry_bundle_receiver.try_iter().for_each(|_| ());
+
         let mut buffered_micro_blocks = VecDeque::new();
+        let mut retryable_bundle_ids = Vec::new();
         let mut prev_tick = 0;
         while poh_recorder.read().unwrap().would_be_leader(tick_lookahead)
             && jss_connection.is_healthy()
@@ -192,13 +201,19 @@ impl JssManager {
             let current_tick = poh_recorder.read().unwrap().tick_height();
             if current_tick != prev_tick {
                 prev_tick = current_tick;
-                let leader_state = Self::generate_leader_state(poh_recorder);
+                let leader_state =
+                    Self::generate_leader_state(poh_recorder, &mut retryable_bundle_ids);
                 jss_connection.send_leader_state(leader_state);
             }
 
             // Receive micro-blocks
             while let Some(micro_block) = jss_connection.try_recv_microblock() {
                 buffered_micro_blocks.push_back(micro_block);
+            }
+
+            // Receive retryable bundle IDs
+            while let Ok(bundle_id) = retry_bundle_receiver.try_recv() {
+                retryable_bundle_ids.push(bundle_id);
             }
 
             // If possible; schedule the micro-blocks
@@ -214,7 +229,10 @@ impl JssManager {
         }
     }
 
-    fn generate_leader_state(poh_recorder: &Arc<RwLock<PohRecorder>>) -> LeaderState {
+    fn generate_leader_state(
+        poh_recorder: &Arc<RwLock<PohRecorder>>,
+        retryable_bundle_ids: &mut Vec<[u8; 32]>,
+    ) -> LeaderState {
         if let Some(bank_start) = poh_recorder.read().unwrap().bank_start() {
             let bank = bank_start.working_bank;
             let max_block_cu = bank.read_cost_tracker().unwrap().block_cost_limit();
@@ -249,6 +267,10 @@ impl JssManager {
                 tick: bank.tick_height() as u32,
                 slot_cu_budget,
                 slot_account_cu_budget,
+                retryable_bundle_ids: retryable_bundle_ids
+                    .drain(..)
+                    .map(|id| id.to_vec())
+                    .collect(),
             };
         } else {
             let current_slot = poh_recorder.read().unwrap().get_current_slot();
@@ -258,6 +280,7 @@ impl JssManager {
                 tick: 0,
                 slot_cu_budget: MAX_BLOCK_UNITS as u32,
                 slot_account_cu_budget: vec![],
+                retryable_bundle_ids: vec![],
             };
         }
     }

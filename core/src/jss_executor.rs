@@ -18,6 +18,7 @@ use std::{
 use itertools::Itertools;
 use jito_protos::proto::jss_types::{MicroBlock, Packet};
 use prio_graph::{AccessKind, GraphNode, TopLevelId};
+use sha2::Digest;
 use solana_bundle::{
     bundle_execution::load_and_execute_bundle, derive_bundle_id_from_sanitized_transactions,
     SanitizedBundle,
@@ -71,6 +72,7 @@ impl JssExecutor {
         keypair: Arc<Keypair>,
         block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
         bundle_account_locker: BundleAccountLocker,
+        retry_bundle_sender: crossbeam_channel::Sender<[u8; 32]>,
     ) -> Self {
         let (bundle_committer, transaction_commiter) = Self::build_committers(
             replay_vote_sender.clone(),
@@ -90,6 +92,7 @@ impl JssExecutor {
             keypair,
             block_builder_fee_info,
             bundle_account_locker,
+            retry_bundle_sender,
         );
 
         const MICROBLOCK_CHANNEL_SIZE: usize = 10000;
@@ -290,6 +293,7 @@ impl JssExecutor {
         keypair: Arc<Keypair>,
         block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
         bundle_account_locker: BundleAccountLocker,
+        retry_bundle_sender: crossbeam_channel::Sender<[u8; 32]>,
     ) -> (Vec<std::thread::JoinHandle<()>>, Vec<Worker>) {
         let mut threads = Vec::new();
         let mut workers = Vec::new();
@@ -308,6 +312,7 @@ impl JssExecutor {
             let last_tip_updated_slot = last_tip_updated_slot.clone();
             let block_builder_fee_info = block_builder_fee_info.clone();
             let bundle_account_locker = bundle_account_locker.clone();
+            let retry_bundle_sender = retry_bundle_sender.clone();
             threads.push(
                 std::thread::Builder::new()
                     .name(format!("jss_executor_worker_{}", id))
@@ -326,6 +331,7 @@ impl JssExecutor {
                             last_tip_updated_slot,
                             block_builder_fee_info,
                             bundle_account_locker,
+                            retry_bundle_sender,
                         );
                     })
                     .unwrap(),
@@ -349,6 +355,7 @@ impl JssExecutor {
         last_tip_updated_slot: Arc<Mutex<u64>>,
         block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
         bundle_account_locker: BundleAccountLocker,
+        retry_bundle_sender: crossbeam_channel::Sender<[u8; 32]>,
     ) {
         info!("spawned worker thread {}", id);
 
@@ -381,11 +388,12 @@ impl JssExecutor {
             else {
                 continue;
             };
+            let bundle_id = Self::generate_bundle_id(&txns);
             if current_block_builder_fee_info.is_none() {
                 current_block_builder_fee_info =
                     Some(block_builder_fee_info.lock().unwrap().clone());
             }
-            if Self::execute_record_commit(
+            let result = Self::execute_record_commit(
                 &current_bank_start,
                 &qos_service,
                 &recorder,
@@ -398,15 +406,32 @@ impl JssExecutor {
                 &last_tip_updated_slot,
                 current_block_builder_fee_info.as_ref().unwrap(),
                 &bundle_account_locker,
-            ) {
-                successful_count.fetch_add(1, Ordering::Relaxed);
-            }
+            );
+
             sender.send(ids).unwrap();
+
+            if result.is_success() {
+                successful_count.fetch_add(1, Ordering::Relaxed);
+            } else if result.is_retryable() {
+                retry_bundle_sender.try_send(bundle_id).unwrap();
+            }
         }
     }
 
+    fn generate_bundle_id(transactions: &[SanitizedTransaction]) -> [u8; 32] {
+        let mut hasher = sha2::Sha256::new();
+        for transaction in transactions {
+            let Some(signature) = transaction.signatures().first() else {
+                continue;
+            };
+            hasher.update(signature.as_ref());
+        }
+
+        hasher.finalize().into()
+    }
+
     /// Executes and records transactions or bundles
-    pub fn execute_record_commit(
+    fn execute_record_commit(
         bank_start: &BankStart,
         qos_service: &QosService,
         recorder: &TransactionRecorder,
@@ -419,7 +444,7 @@ impl JssExecutor {
         last_tip_updated_slot: &Mutex<u64>,
         block_builder_fee_info: &BlockBuilderFeeInfo,
         bundle_account_locker: &BundleAccountLocker,
-    ) -> bool {
+    ) -> ExecutionResult {
         if revert_on_error {
             let bundle_id = derive_bundle_id_from_sanitized_transactions(&transactions);
             let sanitized_bundle = SanitizedBundle {
@@ -441,7 +466,7 @@ impl JssExecutor {
                     block_builder_fee_info,
                     bundle_account_locker,
                 ) {
-                    return false;
+                    return ExecutionResult::Failure;
                 }
                 *last_tip_updated_slot_guard = bank_start.working_bank.slot();
             }
@@ -487,7 +512,7 @@ impl JssExecutor {
                 bundle_committer,
                 init_bundle,
                 bundle_account_locker,
-            ) {
+            ).is_success() {
                 info!("Failed to initialize tip programs");
                 return false;
             }
@@ -506,7 +531,7 @@ impl JssExecutor {
                 bundle_committer,
                 crank_bundle,
                 bundle_account_locker,
-            ) {
+            ).is_success() {
                 info!("Failed to crank tip programs");
                 return false;
             }
@@ -522,10 +547,10 @@ impl JssExecutor {
         committer: &mut bundle_stage::committer::Committer,
         sanitized_bundle: SanitizedBundle,
         bundle_account_locker: &BundleAccountLocker,
-    ) -> bool {
+    ) -> ExecutionResult {
         let lock = bundle_account_locker.prepare_locked_bundle(&sanitized_bundle, &bank);
         if lock.is_err() {
-            return false;
+            return ExecutionResult::Failure;
         }
 
         // See if we have enough room in the block to execute the bundle
@@ -539,7 +564,7 @@ impl JssExecutor {
         if skipped_count > 0 {
             QosService::remove_or_update_costs(transaction_qos_cost_results.iter(), None, bank);
             info!("Dropped bundle due to QoS constraints");
-            return false;
+            return ExecutionResult::Retryable;
         }
 
         // Execute the bundle
@@ -560,7 +585,7 @@ impl JssExecutor {
         if let Err(err) = bundle_execution_results.result() {
             error!("Error executing bundle: {:?}", err);
             QosService::remove_or_update_costs(transaction_qos_cost_results.iter(), None, bank);
-            return false;
+            return ExecutionResult::Failure;
         }
 
         // Record the transactions
@@ -573,7 +598,7 @@ impl JssExecutor {
         } = recorder.record_transactions(bank.slot(), executed_batches);
         if record_transactions_result.is_err() {
             QosService::remove_or_update_costs(transaction_qos_cost_results.iter(), None, bank);
-            return false;
+            return ExecutionResult::Failure;
         }
 
         // Commit the transactions
@@ -601,7 +626,7 @@ impl JssExecutor {
             bank,
         );
 
-        true
+        ExecutionResult::Success
     }
 
     fn execute_commit_record_transactions(
@@ -611,14 +636,18 @@ impl JssExecutor {
         committer: &mut banking_stage::committer::Committer,
         transactions: Vec<SanitizedTransaction>,
         bundle_account_locker: &BundleAccountLocker,
-    ) -> bool {
-        let (transaction_qos_cost_results, skipped_count) = qos_service
+    ) -> ExecutionResult {
+        let (transaction_qos_cost_results, _) = qos_service
             .select_and_accumulate_transaction_costs(
                 bank,
                 &transactions,
                 std::iter::repeat(Ok(())),
                 &|_| 0,
             );
+        if transaction_qos_cost_results.iter().any(|r| r.is_err()) {
+            QosService::remove_or_update_costs(transaction_qos_cost_results.iter(), None, bank);
+            return ExecutionResult::Retryable;
+        }
 
         let bundle_account_locks = bundle_account_locker.account_locks();
         let batch = bank.prepare_sanitized_batch_with_results(
@@ -667,7 +696,7 @@ impl JssExecutor {
 
         if results.processed_counts.processed_transactions_count == 0 {
             QosService::remove_or_update_costs(transaction_qos_cost_results.iter(), None, bank);
-            return false;
+            return ExecutionResult::Failure;
         }
 
         let _freeze_lock = bank.freeze_lock();
@@ -691,7 +720,7 @@ impl JssExecutor {
         } = recorder.record_transactions(bank.slot(), vec![processed_transactions]);
         if record_transactions_result.is_err() {
             QosService::remove_or_update_costs(transaction_qos_cost_results.iter(), None, bank);
-            return false;
+            return ExecutionResult::Failure;
         }
 
         let (_, commit_transactions_result) = committer.commit_transactions(
@@ -710,7 +739,7 @@ impl JssExecutor {
             bank,
         );
 
-        true
+        ExecutionResult::Success
     }
 
     fn bundle_touches_tip_pdas(bundle: &SanitizedBundle, tip_pdas: &HashSet<Pubkey>) -> bool {
@@ -802,6 +831,22 @@ impl JssExecutor {
                     (*key, AccessKind::Read)
                 }
             })
+    }
+}
+
+enum ExecutionResult {
+    Success,
+    Failure,
+    Retryable,
+}
+
+impl ExecutionResult {
+    fn is_success(&self) -> bool {
+        matches!(self, Self::Success)
+    }
+
+    fn is_retryable(&self) -> bool {
+        matches!(self, Self::Retryable)
     }
 }
 
@@ -909,7 +954,6 @@ mod tests {
     use crossbeam_channel::Receiver;
     use jito_protos::proto::jss_types::{self, Bundle, MicroBlock};
     use jito_tip_distribution::sdk::derive_tip_distribution_account_address;
-    use solana_gossip::cluster_info::ClusterInfo;
     use solana_ledger::{
         blockstore::Blockstore, genesis_utils::GenesisConfigInfo, get_tmp_ledger_path_auto_delete,
         leader_schedule_cache::LeaderScheduleCache,
@@ -1125,6 +1169,7 @@ mod tests {
         } = create_test_fixture(1);
 
         let (replay_vote_sender, _) = crossbeam_channel::unbounded();
+        let (retry_bundle_sender, _) = crossbeam_channel::unbounded();
 
         let mut executor = super::JssExecutor::new(
             1,
@@ -1137,6 +1182,7 @@ mod tests {
             Arc::new(Keypair::new()),
             Arc::new(Mutex::new(BlockBuilderFeeInfo::default())),
             BundleAccountLocker::default(),
+            retry_bundle_sender,
         );
 
         let successful_bundle = Bundle {
@@ -1222,6 +1268,7 @@ mod tests {
         } = create_test_fixture(1);
 
         let (replay_vote_sender, _) = crossbeam_channel::unbounded();
+        let (retry_bundle_sender, _) = crossbeam_channel::unbounded();
         let keypair = Arc::new(leader_keypair);
         let block_builder_pubkey = Pubkey::new_unique();
 
@@ -1240,6 +1287,7 @@ mod tests {
                 block_builder_commission: 5,
             })),
             BundleAccountLocker::default(),
+            retry_bundle_sender,
         );
 
         let tip_accounts = tip_manager.get_tip_accounts();

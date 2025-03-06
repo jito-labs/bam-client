@@ -140,6 +140,10 @@ impl JssConnection {
         self.microblock_receiver.try_recv().ok()
     }
 
+    pub fn drain_microblocks(&mut self) {
+        while let Ok(_) = self.microblock_receiver.try_recv() {}
+    }
+
     // Send a signed slot tick to the JSS instance
     pub fn send_leader_state(&mut self, leader_state: LeaderState) {
         let _ = self.outbound_sender.try_send(StartSchedulerMessage {
