@@ -619,12 +619,6 @@ impl JssExecutor {
                 std::iter::repeat(Ok(())),
                 &|_| 0,
             );
-        if skipped_count > 0 {
-            info!(
-                "Skipped {} transactions due to QoS constraints",
-                skipped_count
-            );
-        }
 
         let bundle_account_locks = bundle_account_locker.account_locks();
         let batch = bank.prepare_sanitized_batch_with_results(
