@@ -590,7 +590,7 @@ impl JssExecutor {
 
         // Record the transactions
         let executed_batches = bundle_execution_results.executed_transaction_batches();
-        let _freeze_lock = bank.freeze_lock();
+        let freeze_lock = bank.freeze_lock();
         let RecordTransactionsSummary {
             result: record_transactions_result,
             record_transactions_timings: _,
@@ -609,6 +609,9 @@ impl JssExecutor {
             &bank,
             &mut execute_and_commit_timings,
         );
+
+        // Drop the freeze lock
+        drop(freeze_lock);
 
         let commit_transaction_details = commit_bundle_details
             .commit_transaction_details
@@ -699,7 +702,7 @@ impl JssExecutor {
             return ExecutionResult::Failure;
         }
 
-        let _freeze_lock = bank.freeze_lock();
+        let freeze_lock = bank.freeze_lock();
 
         let processed_transactions = results
             .processing_results
@@ -732,6 +735,9 @@ impl JssExecutor {
             &mut execute_and_commit_timings,
             &results.processed_counts,
         );
+
+        // Drop the freeze lock
+        drop(freeze_lock);
 
         QosService::remove_or_update_costs(
             transaction_qos_cost_results.iter(),
