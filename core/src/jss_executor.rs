@@ -42,6 +42,7 @@ use solana_svm::{
     transaction_processing_result::TransactionProcessingResultExtensions,
     transaction_processor::{ExecutionRecordingConfig, TransactionProcessingConfig},
 };
+use solana_svm_transaction::svm_message::SVMMessage;
 use solana_transaction_status::PreBalanceInfo;
 
 use crate::{
@@ -688,9 +689,10 @@ impl JssExecutor {
             },
         );
 
-        results.processing_results.iter().for_each(|result| {
+        results.processing_results.iter().zip(transactions.iter()).
+            for_each(|(result, txn)| {
             if let Err(err) = result {
-                error!("    Error executing transaction: {:?}", err);
+                error!("    Error executing transaction err={:?}, fee_payer={}", err, txn.fee_payer());
             }
         });
 
