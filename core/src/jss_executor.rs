@@ -361,60 +361,53 @@ impl JssExecutor {
 
         let qos_service = QosService::new(id as u32);
         let recorder = poh_recorder.read().unwrap().new_recorder();
-        let mut bank_start = None;
-        let mut current_block_builder_fee_info = None;
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
-            if bank_start.is_none() {
-                bank_start = poh_recorder.read().unwrap().bank_start();
-            }
-            let Some(current_bank_start) = bank_start.as_ref() else {
+            let Some(current_bank_start) = poh_recorder.read().unwrap().bank_start() else {
+                // If we get a bundle when no bank is active; we can just ignore it.
+                if let Ok(bundle) = receiver.try_recv() {
+                    sender.send(bundle.id).unwrap();
+                }
                 std::thread::sleep(Duration::from_micros(500));
                 continue;
             };
-            if !current_bank_start.should_working_bank_still_be_processing_txs() {
-                bank_start = None;
-                current_block_builder_fee_info = None;
-                std::thread::sleep(Duration::from_micros(500));
-                continue;
-            }
-            let Ok(ParsedBundleWithId {
-                id: ids,
-                bundle:
-                    ParsedBundle {
-                        revert_on_error,
-                        transactions: txns,
-                    },
-            }) = receiver.recv_timeout(Duration::from_millis(1))
-            else {
-                continue;
-            };
-            let bundle_id = Self::generate_bundle_id(&txns);
-            if current_block_builder_fee_info.is_none() {
-                current_block_builder_fee_info =
-                    Some(block_builder_fee_info.lock().unwrap().clone());
-            }
-            let result = Self::execute_record_commit(
-                &current_bank_start,
-                &qos_service,
-                &recorder,
-                &mut bundle_committer,
-                &mut transaction_commiter,
-                revert_on_error,
-                txns,
-                &tip_manager,
-                &keypair,
-                &last_tip_updated_slot,
-                current_block_builder_fee_info.as_ref().unwrap(),
-                &bundle_account_locker,
-            );
+            let current_block_builder_fee_info = block_builder_fee_info.lock().unwrap().clone();
+            while current_bank_start.should_working_bank_still_be_processing_txs() {
+                let Ok(ParsedBundleWithId {
+                    id: ids,
+                    bundle:
+                        ParsedBundle {
+                            revert_on_error,
+                            transactions: txns,
+                        },
+                }) = receiver.recv_timeout(Duration::from_millis(1))
+                else {
+                    continue;
+                };
+                let bundle_id = Self::generate_bundle_id(&txns);
+                let result = Self::execute_record_commit(
+                    &current_bank_start,
+                    &qos_service,
+                    &recorder,
+                    &mut bundle_committer,
+                    &mut transaction_commiter,
+                    revert_on_error,
+                    txns,
+                    &tip_manager,
+                    &keypair,
+                    &last_tip_updated_slot,
+                    &current_block_builder_fee_info,
+                    &bundle_account_locker,
+                );
+                sender.send(ids).unwrap();
 
-            sender.send(ids).unwrap();
-
-            if result.is_success() {
-                successful_count.fetch_add(1, Ordering::Relaxed);
-            } else if result.is_retryable() {
-                retry_bundle_sender.try_send(bundle_id).unwrap();
+                if result.is_success() {
+                    successful_count.fetch_add(1, Ordering::Relaxed);
+                } else if result.is_retryable() {
+                    retry_bundle_sender.try_send(bundle_id).unwrap();
+                }
             }
+
+            std::thread::sleep(Duration::from_micros(500));
         }
     }
 
@@ -512,7 +505,9 @@ impl JssExecutor {
                 bundle_committer,
                 init_bundle,
                 bundle_account_locker,
-            ).is_success() {
+            )
+            .is_success()
+            {
                 info!("Failed to initialize tip programs");
                 return false;
             }
@@ -531,7 +526,9 @@ impl JssExecutor {
                 bundle_committer,
                 crank_bundle,
                 bundle_account_locker,
-            ).is_success() {
+            )
+            .is_success()
+            {
                 info!("Failed to crank tip programs");
                 return false;
             }
