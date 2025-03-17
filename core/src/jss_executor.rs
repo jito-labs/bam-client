@@ -175,7 +175,7 @@ impl JssExecutor {
         let mut prio_graph = prio_graph::PrioGraph::new(|id: &BundleExecutionId, _graph_node| *id);
 
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
-            if !poh_recorder.read().unwrap().would_be_leader(1) {
+            if !poh_recorder.read().unwrap().would_be_leader(0) {
                 std::thread::sleep(Duration::from_millis(1));
                 continue;
             }
@@ -183,7 +183,7 @@ impl JssExecutor {
             let mut microblock_count = 0;
             let mut bundles_scheduled = 0;
 
-            while poh_recorder.read().unwrap().would_be_leader(1) {
+            while poh_recorder.read().unwrap().would_be_leader(0) {
                 Self::maybe_ingest_new_microblock(
                     &microblock_receiver,
                     &mut prio_graph,
@@ -365,7 +365,7 @@ impl JssExecutor {
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
             let Some(current_bank_start) = poh_recorder.read().unwrap().bank_start() else {
                 // If we get a bundle when no bank is active; we can just ignore it.
-                if let Ok(bundle) = receiver.try_recv() {
+                while let Ok(bundle) = receiver.try_recv() {
                     sender.send(bundle.id).unwrap();
                 }
                 std::thread::sleep(Duration::from_micros(500));
@@ -407,8 +407,6 @@ impl JssExecutor {
                     retry_bundle_sender.try_send(bundle_id).unwrap();
                 }
             }
-
-            std::thread::sleep(Duration::from_micros(500));
         }
     }
 
