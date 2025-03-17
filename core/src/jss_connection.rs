@@ -42,7 +42,7 @@ impl JssConnection {
 
         let mut validator_client = JssNodeApiClient::new(channel);
 
-        let (outbound_sender, outbound_receiver) = mpsc::channel(1000);
+        let (outbound_sender, outbound_receiver) = mpsc::channel(100_000);
         let outbound_stream =
             tonic::Request::new(outbound_receiver.map(|req: StartSchedulerMessage| req));
         let inbound_stream = validator_client
@@ -52,7 +52,7 @@ impl JssConnection {
             .into_inner();
 
         let last_heartbeat = Arc::new(Mutex::new(std::time::Instant::now()));
-        let (microblock_sender, microblock_receiver) = crossbeam_channel::unbounded();
+        let (microblock_sender, microblock_receiver) = crossbeam_channel::bounded(100_000);
         let background_task = tokio::spawn(Self::background_task(
             inbound_stream,
             outbound_sender.clone(),
