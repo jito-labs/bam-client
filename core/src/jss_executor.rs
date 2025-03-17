@@ -182,6 +182,9 @@ impl JssExecutor {
 
             let mut microblock_count = 0;
             let mut bundles_scheduled = 0;
+            bundles.clear();
+            prio_graph.clear();
+            successful_count.store(0, Ordering::Relaxed);
 
             while poh_recorder.read().unwrap().would_be_leader(0) {
                 Self::maybe_ingest_new_microblock(
@@ -204,11 +207,6 @@ impl JssExecutor {
                 worker.wait_til_finish();
             }
 
-            if microblock_count == 0 {
-                std::thread::sleep(Duration::from_millis(1));
-                continue;
-            }
-
             info!(
                 "microblock_count={} scheduled={} unscheduled={} successful={}",
                 microblock_count,
@@ -216,9 +214,6 @@ impl JssExecutor {
                 bundles.len() - bundles_scheduled as usize,
                 successful_count.load(Ordering::Relaxed),
             );
-            bundles.clear();
-            prio_graph.clear();
-            successful_count.store(0, Ordering::Relaxed);
         }
     }
 
