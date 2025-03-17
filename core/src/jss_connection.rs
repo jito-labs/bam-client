@@ -153,17 +153,8 @@ impl JssConnection {
 
     // Check if the connection is healthy
     pub fn is_healthy(&mut self) -> bool {
-        let is_healthy =
-            self.last_heartbeat.lock().unwrap().elapsed() < std::time::Duration::from_secs(6);
-
-        if !is_healthy {
-            info!(
-                "dead_heartbeat={}",
-                self.last_heartbeat.lock().unwrap().elapsed().as_secs()
-            );
-        }
-
-        is_healthy
+        const TIMEOUT_DURATION: std::time::Duration = std::time::Duration::from_secs(6);
+        self.last_heartbeat.lock().unwrap().elapsed() < TIMEOUT_DURATION
     }
 
     pub fn get_builder_config(&self) -> Option<BuilderConfigResp> {
