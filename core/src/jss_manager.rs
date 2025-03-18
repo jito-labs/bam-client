@@ -166,6 +166,7 @@ impl JssManager {
             }
         }
 
+        jss_enabled.store(false, std::sync::atomic::Ordering::Relaxed);
         info!("JSS Manager exiting");
     }
 
