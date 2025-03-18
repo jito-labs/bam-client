@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{atomic::AtomicU64, Arc, Mutex, RwLock};
 
 use crossbeam_channel::Receiver;
 use futures::{channel::mpsc, StreamExt};
@@ -13,6 +13,7 @@ use jito_protos::proto::{
 use solana_gossip::cluster_info::ClusterInfo;
 use solana_poh::poh_recorder::PohRecorder;
 use solana_sdk::{signature::Keypair, signer::Signer};
+use std::sync::atomic::Ordering::Relaxed;
 use tokio::time::{interval, timeout};
 
 // Maintains a connection to the JSS Node and handles sending and receiving messages
@@ -23,6 +24,7 @@ pub struct JssConnection {
     builder_config: Arc<Mutex<Option<BuilderConfigResp>>>,
     microblock_receiver: Receiver<MicroBlock>,
     background_task: tokio::task::JoinHandle<()>,
+    metrics: Arc<JssConnectionMetrics>,
 }
 
 impl JssConnection {
@@ -51,6 +53,8 @@ impl JssConnection {
             .ok()?
             .into_inner();
 
+        let metrics = Arc::new(JssConnectionMetrics::default());
+
         let last_heartbeat = Arc::new(Mutex::new(std::time::Instant::now()));
         let (microblock_sender, microblock_receiver) = crossbeam_channel::bounded(100_000);
         let background_task = tokio::spawn(Self::background_task(
@@ -62,6 +66,7 @@ impl JssConnection {
             microblock_sender,
             poh_recorder,
             cluster_info,
+            metrics.clone(),
         ));
 
         Some(Self {
@@ -70,6 +75,7 @@ impl JssConnection {
             builder_config,
             background_task,
             microblock_receiver,
+            metrics,
         })
     }
 
@@ -82,8 +88,10 @@ impl JssConnection {
         microblock_sender: crossbeam_channel::Sender<MicroBlock>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         cluster_info: Arc<ClusterInfo>,
+        metrics: Arc<JssConnectionMetrics>,
     ) {
         let mut heartbeat_interval = interval(std::time::Duration::from_secs(5));
+        let mut metrics_interval = interval(std::time::Duration::from_secs(1));
         loop {
             tokio::select! {
                 _ = heartbeat_interval.tick() => {
@@ -94,10 +102,15 @@ impl JssConnection {
                     let _ = sender.try_send(StartSchedulerMessage {
                         msg: Some(Msg::HeartBeat(signed_heartbeat)),
                     });
+                    metrics.heartbeat_sent.fetch_add(1, Relaxed);
                     let Ok(resp) = validator_client.get_builder_config(GetBuilderConfigRequest {}).await else {
                         break;
                     };
                     *builder_config.lock().unwrap() = Some(resp.into_inner());
+                    metrics.builder_config_received.fetch_add(1, Relaxed);
+                }
+                _ = metrics_interval.tick() => {
+                    metrics.report();
                 }
                 inbound = inbound_stream.message() => {
                     let Ok(Some(inbound)) = inbound else {
@@ -107,9 +120,11 @@ impl JssConnection {
                     match inbound {
                         StartSchedulerResponse { resp: Some(Resp::HeartBeat(_)), .. } => {
                             *last_heartbeat_clone.lock().unwrap() = std::time::Instant::now();
+                            metrics.heartbeat_received.fetch_add(1, Relaxed);
                         }
                         StartSchedulerResponse { resp: Some(Resp::MicroBlock(microblock)), .. } => {
                             let _ = microblock_sender.send(microblock);
+                            metrics.microblock_received.fetch_add(1, Relaxed);
                         }
                         _ => {}
                     }
@@ -137,11 +152,14 @@ impl JssConnection {
     }
 
     pub fn try_recv_microblock(&mut self) -> Option<MicroBlock> {
+        self.metrics.micro_block_polls.fetch_add(1, Relaxed);
         self.microblock_receiver.try_recv().ok()
     }
 
     pub fn drain_microblocks(&mut self) {
-        while let Ok(_) = self.microblock_receiver.try_recv() {}
+        while let Ok(_) = self.microblock_receiver.try_recv() {
+            self.metrics.microblock_received.fetch_add(1, Relaxed);
+        }
     }
 
     // Send a signed slot tick to the JSS instance
@@ -149,12 +167,19 @@ impl JssConnection {
         let _ = self.outbound_sender.try_send(StartSchedulerMessage {
             msg: Some(Msg::LeaderState(leader_state)),
         });
+        self.metrics.leaderstate_sent.fetch_add(1, Relaxed);
     }
 
     // Check if the connection is healthy
     pub fn is_healthy(&mut self) -> bool {
         const TIMEOUT_DURATION: std::time::Duration = std::time::Duration::from_secs(6);
-        self.last_heartbeat.lock().unwrap().elapsed() < TIMEOUT_DURATION
+        let is_healthy = self.last_heartbeat.lock().unwrap().elapsed() < TIMEOUT_DURATION;
+        if !is_healthy {
+            self.metrics
+                .unhealthy_connection_count
+                .fetch_add(1, Relaxed);
+        }
+        is_healthy
     }
 
     pub fn get_builder_config(&self) -> Option<BuilderConfigResp> {
@@ -165,5 +190,61 @@ impl JssConnection {
 impl Drop for JssConnection {
     fn drop(&mut self) {
         self.background_task.abort();
+    }
+}
+
+#[derive(Default)]
+struct JssConnectionMetrics {
+    microblock_received: AtomicU64,
+    heartbeat_received: AtomicU64,
+    builder_config_received: AtomicU64,
+
+    unhealthy_connection_count: AtomicU64,
+
+    leaderstate_sent: AtomicU64,
+    heartbeat_sent: AtomicU64,
+    micro_block_polls: AtomicU64,
+}
+
+impl JssConnectionMetrics {
+    pub fn report(&self) {
+        datapoint_info!(
+            "jss_connection-metrics",
+            (
+                "microblock_received",
+                self.microblock_received.swap(0, Relaxed) as i64,
+                i64
+            ),
+            (
+                "heartbeat_received",
+                self.heartbeat_received.swap(0, Relaxed) as i64,
+                i64
+            ),
+            (
+                "builder_config_received",
+                self.builder_config_received.swap(0, Relaxed) as i64,
+                i64
+            ),
+            (
+                "unhealthy_connection_count",
+                self.unhealthy_connection_count.swap(0, Relaxed) as i64,
+                i64
+            ),
+            (
+                "leaderstate_sent",
+                self.leaderstate_sent.swap(0, Relaxed) as i64,
+                i64
+            ),
+            (
+                "heartbeat_sent",
+                self.heartbeat_sent.swap(0, Relaxed) as i64,
+                i64
+            ),
+            (
+                "micro_block_polls",
+                self.micro_block_polls.swap(0, Relaxed) as i64,
+                i64
+            ),
+        );
     }
 }

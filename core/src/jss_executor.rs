@@ -682,12 +682,19 @@ impl JssExecutor {
             },
         );
 
-        results.processing_results.iter().zip(transactions.iter()).
-            for_each(|(result, txn)| {
-            if let Err(err) = result {
-                error!("    Error executing transaction err={:?}, fee_payer={}", err, txn.fee_payer());
-            }
-        });
+        results
+            .processing_results
+            .iter()
+            .zip(transactions.iter())
+            .for_each(|(result, txn)| {
+                if let Err(err) = result {
+                    error!(
+                        "    Error executing transaction err={:?}, fee_payer={}",
+                        err,
+                        txn.fee_payer()
+                    );
+                }
+            });
 
         if results.processed_counts.processed_transactions_count == 0 {
             QosService::remove_or_update_costs(transaction_qos_cost_results.iter(), None, bank);
