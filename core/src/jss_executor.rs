@@ -182,8 +182,9 @@ impl JssExecutor {
                 continue;
             }
 
+            // Bank will hopefully be ready very soon
             if poh_recorder.read().unwrap().bank_start().is_none() {
-                std::thread::sleep(Duration::from_millis(1));
+                std::thread::sleep(Duration::from_micros(1));
                 continue;
             }
 
