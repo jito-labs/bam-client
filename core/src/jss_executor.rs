@@ -26,6 +26,7 @@ use solana_bundle::{
 use solana_ledger::{
     blockstore_processor::TransactionStatusSender, token_balances::collect_token_balances,
 };
+use solana_measure::measure_us;
 use solana_poh::poh_recorder::{
     BankStart, PohRecorder, RecordTransactionsSummary, TransactionRecorder,
 };
@@ -381,7 +382,7 @@ impl JssExecutor {
                     continue;
                 };
                 let bundle_id = Self::generate_bundle_id(&txns);
-                let result = Self::execute_record_commit(
+                let (result, process_transactions_us) = measure_us!(Self::execute_record_commit(
                     &current_bank_start,
                     &qos_service,
                     &recorder,
@@ -394,14 +395,22 @@ impl JssExecutor {
                     &last_tip_updated_slot,
                     &current_block_builder_fee_info,
                     &bundle_account_locker,
-                );
+                ));
+
+                // Unblock next bundles
                 sender.send(ids).unwrap();
 
+                // Send back if potentially retry-able
                 if result.is_success() {
                     successful_count.fetch_add(1, Ordering::Relaxed);
                 } else if result.is_retryable() {
                     retry_bundle_sender.try_send(bundle_id).unwrap();
                 }
+
+                // Update metrics
+                metrics.leader_slot_metrics_tracker.increment_process_transactions_us(
+                    process_transactions_us,
+                );
             }
         }
     }
