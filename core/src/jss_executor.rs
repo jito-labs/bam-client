@@ -47,9 +47,7 @@ use solana_transaction_status::PreBalanceInfo;
 
 use crate::{
     banking_stage::{
-        self, committer::CommitTransactionDetails,
-        immutable_deserialized_packet::ImmutableDeserializedPacket,
-        leader_slot_timing_metrics::LeaderExecuteAndCommitTimings, qos_service::QosService,
+        self, committer::CommitTransactionDetails, immutable_deserialized_packet::ImmutableDeserializedPacket, leader_slot_metrics::LeaderSlotMetricsTracker, leader_slot_timing_metrics::LeaderExecuteAndCommitTimings, qos_service::QosService
     },
     bundle_stage::{self, bundle_account_locker::BundleAccountLocker, MAX_BUNDLE_RETRY_DURATION},
     proxy::block_engine_stage::BlockBuilderFeeInfo,
@@ -171,6 +169,7 @@ impl JssExecutor {
     ) {
         info!("spawned management thread");
 
+        let mut metrics = JssSchedulerMetrics::default();
         let mut bundles = Vec::new();
         let mut prio_graph = prio_graph::PrioGraph::new(|id: &BundleExecutionId, _graph_node| *id);
 
@@ -180,8 +179,11 @@ impl JssExecutor {
                 continue;
             }
 
-            let mut microblock_count = 0;
-            let mut bundles_scheduled = 0;
+            if poh_recorder.read().unwrap().bank_start().is_none() {
+                std::thread::sleep(Duration::from_millis(1));
+                continue;
+            }
+
             bundles.clear();
             prio_graph.clear();
             successful_count.store(0, Ordering::Relaxed);
@@ -190,16 +192,15 @@ impl JssExecutor {
                 Self::maybe_ingest_new_microblock(
                     &microblock_receiver,
                     &mut prio_graph,
-                    &mut microblock_count,
                     &mut bundles,
-                    &mut bundles_scheduled,
                     &mut workers,
+                    &mut metrics,
                 );
                 Self::schedule_next_batch(
                     &mut prio_graph,
                     &mut bundles,
-                    &mut bundles_scheduled,
                     &mut workers,
+                    &mut metrics,
                 );
             }
 
@@ -207,13 +208,7 @@ impl JssExecutor {
                 worker.wait_til_finish();
             }
 
-            info!(
-                "microblock_count={} scheduled={} unscheduled={} successful={}",
-                microblock_count,
-                bundles_scheduled,
-                bundles.len() - bundles_scheduled as usize,
-                successful_count.load(Ordering::Relaxed),
-            );
+            metrics.report();
         }
     }
 
@@ -226,13 +221,12 @@ impl JssExecutor {
     >(
         microblock_receiver: &crossbeam_channel::Receiver<Vec<ParsedBundle>>,
         prio_graph: &mut prio_graph::PrioGraph<BundleExecutionId, Pubkey, C, D>,
-        microblock_count: &mut u64,
         bundles: &mut Vec<Option<ParsedBundleWithId>>,
-        bundles_scheduled: &mut u64,
         workers: &mut Vec<Worker>,
+        metrics: &mut JssSchedulerMetrics,
     ) {
         if let Ok(micro_block) = microblock_receiver.try_recv() {
-            *microblock_count += 1;
+            metrics.bundles_received += micro_block.len();
             for bundle in micro_block {
                 let id = bundles.len();
                 let bundle_id = BundleExecutionId { id };
@@ -244,7 +238,7 @@ impl JssExecutor {
                     id: bundle_id,
                     bundle,
                 }));
-                Self::schedule_next_batch(prio_graph, bundles, bundles_scheduled, workers);
+                Self::schedule_next_batch(prio_graph, bundles, workers, metrics);
             }
         }
     }
@@ -257,8 +251,8 @@ impl JssExecutor {
     >(
         prio_graph: &mut prio_graph::PrioGraph<BundleExecutionId, Pubkey, C, D>,
         bundles: &mut Vec<Option<ParsedBundleWithId>>,
-        bundles_scheduled: &mut u64,
         workers: &mut Vec<Worker>,
+        metrics: &mut JssSchedulerMetrics,
     ) {
         for (_, worker) in workers.iter_mut().enumerate().filter(|(_, w)| !w.is_full()) {
             for bundle_id in worker.get_unblocking_bundles() {
@@ -273,7 +267,7 @@ impl JssExecutor {
             };
 
             if worker.send(bundle) {
-                *bundles_scheduled += 1;
+                metrics.bundles_schueduled += 1;
             }
         }
     }
@@ -294,7 +288,9 @@ impl JssExecutor {
         let mut threads = Vec::new();
         let mut workers = Vec::new();
         let last_tip_updated_slot = Arc::new(Mutex::new(0));
+        const JSS_ID_OFFSET: usize = 1000;
         for id in 0..worker_thread_count {
+            let id = id + JSS_ID_OFFSET;
             let (sender, receiver) = crossbeam_channel::bounded(1);
             let (result_sender, result_receiver) = crossbeam_channel::bounded(1);
             workers.push(Worker::new(sender, result_receiver));
@@ -356,6 +352,7 @@ impl JssExecutor {
         info!("spawned worker thread {}", id);
 
         let qos_service = QosService::new(id as u32);
+        let mut metrics = JssWorkerMetrics::new(id as u32);
         let recorder = poh_recorder.read().unwrap().new_recorder();
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
             let Some(current_bank_start) = poh_recorder.read().unwrap().bank_start() else {
@@ -940,6 +937,38 @@ impl Worker {
     fn wait_til_finish(&mut self) {
         while self.in_flight > 0 {
             self.get_unblocking_bundles();
+        }
+    }
+}
+
+#[derive(Default)]
+struct JssSchedulerMetrics {
+    bundles_received: usize,
+    bundles_schueduled: usize,
+}
+
+impl JssSchedulerMetrics {
+    fn report(&mut self) {
+        datapoint_info!(
+            "jss_scheduler_metrics",
+            ("bundles_received", self.bundles_received, i64),
+            ("bundles_scheduled", self.bundles_schueduled, i64),
+        );
+        *self = Self::default();
+    }
+}
+
+// Per worker tracking of:
+// - LeaderSlotMetrics
+
+struct JssWorkerMetrics {
+    leader_slot_metrics_tracker: LeaderSlotMetricsTracker,
+}
+
+impl JssWorkerMetrics {
+    fn new(id: u32) -> Self {
+        Self {
+            leader_slot_metrics_tracker: LeaderSlotMetricsTracker::new(id),
         }
     }
 }
