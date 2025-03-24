@@ -761,8 +761,8 @@ impl JssExecutor {
         bank: &Bank,
         packets: impl Iterator<Item = &'a Packet>,
     ) -> Vec<SanitizedTransaction> {
-        let txns = packets
-            .map(|packet| {
+        packets
+            .filter_map(|packet| {
                 let mut solana_packet = solana_sdk::packet::Packet::default();
                 solana_packet.meta_mut().size = packet.data.len() as usize;
                 solana_packet.meta_mut().set_discard(false);
@@ -803,13 +803,9 @@ impl JssExecutor {
                     bank,
                     bank.get_reserved_account_keys(),
                 )?;
-                Some(sanitized_transaction)
+                Some(sanitized_transaction.0)
             })
-            .collect_vec();
-        if txns.iter().any(Option::is_none) {
-            return vec![];
-        }
-        txns.into_iter().map(|x| x.unwrap().0).collect_vec()
+            .collect_vec()
     }
 
     /// Gets accessed accounts (resources) for use in `PrioGraph`.
