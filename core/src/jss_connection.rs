@@ -81,7 +81,7 @@ impl JssConnection {
 
     async fn background_task(
         mut inbound_stream: tonic::Streaming<StartSchedulerResponse>,
-        mut sender: mpsc::Sender<StartSchedulerMessage>,
+        mut outbound_sender: mpsc::Sender<StartSchedulerMessage>,
         mut validator_client: JssNodeApiClient<tonic::transport::channel::Channel>,
         last_heartbeat_clone: Arc<Mutex<std::time::Instant>>,
         builder_config: Arc<Mutex<Option<BuilderConfigResp>>>,
@@ -99,7 +99,7 @@ impl JssConnection {
                         error!("Failed to create signed heartbeat");
                         break;
                     };
-                    let _ = sender.try_send(StartSchedulerMessage {
+                    let _ = outbound_sender.try_send(StartSchedulerMessage {
                         msg: Some(Msg::HeartBeat(signed_heartbeat)),
                     });
                     metrics.heartbeat_sent.fetch_add(1, Relaxed);
