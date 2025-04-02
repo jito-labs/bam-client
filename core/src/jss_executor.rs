@@ -175,7 +175,7 @@ impl JssExecutor {
 
         let mut metrics = JssSchedulerMetrics::default();
         let mut bundles = Vec::new();
-        let mut prio_graph = prio_graph::PrioGraph::new(|id: &BundleExecutionId, _graph_node| *id);
+        let mut prio_graph = prio_graph::PrioGraph::new(|id: &BundleSequenceId, _graph_node| *id);
 
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
             if !poh_recorder.read().unwrap().would_be_leader(0) {
@@ -221,11 +221,11 @@ impl JssExecutor {
     /// If a worker is available between incoming transactions, it schedules the next batch
     /// so that no workers has to wait.
     fn maybe_ingest_new_microblock<
-        C: std::hash::Hash + Eq + Clone + TopLevelId<BundleExecutionId> + Copy,
-        D: Fn(&BundleExecutionId, &GraphNode<BundleExecutionId>) -> C,
+        C: std::hash::Hash + Eq + Clone + TopLevelId<BundleSequenceId> + Copy,
+        D: Fn(&BundleSequenceId, &GraphNode<BundleSequenceId>) -> C,
     >(
         microblock_receiver: &crossbeam_channel::Receiver<Vec<ParsedBundle>>,
-        prio_graph: &mut prio_graph::PrioGraph<BundleExecutionId, Pubkey, C, D>,
+        prio_graph: &mut prio_graph::PrioGraph<BundleSequenceId, Pubkey, C, D>,
         bundles: &mut Vec<Option<ParsedBundleWithId>>,
         workers: &mut Vec<Worker>,
         metrics: &mut JssSchedulerMetrics,
@@ -234,13 +234,13 @@ impl JssExecutor {
             metrics.bundles_received += micro_block.len();
             for bundle in micro_block {
                 let id = bundles.len();
-                let bundle_id = BundleExecutionId { id };
+                let bundle_sequence_id = BundleSequenceId { id };
                 prio_graph.insert_transaction(
-                    bundle_id,
+                    bundle_sequence_id,
                     Self::get_bundle_account_access(&bundle.transactions),
                 );
                 bundles.push(Some(ParsedBundleWithId {
-                    id: bundle_id,
+                    bundle_sequence_id,
                     bundle,
                 }));
                 Self::schedule_next_batch(prio_graph, bundles, workers, metrics);
@@ -251,10 +251,10 @@ impl JssExecutor {
     /// Schedules the next batch of transactions to workers, by checking if any worker is available.
     /// If a worker is available, it pops the next bundle from the prio-graph and sends it to the worker.
     fn schedule_next_batch<
-        C: std::hash::Hash + Eq + Clone + TopLevelId<BundleExecutionId> + Copy,
-        D: Fn(&BundleExecutionId, &GraphNode<BundleExecutionId>) -> C,
+        C: std::hash::Hash + Eq + Clone + TopLevelId<BundleSequenceId> + Copy,
+        D: Fn(&BundleSequenceId, &GraphNode<BundleSequenceId>) -> C,
     >(
-        prio_graph: &mut prio_graph::PrioGraph<BundleExecutionId, Pubkey, C, D>,
+        prio_graph: &mut prio_graph::PrioGraph<BundleSequenceId, Pubkey, C, D>,
         bundles: &mut Vec<Option<ParsedBundleWithId>>,
         workers: &mut Vec<Worker>,
         metrics: &mut JssSchedulerMetrics,
@@ -344,7 +344,7 @@ impl JssExecutor {
         mut bundle_committer: bundle_stage::committer::Committer,
         mut transaction_commiter: banking_stage::committer::Committer,
         receiver: crossbeam_channel::Receiver<ParsedBundleWithId>,
-        sender: crossbeam_channel::Sender<BundleExecutionId>,
+        sender: crossbeam_channel::Sender<BundleSequenceId>,
         exit: Arc<AtomicBool>,
         tip_manager: TipManager,
         successful_count: Arc<AtomicUsize>,
@@ -363,7 +363,7 @@ impl JssExecutor {
             let Some(current_bank_start) = poh_recorder.read().unwrap().bank_start() else {
                 // If we get a bundle when no bank is active; we can just ignore it.
                 while let Ok(bundle) = receiver.try_recv() {
-                    sender.send(bundle.id).unwrap();
+                    sender.send(bundle.bundle_sequence_id).unwrap();
                 }
                 std::thread::sleep(Duration::from_micros(500));
                 continue;
@@ -371,7 +371,7 @@ impl JssExecutor {
             let current_block_builder_fee_info = block_builder_fee_info.lock().unwrap().clone();
             while current_bank_start.should_working_bank_still_be_processing_txs() {
                 let Ok(ParsedBundleWithId {
-                    id: ids,
+                    bundle_sequence_id,
                     bundle:
                         ParsedBundle {
                             revert_on_error,
@@ -398,7 +398,7 @@ impl JssExecutor {
                 ));
 
                 // Unblock next bundles
-                sender.send(ids).unwrap();
+                sender.send(bundle_sequence_id).unwrap();
 
                 // Send back if potentially retry-able
                 if result.is_success() {
@@ -865,23 +865,23 @@ impl ExecutionResult {
 /// Since microblocks are already sorted, FIFO assignment of ids
 /// can be used to determine priority.
 #[derive(Hash, Eq, PartialEq, Clone, Copy)]
-struct BundleExecutionId {
+struct BundleSequenceId {
     id: usize,
 }
 
-impl TopLevelId<Self> for BundleExecutionId {
+impl TopLevelId<Self> for BundleSequenceId {
     fn id(&self) -> Self {
         *self
     }
 }
 
-impl Ord for BundleExecutionId {
+impl Ord for BundleSequenceId {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.id.cmp(&other.id).reverse()
     }
 }
 
-impl PartialOrd for BundleExecutionId {
+impl PartialOrd for BundleSequenceId {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
@@ -893,7 +893,7 @@ struct ParsedBundle {
 }
 
 struct ParsedBundleWithId {
-    id: BundleExecutionId,
+    bundle_sequence_id: BundleSequenceId,
     bundle: ParsedBundle,
 }
 
@@ -901,14 +901,14 @@ struct ParsedBundleWithId {
 struct Worker {
     sender: crossbeam_channel::Sender<ParsedBundleWithId>,
     in_flight: usize,
-    receiver: crossbeam_channel::Receiver<BundleExecutionId>,
+    receiver: crossbeam_channel::Receiver<BundleSequenceId>,
 }
 
 impl Worker {
     /// Creates a new worker with the given sender.
     fn new(
         sender: crossbeam_channel::Sender<ParsedBundleWithId>,
-        receiver: crossbeam_channel::Receiver<BundleExecutionId>,
+        receiver: crossbeam_channel::Receiver<BundleSequenceId>,
     ) -> Self {
         Self {
             sender,
@@ -934,7 +934,7 @@ impl Worker {
 
     /// Gets the ids of bundles that have been picked up by the worker;
     /// therefore opening the door for new transactions to be scheduled.
-    fn get_unblocking_bundles(&mut self) -> Vec<BundleExecutionId> {
+    fn get_unblocking_bundles(&mut self) -> Vec<BundleSequenceId> {
         let mut result = Vec::new();
         while let Ok(ids) = self.receiver.try_recv() {
             self.in_flight -= 1;
