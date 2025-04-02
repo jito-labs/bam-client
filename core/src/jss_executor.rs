@@ -449,25 +449,24 @@ impl JssExecutor {
                 bundle_id,
             };
 
-            let mut last_tip_updated_slot_guard = last_tip_updated_slot.lock().unwrap();
-            if bank_start.working_bank.slot() != *last_tip_updated_slot_guard
-                && Self::bundle_touches_tip_pdas(&sanitized_bundle, &tip_manager.get_tip_accounts())
-            {
-                if !Self::handle_tip_programs(
-                    &bank_start,
-                    &qos_service,
-                    &recorder,
-                    bundle_committer,
-                    tip_manager,
-                    keypair,
-                    block_builder_fee_info,
-                    bundle_account_locker,
-                ) {
-                    return ExecutionResult::Failure;
+            if Self::bundle_touches_tip_pdas(&sanitized_bundle, &tip_manager.get_tip_accounts()) {
+                let mut last_tip_updated_slot_guard = last_tip_updated_slot.lock().unwrap();
+                if bank_start.working_bank.slot() != *last_tip_updated_slot_guard {
+                    if !Self::handle_tip_programs(
+                        &bank_start,
+                        &qos_service,
+                        &recorder,
+                        bundle_committer,
+                        tip_manager,
+                        keypair,
+                        block_builder_fee_info,
+                        bundle_account_locker,
+                    ) {
+                        return ExecutionResult::Failure;
+                    }
+                    *last_tip_updated_slot_guard = bank_start.working_bank.slot();    
                 }
-                *last_tip_updated_slot_guard = bank_start.working_bank.slot();
             }
-            drop(last_tip_updated_slot_guard);
 
             Self::execute_commit_record_bundle(
                 &bank_start.working_bank,
