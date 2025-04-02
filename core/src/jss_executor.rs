@@ -16,7 +16,7 @@ use std::{
 };
 
 use itertools::Itertools;
-use jito_protos::proto::jss_types::{MicroBlock, Packet};
+use jito_protos::proto::jss_types::{Bundle, Packet};
 use prio_graph::{AccessKind, GraphNode, TopLevelId};
 use sha2::Digest;
 use solana_bundle::{
@@ -59,7 +59,7 @@ use crate::{
 };
 
 pub struct JssExecutor {
-    microblock_sender: crossbeam_channel::Sender<Vec<ParsedBundle>>,
+    bundle_sender: crossbeam_channel::Sender<ParsedBundle>,
     threads: Vec<std::thread::JoinHandle<()>>,
 }
 
@@ -98,14 +98,13 @@ impl JssExecutor {
             retry_bundle_sender,
         );
 
-        const MICROBLOCK_CHANNEL_SIZE: usize = 100_000;
-        let (microblock_sender, microblock_receiver) =
-            crossbeam_channel::bounded(MICROBLOCK_CHANNEL_SIZE);
+        const BUNDLE_CHANNEL_SIZE: usize = 100_000;
+        let (bundle_sender, bundle_receiver) = crossbeam_channel::bounded(BUNDLE_CHANNEL_SIZE);
         let manager_thread = std::thread::Builder::new()
             .name("jss_executor_manager".to_string())
             .spawn(|| {
                 Self::spawn_management_thread(
-                    microblock_receiver,
+                    bundle_receiver,
                     poh_recorder,
                     worker_handles,
                     exit,
@@ -115,7 +114,7 @@ impl JssExecutor {
             .unwrap();
 
         Self {
-            microblock_sender,
+            bundle_sender,
             threads: std::iter::once(manager_thread)
                 .chain(worker_threads)
                 .collect(),
@@ -150,22 +149,17 @@ impl JssExecutor {
     }
 
     // Serialize transactions from micro-block and send them to the scheduling thread
-    pub fn schedule_microblock(&mut self, bank: &Bank, micro_block: MicroBlock) -> bool {
-        let bundles = micro_block
-            .bundles
-            .iter()
-            .map(|bundle| ParsedBundle {
-                revert_on_error: bundle.revert_on_error,
-                transactions: Self::parse_transactions(bank, bundle.packets.iter()),
-            })
-            .filter(|b: &ParsedBundle| !b.transactions.is_empty())
-            .collect_vec();
-        self.microblock_sender.try_send(bundles).is_ok()
+    pub fn schedule_bundle(&mut self, bank: &Bank, bundle: Bundle) -> bool {
+        let parsed_bundle = ParsedBundle {
+            revert_on_error: bundle.revert_on_error,
+            transactions: Self::parse_transactions(bank, bundle.packets.iter()),
+        };
+        self.bundle_sender.try_send(parsed_bundle).is_ok()
     }
 
     /// Loop responsible for scheduling transactions to workers
     fn spawn_management_thread(
-        microblock_receiver: crossbeam_channel::Receiver<Vec<ParsedBundle>>,
+        bundle_receiver: crossbeam_channel::Receiver<ParsedBundle>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         mut workers: Vec<Worker>,
         exit: Arc<AtomicBool>,
@@ -194,8 +188,8 @@ impl JssExecutor {
             successful_count.store(0, Ordering::Relaxed);
 
             while poh_recorder.read().unwrap().would_be_leader(0) {
-                Self::maybe_ingest_new_microblock(
-                    &microblock_receiver,
+                Self::maybe_ingest_new_bundle(
+                    &bundle_receiver,
                     &mut prio_graph,
                     &mut bundles,
                     &mut workers,
@@ -220,31 +214,29 @@ impl JssExecutor {
     /// Ingests new micro-blocks and inserts them into the prio-graph.
     /// If a worker is available between incoming transactions, it schedules the next batch
     /// so that no workers has to wait.
-    fn maybe_ingest_new_microblock<
+    fn maybe_ingest_new_bundle<
         C: std::hash::Hash + Eq + Clone + TopLevelId<BundleSequenceId> + Copy,
         D: Fn(&BundleSequenceId, &GraphNode<BundleSequenceId>) -> C,
     >(
-        microblock_receiver: &crossbeam_channel::Receiver<Vec<ParsedBundle>>,
+        bundle_receiver: &crossbeam_channel::Receiver<ParsedBundle>,
         prio_graph: &mut prio_graph::PrioGraph<BundleSequenceId, Pubkey, C, D>,
         bundles: &mut Vec<Option<ParsedBundleWithId>>,
         workers: &mut Vec<Worker>,
         metrics: &mut JssSchedulerMetrics,
     ) {
-        if let Ok(micro_block) = microblock_receiver.try_recv() {
-            metrics.bundles_received += micro_block.len();
-            for bundle in micro_block {
-                let id = bundles.len();
-                let bundle_sequence_id = BundleSequenceId { id };
-                prio_graph.insert_transaction(
-                    bundle_sequence_id,
-                    Self::get_bundle_account_access(&bundle.transactions),
-                );
-                bundles.push(Some(ParsedBundleWithId {
-                    bundle_sequence_id,
-                    bundle,
-                }));
-                Self::schedule_next_batch(prio_graph, bundles, workers, metrics);
-            }
+        if let Ok(bundle) = bundle_receiver.try_recv() {
+            metrics.bundles_received += 1;
+            let id = bundles.len();
+            let bundle_sequence_id = BundleSequenceId { id };
+            prio_graph.insert_transaction(
+                bundle_sequence_id,
+                Self::get_bundle_account_access(&bundle.transactions),
+            );
+            bundles.push(Some(ParsedBundleWithId {
+                bundle_sequence_id,
+                bundle,
+            }));
+            Self::schedule_next_batch(prio_graph, bundles, workers, metrics);
         }
     }
 
@@ -861,7 +853,7 @@ impl ExecutionResult {
 }
 
 /// Used to determine the priority of the bundle for execution.
-/// Since microblocks are already sorted, FIFO assignment of ids
+/// Since bundles are already sorted, FIFO assignment of ids
 /// can be used to determine priority.
 #[derive(Hash, Eq, PartialEq, Clone, Copy)]
 struct BundleSequenceId {
@@ -994,7 +986,7 @@ mod tests {
     };
 
     use crossbeam_channel::Receiver;
-    use jito_protos::proto::jss_types::{self, Bundle, MicroBlock};
+    use jito_protos::proto::jss_types::{self, Bundle};
     use jito_tip_distribution::sdk::derive_tip_distribution_account_address;
     use solana_ledger::{
         blockstore::Blockstore, genesis_utils::GenesisConfigInfo, get_tmp_ledger_path_auto_delete,
@@ -1257,17 +1249,16 @@ mod tests {
                 ))),
             ],
         };
-        let microblock = MicroBlock {
-            bundles: vec![successful_bundle, failed_bundle],
-        };
 
         // See if the transaction is executed
-        executor.schedule_microblock(&bank, microblock.clone());
+        executor.schedule_bundle(&bank, successful_bundle.clone());
+        executor.schedule_bundle(&bank, failed_bundle.clone());
         let txns = get_executed_txns(&entry_receiver, Duration::from_secs(3));
         assert_eq!(txns.len(), 1);
 
         // Make sure if you try the same thing again, it doesn't work
-        executor.schedule_microblock(&bank, microblock);
+        executor.schedule_bundle(&bank, successful_bundle);
+        executor.schedule_bundle(&bank, failed_bundle);
         let txns = get_executed_txns(&entry_receiver, Duration::from_secs(3));
         assert_eq!(txns.len(), 0);
 
@@ -1346,10 +1337,7 @@ mod tests {
             ))],
         };
 
-        let microblock = MicroBlock {
-            bundles: vec![successful_bundle],
-        };
-        executor.schedule_microblock(&bank, microblock);
+        executor.schedule_bundle(&bank, successful_bundle);
         let transactions = get_executed_txns(&entry_receiver, Duration::from_secs(3));
 
         // expect to see initialize tip payment program, tip distribution program,

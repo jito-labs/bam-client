@@ -1,7 +1,7 @@
 /// Manages majority of the JSS related functionality:
 /// - Connecting to the JSS block engine via GRPC service
-/// - Sending signed slot ticks + Receive microblocks
-/// - Executing the received microblocks
+/// - Sending signed slot ticks + Receive bundles
+/// - Executing the received bundles
 /// - Disabling JSS and re-enabling standard txn processing when health check fails
 use std::{
     collections::VecDeque,
@@ -190,10 +190,10 @@ impl JssManager {
 
         // Drain out the old micro-blocks and retryable bundle IDs
         // One of the annoying side-effects of re-using the channel between slots
-        jss_connection.drain_microblocks();
+        jss_connection.drain_bundles();
         retry_bundle_receiver.try_iter().for_each(|_| ());
 
-        let mut buffered_micro_blocks = VecDeque::new();
+        let mut buffered_bundles = VecDeque::new();
         let mut retryable_bundle_ids = Vec::new();
         let mut prev_tick = 0;
         while poh_recorder.read().unwrap().would_be_leader(tick_lookahead)
@@ -209,8 +209,8 @@ impl JssManager {
             }
 
             // Receive micro-blocks
-            while let Some(micro_block) = jss_connection.try_recv_microblock() {
-                buffered_micro_blocks.push_back(micro_block);
+            while let Some(bundle) = jss_connection.try_recv_bundle() {
+                buffered_bundles.push_back(bundle);
             }
 
             // Receive retryable bundle IDs
@@ -225,8 +225,8 @@ impl JssManager {
             if !bank_start.should_working_bank_still_be_processing_txs() {
                 continue;
             }
-            while let Some(micro_block) = buffered_micro_blocks.pop_front() {
-                executor.schedule_microblock(&bank_start.working_bank, micro_block);
+            while let Some(bundle) = buffered_bundles.pop_front() {
+                executor.schedule_bundle(&bank_start.working_bank, bundle);
             }
         }
     }

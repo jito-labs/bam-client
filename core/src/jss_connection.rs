@@ -11,7 +11,7 @@ use jito_protos::proto::{
         start_scheduler_response::Resp, BuilderConfigResp, GetBuilderConfigRequest,
         StartSchedulerMessage, StartSchedulerResponse,
     },
-    jss_types::{LeaderState, MicroBlock, ValidatorHeartBeat},
+    jss_types::{Bundle, LeaderState, ValidatorHeartBeat},
 };
 use solana_gossip::cluster_info::ClusterInfo;
 use solana_poh::poh_recorder::PohRecorder;
@@ -23,7 +23,7 @@ pub struct JssConnection {
     outbound_sender: mpsc::Sender<StartSchedulerMessage>,
     last_heartbeat: Arc<Mutex<std::time::Instant>>,
     builder_config: Arc<Mutex<Option<BuilderConfigResp>>>,
-    microblock_receiver: Receiver<MicroBlock>,
+    bundle_receiver: Receiver<Bundle>,
     background_task: tokio::task::JoinHandle<()>,
     metrics: Arc<JssConnectionMetrics>,
 }
@@ -57,14 +57,14 @@ impl JssConnection {
         let metrics = Arc::new(JssConnectionMetrics::default());
 
         let last_heartbeat = Arc::new(Mutex::new(std::time::Instant::now()));
-        let (microblock_sender, microblock_receiver) = crossbeam_channel::bounded(100_000);
+        let (bundle_sender, bundle_receiver) = crossbeam_channel::bounded(100_000);
         let background_task = tokio::spawn(Self::background_task(
             inbound_stream,
             outbound_sender.clone(),
             validator_client,
             last_heartbeat.clone(),
             builder_config.clone(),
-            microblock_sender,
+            bundle_sender,
             poh_recorder,
             cluster_info,
             metrics.clone(),
@@ -75,7 +75,7 @@ impl JssConnection {
             last_heartbeat,
             builder_config,
             background_task,
-            microblock_receiver,
+            bundle_receiver,
             metrics,
         })
     }
@@ -86,7 +86,7 @@ impl JssConnection {
         mut validator_client: JssNodeApiClient<tonic::transport::channel::Channel>,
         last_heartbeat_clone: Arc<Mutex<std::time::Instant>>,
         builder_config: Arc<Mutex<Option<BuilderConfigResp>>>,
-        microblock_sender: crossbeam_channel::Sender<MicroBlock>,
+        bundle_sender: crossbeam_channel::Sender<Bundle>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         cluster_info: Arc<ClusterInfo>,
         metrics: Arc<JssConnectionMetrics>,
@@ -123,9 +123,9 @@ impl JssConnection {
                             *last_heartbeat_clone.lock().unwrap() = std::time::Instant::now();
                             metrics.heartbeat_received.fetch_add(1, Relaxed);
                         }
-                        StartSchedulerResponse { resp: Some(Resp::MicroBlock(microblock)), .. } => {
-                            let _ = microblock_sender.send(microblock);
-                            metrics.microblock_received.fetch_add(1, Relaxed);
+                        StartSchedulerResponse { resp: Some(Resp::Bundle(bundle)), .. } => {
+                            let _ = bundle_sender.send(bundle);
+                            metrics.bundle_received.fetch_add(1, Relaxed);
                         }
                         _ => {}
                     }
@@ -152,14 +152,14 @@ impl JssConnection {
         Some(slot_signature)
     }
 
-    pub fn try_recv_microblock(&mut self) -> Option<MicroBlock> {
+    pub fn try_recv_bundle(&mut self) -> Option<Bundle> {
         self.metrics.micro_block_polls.fetch_add(1, Relaxed);
-        self.microblock_receiver.try_recv().ok()
+        self.bundle_receiver.try_recv().ok()
     }
 
-    pub fn drain_microblocks(&mut self) {
-        while let Ok(_) = self.microblock_receiver.try_recv() {
-            self.metrics.microblock_received.fetch_add(1, Relaxed);
+    pub fn drain_bundles(&mut self) {
+        while let Ok(_) = self.bundle_receiver.try_recv() {
+            self.metrics.bundle_received.fetch_add(1, Relaxed);
         }
     }
 
@@ -194,7 +194,7 @@ impl Drop for JssConnection {
 
 #[derive(Default)]
 struct JssConnectionMetrics {
-    microblock_received: AtomicU64,
+    bundle_received: AtomicU64,
     heartbeat_received: AtomicU64,
     builder_config_received: AtomicU64,
 
@@ -210,8 +210,8 @@ impl JssConnectionMetrics {
         datapoint_info!(
             "jss_connection-metrics",
             (
-                "microblock_received",
-                self.microblock_received.swap(0, Relaxed) as i64,
+                "bundle_received",
+                self.bundle_received.swap(0, Relaxed) as i64,
                 i64
             ),
             (
