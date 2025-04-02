@@ -464,7 +464,7 @@ impl JssExecutor {
                     ) {
                         return ExecutionResult::Failure;
                     }
-                    *last_tip_updated_slot_guard = bank_start.working_bank.slot();    
+                    *last_tip_updated_slot_guard = bank_start.working_bank.slot();
                 }
             }
 
