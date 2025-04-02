@@ -408,9 +408,9 @@ impl JssExecutor {
                 }
 
                 // Update metrics
-                metrics.leader_slot_metrics_tracker.increment_process_transactions_us(
-                    process_transactions_us,
-                );
+                metrics
+                    .leader_slot_metrics_tracker
+                    .increment_process_transactions_us(process_transactions_us);
             }
         }
     }

@@ -1,3 +1,6 @@
+// Maintains a connection to the JSS Node and handles sending and receiving messages
+// Keeps track of last received heartbeat 'behind the scenes' and will mark itself as unhealthy if no heartbeat is received
+
 use std::sync::{atomic::AtomicU64, Arc, Mutex, RwLock};
 
 use crossbeam_channel::Receiver;
@@ -16,8 +19,6 @@ use solana_sdk::{signature::Keypair, signer::Signer};
 use std::sync::atomic::Ordering::Relaxed;
 use tokio::time::{interval, timeout};
 
-// Maintains a connection to the JSS Node and handles sending and receiving messages
-// Keeps track of last received heartbeat 'behind the scenes' and will mark itself as unhealthy if no heartbeat is received
 pub struct JssConnection {
     outbound_sender: mpsc::Sender<StartSchedulerMessage>,
     last_heartbeat: Arc<Mutex<std::time::Instant>>,
@@ -162,7 +163,6 @@ impl JssConnection {
         }
     }
 
-    // Send a signed slot tick to the JSS instance
     pub fn send_leader_state(&mut self, leader_state: LeaderState) {
         let _ = self.outbound_sender.try_send(StartSchedulerMessage {
             msg: Some(Msg::LeaderState(leader_state)),
@@ -170,7 +170,6 @@ impl JssConnection {
         self.metrics.leaderstate_sent.fetch_add(1, Relaxed);
     }
 
-    // Check if the connection is healthy
     pub fn is_healthy(&mut self) -> bool {
         const TIMEOUT_DURATION: std::time::Duration = std::time::Duration::from_secs(6);
         let is_healthy = self.last_heartbeat.lock().unwrap().elapsed() < TIMEOUT_DURATION;

@@ -9,7 +9,6 @@ use std::{
     str::FromStr,
     sync::{atomic::AtomicBool, Arc, Mutex, RwLock},
     thread::Builder,
-    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use jito_protos::proto::{
@@ -122,6 +121,7 @@ impl JssManager {
 
         // Run until (our) world ends
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
+            // See if we are connected correctly to a JSS instance
             if !Self::get_or_init_connection(
                 &runtime,
                 jss_url.clone(),
@@ -188,7 +188,8 @@ impl JssManager {
             current_tick
         );
 
-        // Drain out the micro-blocks and retryable bundle IDs
+        // Drain out the old micro-blocks and retryable bundle IDs
+        // One of the annoying side-effects of re-using the channel between slots
         jss_connection.drain_microblocks();
         retry_bundle_receiver.try_iter().for_each(|_| ());
 
@@ -371,30 +372,5 @@ impl JssManager {
             thread.join()?;
         }
         Ok(())
-    }
-}
-
-/// Convert an Instant to a prost Timestamp
-pub fn instant_to_prost_timestamp(instant: Instant) -> prost_types::Timestamp {
-    let now = Instant::now();
-    let system_now = SystemTime::now();
-
-    let duration_since_now = if instant >= now {
-        instant - now
-    } else {
-        now - instant
-    };
-
-    let target_time = if instant >= now {
-        system_now + duration_since_now
-    } else {
-        system_now - duration_since_now
-    };
-
-    let duration_since_epoch = target_time.duration_since(UNIX_EPOCH).unwrap_or_default();
-
-    prost_types::Timestamp {
-        seconds: duration_since_epoch.as_secs() as i64,
-        nanos: duration_since_epoch.subsec_nanos() as i32,
     }
 }
