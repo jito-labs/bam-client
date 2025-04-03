@@ -641,7 +641,7 @@ impl JssExecutor {
         transactions: Vec<SanitizedTransaction>,
         bundle_account_locker: &BundleAccountLocker,
     ) -> ExecutionResult {
-        if transactions.len() != 0 {
+        if transactions.len() != 1 {
             error!(
                 "Error executing transaction: transactions should be of length 1, but got {}",
                 transactions.len()
