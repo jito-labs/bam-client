@@ -282,7 +282,7 @@ impl JssExecutor {
         for (_, worker) in workers
             .iter_mut()
             .enumerate()
-            .filter(|(_, w)| !w.is_available())
+            .filter(|(_, w)| !w.is_busy())
         {
             if let Some(bundle_id) = worker.get_unblocking_bundle() {
                 prio_graph.unblock(&bundle_id);
@@ -1096,7 +1096,7 @@ impl WorkerAccess {
     }
 
     /// Returns true if the worker's channel is currently full.
-    fn is_available(&self) -> bool {
+    fn is_busy(&self) -> bool {
         self.sender.is_full()
     }
 
