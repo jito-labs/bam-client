@@ -170,7 +170,12 @@ impl JssManager {
         info!("JSS Manager exiting");
     }
 
-    // Run the leader slot mode
+    /// Invariants:
+    /// - Only called when validator would be leader for the upcoming slot
+    /// - bundle queue is cleared before processing begins
+    /// - All received bundle are processed in order
+    /// - Leader state is sent on every tick change
+    /// - Processing stops if JSS connection becomes unhealthy
     fn run_leader_slot_mode(
         jss_connection: &mut JssConnection,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
@@ -231,6 +236,11 @@ impl JssManager {
         }
     }
 
+    /// Invariants:
+    /// - Returns valid slot and tick information even if no bank is available
+    /// - Account CU budgets are only included for accounts approaching limits
+    /// - Retryable bundle IDs are cleared after being included in a leader state
+    /// - Slot CU budget accurately reflects remaining compute units
     fn generate_leader_state(
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         retryable_bundle_ids: &mut Vec<[u8; 32]>,
