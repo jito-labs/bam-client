@@ -1078,7 +1078,7 @@ struct ParsedBundleWithId {
 // Worker management struct for scheduling thread
 struct WorkerAccess {
     sender: crossbeam_channel::Sender<ParsedBundleWithId>,
-    in_flight: bool,
+    in_flight: u32,
     receiver: crossbeam_channel::Receiver<BundleSequenceId>,
 }
 
@@ -1090,7 +1090,7 @@ impl WorkerAccess {
     ) -> Self {
         Self {
             sender,
-            in_flight: false,
+            in_flight: 0,
             receiver,
         }
     }
@@ -1103,7 +1103,7 @@ impl WorkerAccess {
     /// Sends a bundle to the worker; while incrementing the in-flight count.
     fn send(&mut self, bundle: ParsedBundleWithId) -> bool {
         if let Ok(_) = self.sender.send(bundle) {
-            self.in_flight = true;
+            self.in_flight += 1;
             true
         } else {
             false
@@ -1113,14 +1113,14 @@ impl WorkerAccess {
     /// Gets the id of the bundle that the worker is done with
     fn get_unblocking_bundle(&mut self) -> Option<BundleSequenceId> {
         if let Ok(id) = self.receiver.try_recv() {
-            self.in_flight = false;
+            self.in_flight -= 1;
             return Some(id);
         }
         None
     }
 
     fn wait_til_finish(&mut self) {
-        while self.in_flight {
+        while self.in_flight > 0 {
             self.get_unblocking_bundle();
         }
     }
