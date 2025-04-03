@@ -615,7 +615,7 @@ impl JssExecutor {
         } = recorder.record_transactions(bank.slot(), executed_batches);
         if record_transactions_result.is_err() {
             QosService::remove_or_update_costs(transaction_qos_cost_results.iter(), None, bank);
-            return ExecutionResult::Failure;
+            return ExecutionResult::Retryable;
         }
 
         // Commit the transactions
@@ -776,7 +776,7 @@ impl JssExecutor {
         } = recorder.record_transactions(bank.slot(), vec![processed_transactions]);
         if record_transactions_result.is_err() {
             QosService::remove_or_update_costs(transaction_qos_cost_results.iter(), None, bank);
-            return ExecutionResult::Failure;
+            return ExecutionResult::Retryable;
         }
 
         let (_, commit_transactions_result) = committer.commit_transactions(
