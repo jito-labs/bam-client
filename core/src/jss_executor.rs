@@ -35,12 +35,15 @@ use solana_runtime::{
     vote_sender_types::ReplayVoteSender,
 };
 use solana_sdk::{
-    clock::MAX_PROCESSING_AGE, packet::PacketFlags, pubkey::Pubkey, signature::Keypair,
-    transaction::SanitizedTransaction,
+    clock::MAX_PROCESSING_AGE,
+    packet::PacketFlags,
+    pubkey::Pubkey,
+    signature::Keypair,
+    transaction::{SanitizedTransaction, TransactionError},
 };
 use solana_svm::{
     transaction_error_metrics::TransactionErrorMetrics,
-    transaction_processing_result::TransactionProcessingResultExtensions,
+    transaction_processing_result::{ProcessedTransaction, TransactionProcessingResultExtensions},
     transaction_processor::{ExecutionRecordingConfig, TransactionProcessingConfig},
 };
 use solana_svm_transaction::svm_message::SVMMessage;
@@ -727,6 +730,25 @@ impl JssExecutor {
                     );
                 }
             });
+
+        let is_retryable_failure =
+            |result: &&Result<ProcessedTransaction, TransactionError>| -> bool {
+                matches!(
+                    result,
+                    Err(TransactionError::WouldExceedMaxAccountCostLimit)
+                        | Err(TransactionError::WouldExceedAccountDataBlockLimit)
+                        | Err(TransactionError::TooManyAccountLocks) // <- should not happen ever
+                )
+            };
+        if results
+            .processing_results
+            .iter()
+            .find(is_retryable_failure)
+            .is_some()
+        {
+            QosService::remove_or_update_costs(transaction_qos_cost_results.iter(), None, bank);
+            return ExecutionResult::Retryable;
+        }
 
         if results.processed_counts.processed_transactions_count == 0 {
             QosService::remove_or_update_costs(transaction_qos_cost_results.iter(), None, bank);
