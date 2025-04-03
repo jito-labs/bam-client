@@ -386,6 +386,10 @@ impl JssExecutor {
                 continue;
             };
             let current_block_builder_fee_info = block_builder_fee_info.lock().unwrap().clone();
+
+            // Start new slot metrics
+            metrics.leader_slot_action(Some(&current_bank_start));
+
             while current_bank_start.should_working_bank_still_be_processing_txs() {
                 let Ok(ParsedBundleWithId {
                     bundle_sequence_id,
@@ -429,6 +433,9 @@ impl JssExecutor {
                     .leader_slot_metrics_tracker
                     .increment_process_transactions_us(process_transactions_us);
             }
+
+            // Report slot metrics
+            metrics.leader_slot_action(None);
         }
     }
 
@@ -1021,6 +1028,15 @@ impl JssWorkerMetrics {
         Self {
             leader_slot_metrics_tracker: LeaderSlotMetricsTracker::new(id),
         }
+    }
+
+    // Either start new slot or report!
+    fn leader_slot_action(&mut self, bank_start: Option<&BankStart>) {
+        let action = self.leader_slot_metrics_tracker.check_leader_slot_boundary(
+            bank_start,
+            None,
+        );
+        self.leader_slot_metrics_tracker.apply_action(action);
     }
 }
 
