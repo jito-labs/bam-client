@@ -95,7 +95,7 @@ impl JssExecutor {
             keypair,
             block_builder_fee_info,
             bundle_account_locker,
-            retry_bundle_sender,
+            retry_bundle_sender.clone(),
         );
 
         const BUNDLE_CHANNEL_SIZE: usize = 100_000;
@@ -109,7 +109,7 @@ impl JssExecutor {
                     worker_handles,
                     exit,
                     successful_count,
-                    retry_bundle_sender.clone(),
+                    retry_bundle_sender,
                 );
             })
             .unwrap();
