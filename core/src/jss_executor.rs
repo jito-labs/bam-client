@@ -695,11 +695,12 @@ impl JssExecutor {
         }
 
         let mut execute_and_commit_timings = LeaderExecuteAndCommitTimings::default();
+        let mut transaction_error_metrics = TransactionErrorMetrics::default();
         let results = bank.load_and_execute_transactions(
             &batch,
             MAX_PROCESSING_AGE,
             &mut execute_and_commit_timings.execute_timings,
-            &mut TransactionErrorMetrics::default(),
+            &mut transaction_error_metrics,
             TransactionProcessingConfig {
                 account_overrides: None,
                 check_program_modification_slot: bank.check_program_modification_slot(),
