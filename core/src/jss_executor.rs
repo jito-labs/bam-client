@@ -1,9 +1,9 @@
 // Executor design:
-// - Micro-blocks are turned into serialized transactions and inserted into Prio-Graph by scheduling thread.
+// - Incoming Bundles are turned into serialized transactions and inserted into Prio-Graph by scheduling thread.
 // - Each worker thread has a channel of size 1 for new bundles to execute.
 // - The scheduling thread continually scans the worker channels to see if one is empty; as soon as it is;
-//   it unblocks the transactions blocked by what was in the channel before; and pops the next one off the prio graph;
-//   sending it to the channel. Transaction execution far outweighs the time for the scheduling thread to re-check the channel.
+//   it will schedule the next unblocked transaction. In the meantime, it scans for 'completed bundles'
+//   to come back via a result channel; unblocking bundles that were previously blocked by it.
 // - When the working bank is no longer valid; the Prio-graph and mempool are drained. Thinking about a feedback loop for JSS to know it scheduled too much.
 
 use std::{
@@ -161,7 +161,7 @@ impl JssExecutor {
     fn spawn_management_thread(
         bundle_receiver: crossbeam_channel::Receiver<ParsedBundle>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
-        mut workers: Vec<Worker>,
+        mut workers: Vec<WorkerAccess>,
         exit: Arc<AtomicBool>,
         successful_count: Arc<AtomicUsize>,
     ) {
@@ -221,7 +221,7 @@ impl JssExecutor {
         bundle_receiver: &crossbeam_channel::Receiver<ParsedBundle>,
         prio_graph: &mut prio_graph::PrioGraph<BundleSequenceId, Pubkey, C, D>,
         bundles: &mut Vec<Option<ParsedBundleWithId>>,
-        workers: &mut Vec<Worker>,
+        workers: &mut Vec<WorkerAccess>,
         metrics: &mut JssSchedulerMetrics,
     ) {
         if let Ok(bundle) = bundle_receiver.try_recv() {
@@ -248,11 +248,11 @@ impl JssExecutor {
     >(
         prio_graph: &mut prio_graph::PrioGraph<BundleSequenceId, Pubkey, C, D>,
         bundles: &mut Vec<Option<ParsedBundleWithId>>,
-        workers: &mut Vec<Worker>,
+        workers: &mut Vec<WorkerAccess>,
         metrics: &mut JssSchedulerMetrics,
     ) {
-        for (_, worker) in workers.iter_mut().enumerate().filter(|(_, w)| !w.is_full()) {
-            for bundle_id in worker.get_unblocking_bundles() {
+        for (_, worker) in workers.iter_mut().enumerate().filter(|(_, w)| !w.is_available()) {
+            if let Some(bundle_id) = worker.get_unblocking_bundle() {
                 prio_graph.unblock(&bundle_id);
             }
 
@@ -281,7 +281,7 @@ impl JssExecutor {
         block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
         bundle_account_locker: BundleAccountLocker,
         retry_bundle_sender: crossbeam_channel::Sender<[u8; 32]>,
-    ) -> (Vec<std::thread::JoinHandle<()>>, Vec<Worker>) {
+    ) -> (Vec<std::thread::JoinHandle<()>>, Vec<WorkerAccess>) {
         let mut threads = Vec::new();
         let mut workers = Vec::new();
         let last_tip_updated_slot = Arc::new(Mutex::new(0));
@@ -290,7 +290,7 @@ impl JssExecutor {
             let id = id + JSS_ID_OFFSET;
             let (sender, receiver) = crossbeam_channel::bounded(1);
             let (result_sender, result_receiver) = crossbeam_channel::bounded(1);
-            workers.push(Worker::new(sender, result_receiver));
+            workers.push(WorkerAccess::new(sender, result_receiver));
             let poh_recorder = poh_recorder.clone();
             let bundle_committer = bundle_committer.clone();
             let transaction_commiter = transaction_commiter.clone();
@@ -889,13 +889,13 @@ struct ParsedBundleWithId {
 }
 
 // Worker management struct for scheduling thread
-struct Worker {
+struct WorkerAccess {
     sender: crossbeam_channel::Sender<ParsedBundleWithId>,
-    in_flight: usize,
+    in_flight: bool,
     receiver: crossbeam_channel::Receiver<BundleSequenceId>,
 }
 
-impl Worker {
+impl WorkerAccess {
     /// Creates a new worker with the given sender.
     fn new(
         sender: crossbeam_channel::Sender<ParsedBundleWithId>,
@@ -903,40 +903,38 @@ impl Worker {
     ) -> Self {
         Self {
             sender,
-            in_flight: 0,
+            in_flight: false,
             receiver,
         }
     }
 
     /// Returns true if the worker's channel is currently full.
-    fn is_full(&self) -> bool {
+    fn is_available(&self) -> bool {
         self.sender.is_full()
     }
 
     /// Sends a bundle to the worker; while incrementing the in-flight count.
     fn send(&mut self, bundle: ParsedBundleWithId) -> bool {
         if let Ok(_) = self.sender.send(bundle) {
-            self.in_flight += 1;
+            self.in_flight = true;
             true
         } else {
             false
         }
     }
 
-    /// Gets the ids of bundles that have been picked up by the worker;
-    /// therefore opening the door for new transactions to be scheduled.
-    fn get_unblocking_bundles(&mut self) -> Vec<BundleSequenceId> {
-        let mut result = Vec::new();
-        while let Ok(ids) = self.receiver.try_recv() {
-            self.in_flight -= 1;
-            result.push(ids);
+    /// Gets the id of the bundle that the worker is done with
+    fn get_unblocking_bundle(&mut self) -> Option<BundleSequenceId> {
+        if let Ok(id) = self.receiver.try_recv() {
+            self.in_flight = false;
+            return Some(id);
         }
-        result
+        None
     }
 
     fn wait_til_finish(&mut self) {
-        while self.in_flight > 0 {
-            self.get_unblocking_bundles();
+        while self.in_flight {
+            self.get_unblocking_bundle();
         }
     }
 }

@@ -98,7 +98,7 @@ impl JssManager {
         prioritization_fee_cache: Arc<PrioritizationFeeCache>,
     ) {
         let (retry_bundle_sender, retry_bundle_receiver) = crossbeam_channel::bounded(10_000);
-        const WORKER_THREAD_COUNT: usize = 4;
+        const WORKER_THREAD_COUNT: usize = 8;
         let mut executor = JssExecutor::new(
             WORKER_THREAD_COUNT,
             poh_recorder.clone(),
