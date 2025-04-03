@@ -151,9 +151,18 @@ impl JssExecutor {
 
     // Serialize transactions from micro-block and send them to the scheduling thread
     pub fn schedule_bundle(&mut self, bank: &Bank, bundle: Bundle) -> bool {
+        if bundle.packets.is_empty() {
+            return false;
+        }
+
+        let transactions = Self::parse_transactions(bank, bundle.packets.iter());
+        if transactions.is_empty() {
+            return false;
+        }
+
         let parsed_bundle = ParsedBundle {
             revert_on_error: bundle.revert_on_error,
-            transactions: Self::parse_transactions(bank, bundle.packets.iter()),
+            transactions,
         };
         self.bundle_sender.try_send(parsed_bundle).is_ok()
     }
@@ -260,7 +269,11 @@ impl JssExecutor {
         workers: &mut Vec<WorkerAccess>,
         metrics: &mut JssSchedulerMetrics,
     ) {
-        for (_, worker) in workers.iter_mut().enumerate().filter(|(_, w)| !w.is_available()) {
+        for (_, worker) in workers
+            .iter_mut()
+            .enumerate()
+            .filter(|(_, w)| !w.is_available())
+        {
             if let Some(bundle_id) = worker.get_unblocking_bundle() {
                 prio_graph.unblock(&bundle_id);
             }
