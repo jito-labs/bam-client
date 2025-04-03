@@ -478,7 +478,7 @@ impl JssExecutor {
                 bundle_account_locker,
             )
         } else {
-            Self::execute_commit_record_transactions(
+            Self::execute_commit_record_transaction(
                 &bank_start.working_bank,
                 qos_service,
                 recorder,
@@ -633,7 +633,7 @@ impl JssExecutor {
         ExecutionResult::Success
     }
 
-    fn execute_commit_record_transactions(
+    fn execute_commit_record_transaction(
         bank: &Arc<Bank>,
         qos_service: &QosService,
         recorder: &TransactionRecorder,
@@ -641,6 +641,14 @@ impl JssExecutor {
         transactions: Vec<SanitizedTransaction>,
         bundle_account_locker: &BundleAccountLocker,
     ) -> ExecutionResult {
+        if transactions.len() != 0 {
+            error!(
+                "Error executing transaction: transactions should be of length 1, but got {}",
+                transactions.len()
+            );
+            return ExecutionResult::Failure;
+        }
+
         let (transaction_qos_cost_results, _) = qos_service
             .select_and_accumulate_transaction_costs(
                 bank,
