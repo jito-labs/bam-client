@@ -583,7 +583,7 @@ impl JssExecutor {
 
         let lock = bundle_account_locker.prepare_locked_bundle(&sanitized_bundle, bank);
         if lock.is_err() {
-            return ExecutionResult::Failure;
+            return ExecutionResult::Retryable;
         }
 
         // See if we have enough room in the block to execute the bundle
@@ -622,7 +622,11 @@ impl JssExecutor {
             bank,
         );
 
-        ExecutionResult::Success
+        if result.result.is_err() {
+            ExecutionResult::Failure
+        } else {
+            ExecutionResult::Success
+        }
     }
 
     fn execute_commit_record_transaction(
