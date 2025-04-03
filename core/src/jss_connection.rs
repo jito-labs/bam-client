@@ -92,13 +92,9 @@ impl JssConnection {
         metrics: Arc<JssConnectionMetrics>,
     ) {
         let mut heartbeat_interval = interval(std::time::Duration::from_secs(5));
-        heartbeat_interval.set_missed_tick_behavior(
-            tokio::time::MissedTickBehavior::Skip,
-        );
+        heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut metrics_interval = interval(std::time::Duration::from_secs(1));
-        metrics_interval.set_missed_tick_behavior(
-            tokio::time::MissedTickBehavior::Skip,
-        );
+        metrics_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 _ = heartbeat_interval.tick() => {

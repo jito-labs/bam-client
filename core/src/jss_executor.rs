@@ -447,8 +447,7 @@ impl JssExecutor {
                     .increment_process_transactions_us(process_transactions_us);
                 metrics
                     .leader_slot_metrics_tracker
-                .accumulate_process_transactions_summary(&result.summary);
-
+                    .accumulate_process_transactions_summary(&result.summary);
             }
 
             // Report slot metrics
@@ -612,7 +611,10 @@ impl JssExecutor {
 
         let lock = bundle_account_locker.prepare_locked_bundle(&sanitized_bundle, bank);
         if lock.is_err() {
-            return ExecutionResult { status: ExecutionStatus::Retryable, summary, }
+            return ExecutionResult {
+                status: ExecutionStatus::Retryable,
+                summary,
+            };
         }
 
         // See if we have enough room in the block to execute the bundle
@@ -627,7 +629,10 @@ impl JssExecutor {
         if skipped_count > 0 {
             summary.cost_model_throttled_transactions_count = skipped_count;
             QosService::remove_or_update_costs(transaction_qos_cost_results.iter(), None, bank);
-            return ExecutionResult { status: ExecutionStatus::Retryable, summary, }
+            return ExecutionResult {
+                status: ExecutionStatus::Retryable,
+                summary,
+            };
         }
 
         let result = BundleConsumer::execute_record_commit_bundle(
@@ -678,10 +683,7 @@ impl JssExecutor {
             ExecutionStatus::Success
         };
 
-        ExecutionResult {
-            status,
-            summary,
-        }
+        ExecutionResult { status, summary }
     }
 
     fn execute_commit_record_transaction(
@@ -716,7 +718,10 @@ impl JssExecutor {
                 "Error executing transaction: transactions should be of length 1, but got {}",
                 transactions.len()
             );
-            return ExecutionResult{ status: ExecutionStatus::Failure, summary };
+            return ExecutionResult {
+                status: ExecutionStatus::Failure,
+                summary,
+            };
         }
 
         let ((transaction_qos_cost_results, _), cost_model_elapsed_us) = measure_us!(qos_service
@@ -730,7 +735,10 @@ impl JssExecutor {
         if transaction_qos_cost_results.iter().any(|r| r.is_err()) {
             summary.cost_model_throttled_transactions_count = 1;
             QosService::remove_or_update_costs(transaction_qos_cost_results.iter(), None, bank);
-            return ExecutionResult{ status: ExecutionStatus::Retryable, summary };
+            return ExecutionResult {
+                status: ExecutionStatus::Retryable,
+                summary,
+            };
         }
 
         let bundle_account_locks = bundle_account_locker.account_locks();
@@ -787,12 +795,18 @@ impl JssExecutor {
             .is_some()
         {
             QosService::remove_or_update_costs(transaction_qos_cost_results.iter(), None, bank);
-            return ExecutionResult{ status: ExecutionStatus::Retryable, summary };
+            return ExecutionResult {
+                status: ExecutionStatus::Retryable,
+                summary,
+            };
         }
 
         if results.processed_counts.processed_transactions_count == 0 {
             QosService::remove_or_update_costs(transaction_qos_cost_results.iter(), None, bank);
-            return ExecutionResult{ status: ExecutionStatus::Failure, summary };
+            return ExecutionResult {
+                status: ExecutionStatus::Failure,
+                summary,
+            };
         }
 
         let freeze_lock = bank.freeze_lock();
@@ -820,7 +834,10 @@ impl JssExecutor {
                 summary.reached_max_poh_height = true;
             }
             QosService::remove_or_update_costs(transaction_qos_cost_results.iter(), None, bank);
-            return ExecutionResult{ status: ExecutionStatus::Retryable, summary };
+            return ExecutionResult {
+                status: ExecutionStatus::Retryable,
+                summary,
+            };
         }
 
         summary.transaction_counts.committed_transactions_count = 1;
@@ -858,13 +875,17 @@ impl JssExecutor {
 
         qos_service.report_metrics(bank.slot());
 
-        let status = if results.processed_counts.processed_with_successful_result_count == 1 {
+        let status = if results
+            .processed_counts
+            .processed_with_successful_result_count
+            == 1
+        {
             ExecutionStatus::Success
         } else {
             ExecutionStatus::Failure
         };
 
-        return ExecutionResult{ status, summary };
+        return ExecutionResult { status, summary };
     }
 
     fn bundle_touches_tip_pdas(bundle: &SanitizedBundle, tip_pdas: &HashSet<Pubkey>) -> bool {
@@ -988,7 +1009,7 @@ impl Default for ExecutionResult {
     fn default() -> Self {
         Self {
             status: ExecutionStatus::Failure,
-            summary: ProcessTransactionsSummary{
+            summary: ProcessTransactionsSummary {
                 reached_max_poh_height: false,
                 transaction_counts: CommittedTransactionsCounts {
                     attempted_processing_count: 0,
