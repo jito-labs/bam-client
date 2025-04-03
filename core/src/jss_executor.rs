@@ -109,6 +109,7 @@ impl JssExecutor {
                     worker_handles,
                     exit,
                     successful_count,
+                    retry_bundle_sender.clone(),
                 );
             })
             .unwrap();
@@ -164,6 +165,7 @@ impl JssExecutor {
         mut workers: Vec<WorkerAccess>,
         exit: Arc<AtomicBool>,
         successful_count: Arc<AtomicUsize>,
+        retry_bundle_sender: crossbeam_channel::Sender<[u8; 32]>,
     ) {
         info!("spawned management thread");
 
@@ -205,6 +207,13 @@ impl JssExecutor {
 
             for worker in workers.iter_mut() {
                 worker.wait_til_finish();
+            }
+
+            for bundle in bundles.iter_mut() {
+                if let Some(bundle) = bundle.take() {
+                    let bundle_id = Self::generate_bundle_id(&bundle.bundle.transactions);
+                    let _ = retry_bundle_sender.try_send(bundle_id);
+                }
             }
 
             metrics.report();
