@@ -51,12 +51,19 @@ use solana_transaction_status::PreBalanceInfo;
 
 use crate::{
     banking_stage::{
-        self, committer::CommitTransactionDetails,
+        self,
+        committer::CommitTransactionDetails,
         immutable_deserialized_packet::ImmutableDeserializedPacket,
-        leader_slot_metrics::LeaderSlotMetricsTracker,
-        leader_slot_timing_metrics::LeaderExecuteAndCommitTimings, qos_service::QosService,
+        leader_slot_metrics::{
+            CommittedTransactionsCounts, LeaderSlotMetricsTracker, ProcessTransactionsSummary,
+        },
+        leader_slot_timing_metrics::LeaderExecuteAndCommitTimings,
+        qos_service::QosService,
     },
-    bundle_stage::{self, bundle_account_locker::BundleAccountLocker, MAX_BUNDLE_RETRY_DURATION},
+    bundle_stage::{
+        self, bundle_account_locker::BundleAccountLocker, bundle_consumer::BundleConsumer,
+        MAX_BUNDLE_RETRY_DURATION,
+    },
     proxy::block_engine_stage::BlockBuilderFeeInfo,
     tip_manager::TipManager,
 };
@@ -493,7 +500,7 @@ impl JssExecutor {
             }
 
             Self::execute_commit_record_bundle(
-                &bank_start.working_bank,
+                &bank_start,
                 qos_service,
                 recorder,
                 bundle_committer,
@@ -526,7 +533,7 @@ impl JssExecutor {
             tip_manager.get_initialize_tip_programs_bundle(&bank_start.working_bank, keypair);
         if let Some(init_bundle) = initialize_tip_programs_bundle {
             if !Self::execute_commit_record_bundle(
-                &bank_start.working_bank,
+                &bank_start,
                 qos_service,
                 recorder,
                 bundle_committer,
@@ -547,7 +554,7 @@ impl JssExecutor {
         );
         if let Ok(Some(crank_bundle)) = tip_crank_bundle {
             if !Self::execute_commit_record_bundle(
-                &bank_start.working_bank,
+                &bank_start,
                 qos_service,
                 recorder,
                 bundle_committer,
@@ -565,14 +572,16 @@ impl JssExecutor {
     }
 
     fn execute_commit_record_bundle(
-        bank: &Arc<Bank>,
+        bank_start: &BankStart,
         qos_service: &QosService,
         recorder: &TransactionRecorder,
         committer: &mut bundle_stage::committer::Committer,
         sanitized_bundle: SanitizedBundle,
         bundle_account_locker: &BundleAccountLocker,
     ) -> ExecutionResult {
-        let lock = bundle_account_locker.prepare_locked_bundle(&sanitized_bundle, &bank);
+        let bank = &bank_start.working_bank;
+
+        let lock = bundle_account_locker.prepare_locked_bundle(&sanitized_bundle, bank);
         if lock.is_err() {
             return ExecutionResult::Failure;
         }
@@ -591,65 +600,25 @@ impl JssExecutor {
             return ExecutionResult::Retryable;
         }
 
-        // Execute the bundle
-        let default_accounts = vec![None; sanitized_bundle.transactions.len()];
-        let transaction_status_sender_enabled = committer.transaction_status_sender_enabled();
-        let mut bundle_execution_results = load_and_execute_bundle(
-            &bank,
-            &sanitized_bundle,
-            MAX_PROCESSING_AGE,
-            &MAX_BUNDLE_RETRY_DURATION,
-            transaction_status_sender_enabled,
+        let result = BundleConsumer::execute_record_commit_bundle(
+            committer,
+            recorder,
             &None,
-            false,
-            None,
-            &default_accounts,
-            &default_accounts,
-        );
-        if let Err(err) = bundle_execution_results.result() {
-            error!("Error executing bundle: {:?}", err);
-            QosService::remove_or_update_costs(transaction_qos_cost_results.iter(), None, bank);
-            return ExecutionResult::Failure;
-        }
-
-        // Record the transactions
-        let executed_batches = bundle_execution_results.executed_transaction_batches();
-        let freeze_lock = bank.freeze_lock();
-        let RecordTransactionsSummary {
-            result: record_transactions_result,
-            record_transactions_timings: _,
-            starting_transaction_index,
-        } = recorder.record_transactions(bank.slot(), executed_batches);
-        if record_transactions_result.is_err() {
-            QosService::remove_or_update_costs(transaction_qos_cost_results.iter(), None, bank);
-            return ExecutionResult::Retryable;
-        }
-
-        // Commit the transactions
-        let mut execute_and_commit_timings = LeaderExecuteAndCommitTimings::default();
-        let (_, commit_bundle_details) = committer.commit_bundle(
-            &mut bundle_execution_results,
-            starting_transaction_index,
-            &bank,
-            &mut execute_and_commit_timings,
+            MAX_BUNDLE_RETRY_DURATION,
+            &sanitized_bundle,
+            bank_start,
         );
 
-        // Drop the freeze lock
-        drop(freeze_lock);
-
-        let commit_transaction_details = commit_bundle_details
-            .commit_transaction_details
-            .into_iter()
-            .flat_map(|commit_details| {
-                commit_details
-                    .into_iter()
-                    .filter(|d| matches!(d, CommitTransactionDetails::Committed { .. }))
-            })
-            .collect();
+        let (cu, us) = result
+            .execute_and_commit_timings
+            .execute_timings
+            .accumulate_execute_units_and_time();
+        qos_service.accumulate_actual_execute_cu(cu);
+        qos_service.accumulate_actual_execute_time(us);
 
         QosService::remove_or_update_costs(
             transaction_qos_cost_results.iter(),
-            Some(&commit_transaction_details),
+            Some(&result.commit_transaction_details),
             bank,
         );
 
@@ -904,11 +873,11 @@ enum ExecutionResult {
 
 impl ExecutionResult {
     fn is_success(&self) -> bool {
-        matches!(self, Self::Success)
+        matches!(self, ExecutionResult::Success)
     }
 
     fn is_retryable(&self) -> bool {
-        matches!(self, Self::Retryable)
+        matches!(self, ExecutionResult::Retryable)
     }
 }
 
@@ -1032,10 +1001,9 @@ impl JssWorkerMetrics {
 
     // Either start new slot or report!
     fn leader_slot_action(&mut self, bank_start: Option<&BankStart>) {
-        let action = self.leader_slot_metrics_tracker.check_leader_slot_boundary(
-            bank_start,
-            None,
-        );
+        let action = self
+            .leader_slot_metrics_tracker
+            .check_leader_slot_boundary(bank_start, None);
         self.leader_slot_metrics_tracker.apply_action(action);
     }
 }
