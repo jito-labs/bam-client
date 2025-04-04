@@ -395,6 +395,7 @@ impl JssExecutor {
             let current_block_builder_fee_info = block_builder_fee_info.lock().unwrap().clone();
 
             // Start new slot metrics
+            let slot = current_bank_start.working_bank.slot();
             metrics.leader_slot_action(Some(&current_bank_start));
 
             while current_bank_start.should_working_bank_still_be_processing_txs() {
@@ -452,6 +453,7 @@ impl JssExecutor {
 
             // Report slot metrics
             metrics.leader_slot_action(None);
+            qos_service.report_metrics(slot);
         }
     }
 
@@ -664,7 +666,6 @@ impl JssExecutor {
             transaction_committed_status,
             bank,
         );
-        qos_service.report_metrics(bank.slot());
 
         let num_committed = result
             .commit_transaction_details
@@ -876,8 +877,6 @@ impl JssExecutor {
             Some(&commit_transactions_result),
             bank,
         );
-
-        qos_service.report_metrics(bank.slot());
 
         let status = if results
             .processed_counts
