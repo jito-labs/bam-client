@@ -155,7 +155,7 @@ impl JssConnection {
     }
 
     pub fn try_recv_bundle(&mut self) -> Option<Bundle> {
-        self.metrics.micro_block_polls.fetch_add(1, Relaxed);
+        self.metrics.bundle_polls.fetch_add(1, Relaxed);
         self.bundle_receiver.try_recv().ok()
     }
 
@@ -204,7 +204,7 @@ struct JssConnectionMetrics {
 
     leaderstate_sent: AtomicU64,
     heartbeat_sent: AtomicU64,
-    micro_block_polls: AtomicU64,
+    bundle_polls: AtomicU64,
 }
 
 impl JssConnectionMetrics {
@@ -242,8 +242,8 @@ impl JssConnectionMetrics {
                 i64
             ),
             (
-                "micro_block_polls",
-                self.micro_block_polls.swap(0, Relaxed) as i64,
+                "bundle_polls",
+                self.bundle_polls.swap(0, Relaxed) as i64,
                 i64
             ),
         );
