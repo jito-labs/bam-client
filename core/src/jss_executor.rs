@@ -654,9 +654,14 @@ impl JssExecutor {
         summary.execute_and_commit_timings = result.execute_and_commit_timings;
         summary.error_counters = result.transaction_error_counter;
 
+        let transaction_committed_status = if result.result.is_err() {
+            None
+        } else {
+            Some(&result.commit_transaction_details)
+        };
         QosService::remove_or_update_costs(
             transaction_qos_cost_results.iter(),
-            Some(&result.commit_transaction_details),
+            transaction_committed_status,
             bank,
         );
         qos_service.report_metrics(bank.slot());
