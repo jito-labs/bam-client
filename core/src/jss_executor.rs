@@ -279,11 +279,7 @@ impl JssExecutor {
         workers: &mut Vec<WorkerAccess>,
         metrics: &mut JssSchedulerMetrics,
     ) {
-        for (_, worker) in workers
-            .iter_mut()
-            .enumerate()
-            .filter(|(_, w)| !w.is_busy())
-        {
+        for (_, worker) in workers.iter_mut().enumerate().filter(|(_, w)| !w.is_busy()) {
             if let Some(bundle_id) = worker.get_unblocking_bundle() {
                 prio_graph.unblock(&bundle_id);
             }
