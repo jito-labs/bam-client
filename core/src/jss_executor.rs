@@ -790,7 +790,6 @@ impl JssExecutor {
                     result,
                     Err(TransactionError::WouldExceedMaxAccountCostLimit)
                         | Err(TransactionError::WouldExceedAccountDataBlockLimit)
-                        | Err(TransactionError::TooManyAccountLocks) // <- should not happen ever
                 )
             };
         if results
