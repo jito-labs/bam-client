@@ -60,10 +60,10 @@ pub struct UpdatedCosts {
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Debug)]
 pub struct CostTracker {
-    account_cost_limit: u64,
+    pub account_cost_limit: u64,
     block_cost_limit: u64,
     vote_cost_limit: u64,
-    cost_by_writable_accounts: HashMap<Pubkey, u64, ahash::RandomState>,
+    pub cost_by_writable_accounts: HashMap<Pubkey, u64, ahash::RandomState>,
     block_cost: u64,
     vote_cost: u64,
     transaction_count: Saturating<u64>,

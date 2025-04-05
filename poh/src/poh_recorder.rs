@@ -74,7 +74,7 @@ pub struct BankStart {
 }
 
 impl BankStart {
-    fn get_working_bank_if_not_expired(&self) -> Option<&Bank> {
+    pub fn get_working_bank_if_not_expired(&self) -> Option<&Bank> {
         if self.should_working_bank_still_be_processing_txs() {
             Some(&self.working_bank)
         } else {
@@ -375,6 +375,10 @@ impl PohRecorder {
         // tick heights [1..64] correspond to slot 0. The last tick height of a slot
         // is always a multiple of 64.
         tick_height.saturating_sub(1) / self.ticks_per_slot
+    }
+
+    pub fn get_current_slot(&self) -> Slot {
+        self.slot_for_tick_height(self.tick_height)
     }
 
     pub fn leader_after_n_slots(&self, slots: u64) -> Option<Pubkey> {
