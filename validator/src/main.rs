@@ -1012,6 +1012,7 @@ pub fn main() {
         )),
         preallocated_bundle_cost: value_of(&matches, "preallocated_bundle_cost")
             .expect("preallocated_bundle_cost set as default"),
+        jss_url: value_of(&matches, "jss_url"),
         ..ValidatorConfig::default()
     };
 
