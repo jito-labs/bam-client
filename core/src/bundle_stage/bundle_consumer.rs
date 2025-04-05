@@ -48,11 +48,11 @@ type ReserveBundleBlockspaceResult<'a> = BundleExecutionResult<(
 )>;
 
 pub struct ExecuteRecordCommitResult {
-    commit_transaction_details: Vec<CommitTransactionDetails>,
-    result: BundleExecutionResult<()>,
-    execution_metrics: BundleExecutionMetrics,
-    execute_and_commit_timings: LeaderExecuteAndCommitTimings,
-    transaction_error_counter: TransactionErrorMetrics,
+    pub commit_transaction_details: Vec<CommitTransactionDetails>,
+    pub result: BundleExecutionResult<()>,
+    pub execution_metrics: BundleExecutionMetrics,
+    pub execute_and_commit_timings: LeaderExecuteAndCommitTimings,
+    pub transaction_error_counter: TransactionErrorMetrics,
 }
 
 pub struct BundleConsumer {
@@ -559,7 +559,7 @@ impl BundleConsumer {
         }
     }
 
-    fn execute_record_commit_bundle(
+    pub fn execute_record_commit_bundle(
         committer: &Committer,
         recorder: &TransactionRecorder,
         log_messages_bytes_limit: &Option<usize>,
