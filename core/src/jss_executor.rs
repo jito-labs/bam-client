@@ -7,7 +7,6 @@
 // - When the working bank is no longer valid; the Prio-graph and mempool are drained. Thinking about a feedback loop for JSS to know it scheduled too much.
 
 use std::{
-    cmp::min,
     collections::HashSet,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
