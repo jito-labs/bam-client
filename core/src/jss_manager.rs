@@ -13,7 +13,7 @@ use std::{
 
 use jito_protos::proto::{
     jss_api::BuilderConfigResp,
-    jss_types::{AccountComputeUnitBudget, LeaderState, Socket},
+    jss_types::{AccountComputeUnitBudget, Bundle, LeaderState, Socket},
 };
 use solana_cost_model::block_cost_limits::MAX_BLOCK_UNITS;
 use solana_gossip::{
@@ -115,6 +115,7 @@ impl JssManager {
 
         let mut jss_connection: Option<JssConnection> = None;
         let mut builder_info = None;
+        let mut leader_slot_reusables = LeaderSlotReusables::default();
         let local_contact_info = cluster_info.my_contact_info();
 
         info!("JSS Manager started");
@@ -160,6 +161,7 @@ impl JssManager {
                     &mut executor,
                     TICK_LOOKAHEAD,
                     &retry_bundle_receiver,
+                    &mut leader_slot_reusables,
                 );
             } else {
                 std::thread::sleep(std::time::Duration::from_millis(5));
@@ -182,7 +184,10 @@ impl JssManager {
         executor: &mut JssExecutor,
         tick_lookahead: u64,
         retry_bundle_receiver: &crossbeam_channel::Receiver<[u8; 32]>,
+        leader_slot_reusables: &mut LeaderSlotReusables,
     ) {
+        leader_slot_reusables.clear();
+
         let current_slot = poh_recorder.read().unwrap().get_current_slot();
         let current_tick = poh_recorder.read().unwrap().tick_height()
             % poh_recorder.read().unwrap().ticks_per_slot();
@@ -193,13 +198,14 @@ impl JssManager {
             current_tick
         );
 
+        let mut buffered_bundles = &mut leader_slot_reusables.buffered_incoming_bundles;
+        let mut retryable_bundle_ids = &mut leader_slot_reusables.retryable_outgoing_bundle_ids;
+
         // Drain out the old micro-blocks and retryable bundle IDs
         // One of the annoying side-effects of re-using the channel between slots
         jss_connection.drain_bundles();
         retry_bundle_receiver.try_iter().for_each(|_| ());
 
-        let mut buffered_bundles = VecDeque::new();
-        let mut retryable_bundle_ids = Vec::new();
         let mut prev_tick = 0;
         while poh_recorder.read().unwrap().would_be_leader(tick_lookahead)
             && jss_connection.is_healthy()
@@ -382,5 +388,18 @@ impl JssManager {
             thread.join()?;
         }
         Ok(())
+    }
+}
+
+#[derive(Default)]
+struct LeaderSlotReusables {
+    buffered_incoming_bundles: VecDeque<Bundle>,
+    retryable_outgoing_bundle_ids: Vec<[u8; 32]>,
+}
+
+impl LeaderSlotReusables {
+    fn clear(&mut self) {
+        self.buffered_incoming_bundles.clear();
+        self.retryable_outgoing_bundle_ids.clear();
     }
 }
