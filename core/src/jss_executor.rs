@@ -1506,7 +1506,7 @@ mod tests {
 
         let (replay_vote_sender, _) = crossbeam_channel::unbounded();
         let (retry_bundle_sender, _) = crossbeam_channel::unbounded();
-        let keypair =  Arc::new(Keypair::new());
+        let keypair =  Arc::new(leader_keypair);
         let cluster_info = {
             let node = Node::new_localhost_with_pubkey(&keypair.pubkey());
             ClusterInfo::new(node.info, keypair.clone(), SocketAddrSpace::Unspecified)
