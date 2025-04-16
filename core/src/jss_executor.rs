@@ -928,7 +928,7 @@ impl JssExecutor {
                 let mut solana_packet = solana_sdk::packet::Packet::default();
                 solana_packet.meta_mut().size = packet.data.len() as usize;
                 solana_packet.meta_mut().set_discard(false);
-                solana_packet.buffer_mut()[0..packet.data.len()].copy_from_slice(&packet.data);
+                solana_packet.buffer_mut()[0..].copy_from_slice(&packet.data);
                 if let Some(meta) = &packet.meta {
                     solana_packet.meta_mut().size = meta.size as usize;
                     if let Some(addr) = &meta.addr.parse().ok() {
