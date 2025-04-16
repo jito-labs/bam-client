@@ -959,7 +959,7 @@ impl JssExecutor {
                 }
                 let packet = ImmutableDeserializedPacket::new(solana_packet).ok()?;
                 let sanitized_transaction = packet.build_sanitized_transaction(
-                    false,
+                    bank.vote_only_bank(),
                     bank,
                     bank.get_reserved_account_keys(),
                 )?;
