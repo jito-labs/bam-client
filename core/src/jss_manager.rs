@@ -107,7 +107,7 @@ impl JssManager {
             prioritization_fee_cache,
             tip_manager,
             exit.clone(),
-            cluster_info.keypair().to_owned(),
+            cluster_info.clone(),
             block_builder_fee_info.clone(),
             bundle_account_locker,
             retry_bundle_sender,

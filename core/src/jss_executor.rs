@@ -23,6 +23,7 @@ use solana_bundle::{
     derive_bundle_id_from_sanitized_transactions, BundleExecutionError, SanitizedBundle,
 };
 use solana_compute_budget_instruction::instructions_processor::process_compute_budget_instructions;
+use solana_gossip::cluster_info::ClusterInfo;
 use solana_ledger::{
     blockstore_processor::TransactionStatusSender, token_balances::collect_token_balances,
 };
@@ -83,7 +84,7 @@ impl JssExecutor {
         prioritization_fee_cache: Arc<PrioritizationFeeCache>,
         tip_manager: TipManager,
         exit: Arc<AtomicBool>,
-        keypair: Arc<Keypair>,
+        cluster_info: Arc<ClusterInfo>,
         block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
         bundle_account_locker: BundleAccountLocker,
         retry_bundle_sender: crossbeam_channel::Sender<[u8; 32]>,
@@ -103,7 +104,7 @@ impl JssExecutor {
             exit.clone(),
             tip_manager.clone(),
             successful_count.clone(),
-            keypair,
+            cluster_info,
             block_builder_fee_info,
             bundle_account_locker,
             retry_bundle_sender.clone(),
@@ -306,7 +307,7 @@ impl JssExecutor {
         exit: Arc<AtomicBool>,
         tip_manager: TipManager,
         successful_count: Arc<AtomicUsize>,
-        keypair: Arc<Keypair>,
+        cluster_info: Arc<ClusterInfo>,
         block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
         bundle_account_locker: BundleAccountLocker,
         retry_bundle_sender: crossbeam_channel::Sender<[u8; 32]>,
@@ -326,7 +327,7 @@ impl JssExecutor {
             let exit = exit.clone();
             let tip_manager = tip_manager.clone();
             let successful_count = successful_count.clone();
-            let keypair = keypair.clone();
+            let cluster_info = cluster_info.clone();
             let last_tip_updated_slot = last_tip_updated_slot.clone();
             let block_builder_fee_info = block_builder_fee_info.clone();
             let bundle_account_locker = bundle_account_locker.clone();
@@ -345,7 +346,7 @@ impl JssExecutor {
                             exit,
                             tip_manager,
                             successful_count,
-                            keypair,
+                            cluster_info,
                             last_tip_updated_slot,
                             block_builder_fee_info,
                             bundle_account_locker,
@@ -369,7 +370,7 @@ impl JssExecutor {
         exit: Arc<AtomicBool>,
         tip_manager: TipManager,
         successful_count: Arc<AtomicUsize>,
-        keypair: Arc<Keypair>,
+        cluster_info: Arc<ClusterInfo>,
         last_tip_updated_slot: Arc<Mutex<u64>>,
         block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
         bundle_account_locker: BundleAccountLocker,
@@ -417,7 +418,7 @@ impl JssExecutor {
                     revert_on_error,
                     txns,
                     &tip_manager,
-                    &keypair,
+                    &cluster_info,
                     &last_tip_updated_slot,
                     &current_block_builder_fee_info,
                     &bundle_account_locker,
@@ -476,7 +477,7 @@ impl JssExecutor {
         revert_on_error: bool,
         transactions: Vec<RuntimeTransaction<SanitizedTransaction>>,
         tip_manager: &TipManager,
-        keypair: &Keypair,
+        cluster_info: &ClusterInfo,
         last_tip_updated_slot: &Mutex<u64>,
         block_builder_fee_info: &BlockBuilderFeeInfo,
         bundle_account_locker: &BundleAccountLocker,
@@ -497,7 +498,7 @@ impl JssExecutor {
                         &recorder,
                         bundle_committer,
                         tip_manager,
-                        keypair,
+                        &cluster_info.keypair(),
                         block_builder_fee_info,
                         bundle_account_locker,
                     ) {
