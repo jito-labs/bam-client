@@ -898,7 +898,10 @@ impl JssExecutor {
         })
     }
 
-    fn get_min_max_fees(bank: &Bank, transactions: &[RuntimeTransaction<SanitizedTransaction>]) -> (u64, u64) {
+    fn get_min_max_fees(
+        bank: &Bank,
+        transactions: &[RuntimeTransaction<SanitizedTransaction>],
+    ) -> (u64, u64) {
         let min_max = transactions
             .iter()
             .filter_map(|transaction| {
