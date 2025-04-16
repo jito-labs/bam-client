@@ -311,27 +311,28 @@ impl JssManager {
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         cluster_info: &Arc<ClusterInfo>,
     ) -> bool {
-        // If we have no connection object; start from scratch
-        if jss_connection.is_none() {
-            *jss_connection = runtime.block_on(JssConnection::try_init(
+        if let Some(mut current_jss_connection) = jss_connection.take() {
+            if current_jss_connection.is_healthy() {
+                jss_connection.replace(current_jss_connection);
+                true
+            } else {
+                *jss_connection = None;
+                info!("JSS connection is unhealthy; closing connection");
+                false
+            }
+        } else {
+            if let Some(current_jss_connection) = runtime.block_on(JssConnection::try_init(
                 jss_url.clone(),
                 poh_recorder.clone(),
                 cluster_info.clone(),
-            ));
-            if jss_connection.is_none() {
-                return false;
+            )) {
+                jss_connection.replace(current_jss_connection);
+                info!("JSS connection initialized to url={}", jss_url);
+                true
+            } else {
+                false
             }
-            info!("JSS connection initialized to url={}", jss_url);
         }
-
-        // If the object is unhealthy; delete it
-        if !jss_connection.as_mut().unwrap().is_healthy() {
-            info!("JSS connection is unhealthy; closing connection");
-            *jss_connection = None;
-            return false;
-        }
-
-        true
     }
 
     fn revert_tpu_config(cluster_info: &Arc<ClusterInfo>, local_contact_info: &ContactInfo) {
