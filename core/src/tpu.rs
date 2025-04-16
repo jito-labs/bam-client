@@ -1,7 +1,7 @@
 //! The `tpu` module implements the Transaction Processing Unit, a
 //! multi-stage transaction processing pipeline in software.
 
-use crate::jss_manager::JssManager;
+use crate::jss_stage::JssStage;
 pub use solana_sdk::net::DEFAULT_TPU_COALESCE;
 // allow multiple connections for NAT and any open/close overlap
 #[deprecated(
@@ -112,7 +112,7 @@ pub struct Tpu {
     block_engine_stage: BlockEngineStage,
     fetch_stage_manager: FetchStageManager,
     bundle_stage: BundleStage,
-    jss_manager: Option<JssManager>,
+    jss_manager: Option<JssStage>,
 }
 
 impl Tpu {
@@ -420,7 +420,7 @@ impl Tpu {
         let jss_manager = jss_enabled
             .load(std::sync::atomic::Ordering::SeqCst)
             .then(|| {
-                JssManager::new(
+                JssStage::new(
                     jss_url.unwrap(),
                     jss_enabled,
                     poh_recorder.clone(),
