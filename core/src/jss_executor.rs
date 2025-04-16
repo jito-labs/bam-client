@@ -7,12 +7,10 @@
 // - When the working bank is no longer valid; the Prio-graph and mempool are drained. Thinking about a feedback loop for JSS to know it scheduled too much.
 
 use std::{
-    collections::HashSet,
-    sync::{
+    cmp::min, collections::HashSet, sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex, RwLock,
-    },
-    time::Duration,
+    }, time::Duration
 };
 
 use itertools::Itertools;
@@ -38,7 +36,7 @@ use solana_runtime::{
 use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
 use solana_sdk::{
     clock::MAX_PROCESSING_AGE,
-    packet::PacketFlags,
+    packet::{PacketFlags, PACKET_DATA_SIZE},
     pubkey::Pubkey,
     signature::Keypair,
     transaction::{SanitizedTransaction, TransactionError},
@@ -925,6 +923,10 @@ impl JssExecutor {
     ) -> Vec<RuntimeTransaction<SanitizedTransaction>> {
         packets
             .filter_map(|packet| {
+                if packet.data.len() > PACKET_DATA_SIZE {
+                    return None;
+                }
+
                 let mut solana_packet = solana_sdk::packet::Packet::default();
                 solana_packet.meta_mut().size = packet.data.len() as usize;
                 solana_packet.meta_mut().set_discard(false);
