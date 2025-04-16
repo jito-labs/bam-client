@@ -1417,6 +1417,7 @@ mod tests {
             Arc::new(Mutex::new(BlockBuilderFeeInfo::default())),
             BundleAccountLocker::default(),
             retry_bundle_sender,
+            Arc::new(AtomicBool::new(false)),
         );
 
         let successful_bundle = Bundle {
@@ -1521,6 +1522,7 @@ mod tests {
             })),
             BundleAccountLocker::default(),
             retry_bundle_sender,
+            Arc::new(AtomicBool::new(false)),
         );
 
         let tip_accounts = tip_manager.get_tip_accounts();

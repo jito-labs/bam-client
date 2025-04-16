@@ -33,12 +33,12 @@ use crate::{
     tip_manager::TipManager,
 };
 
-pub(crate) struct JssManager {
+pub(crate) struct JssStage {
     threads: Vec<std::thread::JoinHandle<()>>,
 }
 
 // Runs based on timeouts and messages received from the JSS block engine
-impl JssManager {
+impl JssStage {
     // Create and run a new instance of the JSS Manager
     pub fn new(
         jss_url: String,
