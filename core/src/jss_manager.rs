@@ -52,7 +52,6 @@ impl JssManager {
         tip_manager: TipManager,
         bundle_account_locker: BundleAccountLocker,
     ) -> Self {
-        let block_builder_fee_info = Arc::new(Mutex::new(BlockBuilderFeeInfo::default()));
         let api_connection_thread = Builder::new()
             .name("jss-manager".to_string())
             .spawn(move || {
@@ -67,7 +66,6 @@ impl JssManager {
                     exit,
                     poh_recorder,
                     cluster_info,
-                    block_builder_fee_info,
                     tip_manager,
                     bundle_account_locker,
                     replay_vote_sender,
@@ -90,13 +88,13 @@ impl JssManager {
         exit: Arc<AtomicBool>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         cluster_info: Arc<ClusterInfo>,
-        block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
         tip_manager: TipManager,
         bundle_account_locker: BundleAccountLocker,
         replay_vote_sender: ReplayVoteSender,
         transaction_status_sender: Option<TransactionStatusSender>,
         prioritization_fee_cache: Arc<PrioritizationFeeCache>,
     ) {
+        let block_builder_fee_info = Arc::new(Mutex::new(BlockBuilderFeeInfo::default()));
         let (retry_bundle_sender, retry_bundle_receiver) = crossbeam_channel::bounded(10_000);
         const WORKER_THREAD_COUNT: usize = 4;
         let mut executor = JssExecutor::new(
@@ -198,7 +196,7 @@ impl JssManager {
             current_tick
         );
 
-        let mut buffered_bundles = &mut leader_slot_reusables.buffered_incoming_bundles;
+        let buffered_bundles = &mut leader_slot_reusables.buffered_incoming_bundles;
         let mut retryable_bundle_ids = &mut leader_slot_reusables.retryable_outgoing_bundle_ids;
 
         // Drain out the old micro-blocks and retryable bundle IDs
