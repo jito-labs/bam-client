@@ -140,7 +140,9 @@ impl JssConnection {
                             metrics.heartbeat_received.fetch_add(1, Relaxed);
                         }
                         StartSchedulerResponse { resp: Some(Resp::Bundle(bundle)), .. } => {
-                            let _ = bundle_sender.send(bundle);
+                            let _ = bundle_sender.try_send(bundle).inspect_err(|_| {
+                                error!("Failed to send bundle to receiver");
+                            });
                             metrics.bundle_received.fetch_add(1, Relaxed);
                         }
                         _ => {}
