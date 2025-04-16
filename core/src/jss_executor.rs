@@ -1183,6 +1183,7 @@ mod tests {
     use crossbeam_channel::Receiver;
     use jito_protos::proto::jss_types::{self, Bundle};
     use jito_tip_distribution::sdk::derive_tip_distribution_account_address;
+    use solana_gossip::cluster_info::{ClusterInfo, Node};
     use solana_ledger::{
         blockstore::Blockstore, genesis_utils::GenesisConfigInfo, get_tmp_ledger_path_auto_delete,
         leader_schedule_cache::LeaderScheduleCache,
@@ -1209,6 +1210,7 @@ mod tests {
         system_transaction::transfer,
         transaction::VersionedTransaction,
     };
+    use solana_streamer::socket::SocketAddrSpace;
     use solana_vote_program::vote_state::VoteState;
 
     use crate::{
@@ -1399,6 +1401,13 @@ mod tests {
 
         let (replay_vote_sender, _) = crossbeam_channel::unbounded();
         let (retry_bundle_sender, _) = crossbeam_channel::unbounded();
+        let keypair =  Arc::new(Keypair::new());
+        let cluster_info = {
+            let node = Node::new_localhost_with_pubkey(&keypair.pubkey());
+            ClusterInfo::new(node.info, keypair.clone(), SocketAddrSpace::Unspecified)
+        };
+        let cluster_info = Arc::new(cluster_info);
+
 
         let mut executor = super::JssExecutor::new(
             1,
@@ -1408,11 +1417,10 @@ mod tests {
             Arc::new(PrioritizationFeeCache::default()),
             TipManager::new(TipManagerConfig::default()),
             exit.clone(),
-            Arc::new(Keypair::new()),
+            cluster_info,
             Arc::new(Mutex::new(BlockBuilderFeeInfo::default())),
             BundleAccountLocker::default(),
             retry_bundle_sender,
-            Arc::new(AtomicBool::new(false)),
         );
 
         let successful_bundle = Bundle {
@@ -1498,7 +1506,12 @@ mod tests {
 
         let (replay_vote_sender, _) = crossbeam_channel::unbounded();
         let (retry_bundle_sender, _) = crossbeam_channel::unbounded();
-        let keypair = Arc::new(leader_keypair);
+        let keypair =  Arc::new(Keypair::new());
+        let cluster_info = {
+            let node = Node::new_localhost_with_pubkey(&keypair.pubkey());
+            ClusterInfo::new(node.info, keypair.clone(), SocketAddrSpace::Unspecified)
+        };
+        let cluster_info = Arc::new(cluster_info);
         let block_builder_pubkey = Pubkey::new_unique();
 
         let tip_manager = get_tip_manager(&genesis_config_info.voting_keypair.pubkey());
@@ -1510,14 +1523,13 @@ mod tests {
             Arc::new(PrioritizationFeeCache::default()),
             tip_manager.clone(),
             exit.clone(),
-            keypair.clone(),
+            cluster_info,
             Arc::new(Mutex::new(BlockBuilderFeeInfo {
                 block_builder: block_builder_pubkey.clone(),
                 block_builder_commission: 5,
             })),
             BundleAccountLocker::default(),
             retry_bundle_sender,
-            Arc::new(AtomicBool::new(false)),
         );
 
         let tip_accounts = tip_manager.get_tip_accounts();
