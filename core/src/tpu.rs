@@ -431,6 +431,7 @@ impl Tpu {
                     prioritization_fee_cache.clone(),
                     tip_manager.clone(),
                     bundle_account_locker,
+                    bank_forks.read().unwrap().get_vote_only_mode_signal(),
                 )
             });
 

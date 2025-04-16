@@ -72,6 +72,7 @@ use crate::{
 
 pub struct JssExecutor {
     bundle_sender: crossbeam_channel::Sender<ParsedBundle>,
+    in_vote_only_mode: Arc<AtomicBool>,
     threads: Vec<std::thread::JoinHandle<()>>,
 }
 
@@ -88,6 +89,7 @@ impl JssExecutor {
         block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
         bundle_account_locker: BundleAccountLocker,
         retry_bundle_sender: crossbeam_channel::Sender<[u8; 32]>,
+        in_vote_only_mode: Arc<AtomicBool>,
     ) -> Self {
         let (bundle_committer, transaction_commiter) = Self::build_committers(
             replay_vote_sender.clone(),
@@ -128,6 +130,7 @@ impl JssExecutor {
 
         Self {
             bundle_sender,
+            in_vote_only_mode,
             threads: std::iter::once(manager_thread)
                 .chain(worker_threads)
                 .collect(),
@@ -167,7 +170,8 @@ impl JssExecutor {
             return false;
         }
 
-        let transactions = Self::parse_transactions(bank, bundle.packets.iter());
+        let in_vote_only_mode = self.in_vote_only_mode.load(Ordering::Relaxed);
+        let transactions = Self::parse_transactions(bank, bundle.packets.iter(), in_vote_only_mode);
         if transactions.len() != bundle.packets.len() {
             return false;
         }
@@ -922,6 +926,7 @@ impl JssExecutor {
     fn parse_transactions<'a>(
         bank: &Bank,
         packets: impl Iterator<Item = &'a Packet>,
+        in_vote_only_mode: bool,
     ) -> Vec<RuntimeTransaction<SanitizedTransaction>> {
         packets
             .filter_map(|packet| {
@@ -959,7 +964,7 @@ impl JssExecutor {
                 }
                 let packet = ImmutableDeserializedPacket::new(solana_packet).ok()?;
                 let sanitized_transaction = packet.build_sanitized_transaction(
-                    false,
+                    in_vote_only_mode,
                     bank,
                     bank.get_reserved_account_keys(),
                 )?;
