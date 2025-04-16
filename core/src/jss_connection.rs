@@ -1,7 +1,10 @@
 // Maintains a connection to the JSS Node and handles sending and receiving messages
 // Keeps track of last received heartbeat 'behind the scenes' and will mark itself as unhealthy if no heartbeat is received
 
-use std::sync::{atomic::AtomicU64, Arc, Mutex, RwLock};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64},
+    Arc, Mutex, RwLock,
+};
 
 use crossbeam_channel::Receiver;
 use futures::{channel::mpsc, StreamExt};
@@ -21,11 +24,11 @@ use tokio::time::{interval, timeout};
 
 pub struct JssConnection {
     outbound_sender: mpsc::Sender<StartSchedulerMessage>,
-    last_heartbeat: Arc<Mutex<std::time::Instant>>,
     builder_config: Arc<Mutex<Option<BuilderConfigResp>>>,
     bundle_receiver: Receiver<Bundle>,
     background_task: tokio::task::JoinHandle<()>,
     metrics: Arc<JssConnectionMetrics>,
+    is_healthy: Arc<AtomicBool>,
 }
 
 impl JssConnection {
@@ -55,28 +58,28 @@ impl JssConnection {
             .into_inner();
 
         let metrics = Arc::new(JssConnectionMetrics::default());
+        let is_healthy = Arc::new(AtomicBool::new(false));
 
-        let last_heartbeat = Arc::new(Mutex::new(std::time::Instant::now()));
         let (bundle_sender, bundle_receiver) = crossbeam_channel::bounded(100_000);
         let background_task = tokio::spawn(Self::background_task(
             inbound_stream,
             outbound_sender.clone(),
             validator_client,
-            last_heartbeat.clone(),
             builder_config.clone(),
             bundle_sender,
             poh_recorder,
             cluster_info,
             metrics.clone(),
+            is_healthy.clone(),
         ));
 
         Some(Self {
             outbound_sender,
-            last_heartbeat,
             builder_config,
             background_task,
             bundle_receiver,
             metrics,
+            is_healthy,
         })
     }
 
@@ -84,17 +87,19 @@ impl JssConnection {
         mut inbound_stream: tonic::Streaming<StartSchedulerResponse>,
         mut outbound_sender: mpsc::Sender<StartSchedulerMessage>,
         mut validator_client: JssNodeApiClient<tonic::transport::channel::Channel>,
-        last_heartbeat_clone: Arc<Mutex<std::time::Instant>>,
         builder_config: Arc<Mutex<Option<BuilderConfigResp>>>,
         bundle_sender: crossbeam_channel::Sender<Bundle>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         cluster_info: Arc<ClusterInfo>,
         metrics: Arc<JssConnectionMetrics>,
+        is_healthy: Arc<AtomicBool>,
     ) {
+        let mut last_heartbeat = std::time::Instant::now();
         let mut heartbeat_interval = interval(std::time::Duration::from_secs(5));
         heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut metrics_interval = interval(std::time::Duration::from_secs(1));
-        metrics_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut metrics_and_health_check_interval = interval(std::time::Duration::from_secs(1));
+        metrics_and_health_check_interval
+            .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 _ = heartbeat_interval.tick() => {
@@ -112,7 +117,16 @@ impl JssConnection {
                     *builder_config.lock().unwrap() = Some(resp.into_inner());
                     metrics.builder_config_received.fetch_add(1, Relaxed);
                 }
-                _ = metrics_interval.tick() => {
+                _ = metrics_and_health_check_interval.tick() => {
+                    const TIMEOUT_DURATION: std::time::Duration = std::time::Duration::from_secs(6);
+                    let is_healthy_now = last_heartbeat.elapsed() < TIMEOUT_DURATION;
+                    is_healthy.store(is_healthy_now, Relaxed);
+                    if !is_healthy_now {
+                        metrics
+                            .unhealthy_connection_count
+                            .fetch_add(1, Relaxed);
+                    }
+
                     metrics.report();
                 }
                 inbound = inbound_stream.message() => {
@@ -122,7 +136,7 @@ impl JssConnection {
 
                     match inbound {
                         StartSchedulerResponse { resp: Some(Resp::HeartBeat(_)), .. } => {
-                            *last_heartbeat_clone.lock().unwrap() = std::time::Instant::now();
+                            last_heartbeat = std::time::Instant::now();
                             metrics.heartbeat_received.fetch_add(1, Relaxed);
                         }
                         StartSchedulerResponse { resp: Some(Resp::Bundle(bundle)), .. } => {
@@ -173,14 +187,7 @@ impl JssConnection {
     }
 
     pub fn is_healthy(&mut self) -> bool {
-        const TIMEOUT_DURATION: std::time::Duration = std::time::Duration::from_secs(6);
-        let is_healthy = self.last_heartbeat.lock().unwrap().elapsed() < TIMEOUT_DURATION;
-        if !is_healthy {
-            self.metrics
-                .unhealthy_connection_count
-                .fetch_add(1, Relaxed);
-        }
-        is_healthy
+        self.is_healthy.load(Relaxed)
     }
 
     pub fn get_builder_config(&self) -> Option<BuilderConfigResp> {
