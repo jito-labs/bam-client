@@ -51,7 +51,6 @@ impl JssStage {
         prioritization_fee_cache: Arc<PrioritizationFeeCache>,
         tip_manager: TipManager,
         bundle_account_locker: BundleAccountLocker,
-        in_vote_only_mode: Arc<AtomicBool>,
     ) -> Self {
         let api_connection_thread = Builder::new()
             .name("jss-manager".to_string())
@@ -72,7 +71,6 @@ impl JssStage {
                     replay_vote_sender,
                     transaction_status_sender,
                     prioritization_fee_cache,
-                    in_vote_only_mode,
                 );
             })
             .unwrap();
@@ -95,7 +93,6 @@ impl JssStage {
         replay_vote_sender: ReplayVoteSender,
         transaction_status_sender: Option<TransactionStatusSender>,
         prioritization_fee_cache: Arc<PrioritizationFeeCache>,
-        in_vote_only_mode: Arc<AtomicBool>,
     ) {
         let block_builder_fee_info = Arc::new(Mutex::new(BlockBuilderFeeInfo::default()));
         let (retry_bundle_sender, retry_bundle_receiver) = crossbeam_channel::bounded(10_000);
@@ -112,7 +109,6 @@ impl JssStage {
             block_builder_fee_info.clone(),
             bundle_account_locker,
             retry_bundle_sender,
-            in_vote_only_mode,
         );
 
         let mut jss_connection: Option<JssConnection> = None;
