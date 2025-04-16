@@ -167,7 +167,7 @@ impl JssExecutor {
         }
 
         let transactions = Self::parse_transactions(bank, bundle.packets.iter());
-        if transactions.is_empty() {
+        if transactions.len() != bundle.packets.len() {
             return false;
         }
 
