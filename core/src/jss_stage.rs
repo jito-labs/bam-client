@@ -4,7 +4,6 @@
 /// - Executing the received bundles
 /// - Disabling JSS and re-enabling standard txn processing when health check fails
 use std::{
-    collections::VecDeque,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     str::FromStr,
     sync::{atomic::AtomicBool, Arc, Mutex, RwLock},
@@ -13,12 +12,12 @@ use std::{
 
 use jito_protos::proto::{
     jss_api::BuilderConfigResp,
-    jss_types::{AccountComputeUnitBudget, Bundle, LeaderState, Socket},
+    jss_types::{AccountComputeUnitBudget, LeaderState, Socket},
 };
 use solana_cost_model::block_cost_limits::MAX_BLOCK_UNITS;
 use solana_gossip::cluster_info::ClusterInfo;
 use solana_ledger::blockstore_processor::TransactionStatusSender;
-use solana_poh::poh_recorder::PohRecorder;
+use solana_poh::poh_recorder::{BankStart, PohRecorder};
 use solana_runtime::{
     prioritization_fee_cache::PrioritizationFeeCache, vote_sender_types::ReplayVoteSender,
 };
@@ -153,7 +152,6 @@ impl JssStage {
                     &mut jss_connection,
                     &poh_recorder,
                     &mut executor,
-                    TICK_LOOKAHEAD,
                     &retry_bundle_receiver,
                     &mut leader_slot_reusables,
                 );
@@ -176,7 +174,6 @@ impl JssStage {
         jss_connection: &mut JssConnection,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         executor: &mut JssExecutor,
-        tick_lookahead: u64,
         retry_bundle_receiver: &crossbeam_channel::Receiver<[u8; 32]>,
         leader_slot_reusables: &mut LeaderSlotReusables,
     ) {
@@ -191,7 +188,6 @@ impl JssStage {
         );
 
         leader_slot_reusables.clear();
-        let buffered_bundles = &mut leader_slot_reusables.buffered_incoming_bundles;
         let mut retryable_bundle_ids = &mut leader_slot_reusables.retryable_outgoing_bundle_ids;
 
         // Drain out the old micro-blocks and retryable bundle IDs
@@ -202,41 +198,49 @@ impl JssStage {
         // Since this function is triggered ahead of the leader slot
         // Let's send an initial leader state (that might exclude information from a real bank
         // since a bank may not be available yet)
-        let leader_state = Self::generate_leader_state(poh_recorder, &mut retryable_bundle_ids);
+        let leader_state =
+            Self::generate_leader_state(current_slot, None, &mut retryable_bundle_ids);
         jss_connection.send_leader_state(leader_state);
 
+        // Wait up to 400ms for a bank_start
+        let mut bank_start = None;
+        let start = std::time::Instant::now();
+        while start.elapsed().as_millis() < 400 {
+            if let Some(acquired_bank_start) = poh_recorder.read().unwrap().bank_start() {
+                bank_start = Some(acquired_bank_start);
+                break;
+            }
+        }
+        let Some(bank_start) = bank_start else {
+            info!("No bank start available after wait; skipping leader slot mode");
+            return;
+        };
+
         let mut prev_tick = 0;
-        while poh_recorder.read().unwrap().would_be_leader(tick_lookahead)
+        while bank_start.should_working_bank_still_be_processing_txs()
             && jss_connection.is_healthy()
         {
             // Send leader state every tick
             let current_tick = poh_recorder.read().unwrap().tick_height();
             if current_tick != prev_tick {
                 prev_tick = current_tick;
-                let leader_state =
-                    Self::generate_leader_state(poh_recorder, &mut retryable_bundle_ids);
+                let current_slot = poh_recorder.read().unwrap().get_current_slot();
+                let leader_state = Self::generate_leader_state(
+                    current_slot,
+                    Some(&bank_start),
+                    &mut retryable_bundle_ids,
+                );
                 jss_connection.send_leader_state(leader_state);
             }
 
             // Receive micro-blocks
             while let Some(bundle) = jss_connection.try_recv_bundle() {
-                buffered_bundles.push_back(bundle);
+                executor.schedule_bundle(bundle);
             }
 
             // Receive retryable bundle IDs
             while let Ok(bundle_id) = retry_bundle_receiver.try_recv() {
                 retryable_bundle_ids.push(bundle_id);
-            }
-
-            // If possible; schedule the micro-blocks
-            let Some(bank_start) = poh_recorder.read().unwrap().bank_start() else {
-                continue;
-            };
-            if !bank_start.should_working_bank_still_be_processing_txs() {
-                continue;
-            }
-            while let Some(bundle) = buffered_bundles.pop_front() {
-                executor.schedule_bundle(bundle);
             }
         }
     }
@@ -247,11 +251,12 @@ impl JssStage {
     /// - Retryable bundle IDs are cleared after being included in a leader state
     /// - Slot CU budget accurately reflects remaining compute units
     fn generate_leader_state(
-        poh_recorder: &Arc<RwLock<PohRecorder>>,
+        current_slot: u64,
+        bank_start: Option<&BankStart>,
         retryable_bundle_ids: &mut Vec<[u8; 32]>,
     ) -> LeaderState {
-        if let Some(bank_start) = poh_recorder.read().unwrap().bank_start() {
-            let bank = bank_start.working_bank;
+        if let Some(bank_start) = bank_start {
+            let bank = bank_start.working_bank.as_ref();
             let max_block_cu = bank.read_cost_tracker().unwrap().block_cost_limit();
             let consumed_block_cu = bank.read_cost_tracker().unwrap().block_cost();
             let slot_cu_budget = max_block_cu.saturating_sub(consumed_block_cu) as u32;
@@ -290,10 +295,8 @@ impl JssStage {
                     .collect(),
             };
         } else {
-            let current_slot = poh_recorder.read().unwrap().get_current_slot();
-            let in_leader_slot = poh_recorder.read().unwrap().would_be_leader(0);
             return LeaderState {
-                slot: current_slot + if in_leader_slot { 0 } else { 1 },
+                slot: current_slot + 1,
                 tick: 0,
                 slot_cu_budget: MAX_BLOCK_UNITS as u32,
                 slot_account_cu_budget: vec![],
@@ -380,13 +383,11 @@ impl JssStage {
 
 #[derive(Default)]
 struct LeaderSlotReusables {
-    buffered_incoming_bundles: VecDeque<Bundle>,
     retryable_outgoing_bundle_ids: Vec<[u8; 32]>,
 }
 
 impl LeaderSlotReusables {
     fn clear(&mut self) {
-        self.buffered_incoming_bundles.clear();
         self.retryable_outgoing_bundle_ids.clear();
     }
 }

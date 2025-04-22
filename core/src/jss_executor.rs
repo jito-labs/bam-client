@@ -908,10 +908,7 @@ impl JssExecutor {
         (min_prioritization_fees, max_prioritization_fees)
     }
 
-    fn parse_bundle(
-        bundle: Bundle,
-        bank: &Bank,
-    ) -> Option<ParsedBundle> {
+    fn parse_bundle(bundle: Bundle, bank: &Bank) -> Option<ParsedBundle> {
         let transactions = Self::parse_transactions(bank, bundle.packets.iter());
         if transactions.len() != bundle.packets.len() {
             return None;
