@@ -180,8 +180,6 @@ impl JssStage {
         retry_bundle_receiver: &crossbeam_channel::Receiver<[u8; 32]>,
         leader_slot_reusables: &mut LeaderSlotReusables,
     ) {
-        leader_slot_reusables.clear();
-
         let current_slot = poh_recorder.read().unwrap().get_current_slot();
         let current_tick = poh_recorder.read().unwrap().tick_height()
             % poh_recorder.read().unwrap().ticks_per_slot();
@@ -192,6 +190,7 @@ impl JssStage {
             current_tick
         );
 
+        leader_slot_reusables.clear();
         let buffered_bundles = &mut leader_slot_reusables.buffered_incoming_bundles;
         let mut retryable_bundle_ids = &mut leader_slot_reusables.retryable_outgoing_bundle_ids;
 
@@ -199,6 +198,12 @@ impl JssStage {
         // One of the annoying side-effects of re-using the channel between slots
         jss_connection.drain_bundles();
         retry_bundle_receiver.try_iter().for_each(|_| ());
+
+        // Since this function is triggered ahead of the leader slot
+        // Let's send an initial leader state (that might exclude information from a real bank
+        // since a bank may not be available yet)
+        let leader_state = Self::generate_leader_state(poh_recorder, &mut retryable_bundle_ids);
+        jss_connection.send_leader_state(leader_state);
 
         let mut prev_tick = 0;
         while poh_recorder.read().unwrap().would_be_leader(tick_lookahead)
