@@ -55,7 +55,7 @@ impl JssStage {
                     .enable_all()
                     .build()
                     .unwrap();
-                Self::start_manager(
+                Self::start(
                     runtime,
                     jss_url,
                     jss_enabled,
@@ -77,7 +77,7 @@ impl JssStage {
     }
 
     // The main loop for the JSS Manager running inside an async environment
-    fn start_manager(
+    fn start(
         runtime: tokio::runtime::Runtime,
         jss_url: String,
         jss_enabled: Arc<AtomicBool>,
