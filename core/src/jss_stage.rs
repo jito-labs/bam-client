@@ -19,7 +19,7 @@ use solana_gossip::cluster_info::ClusterInfo;
 use solana_ledger::blockstore_processor::TransactionStatusSender;
 use solana_poh::poh_recorder::{BankStart, PohRecorder};
 use solana_runtime::{
-    prioritization_fee_cache::PrioritizationFeeCache, vote_sender_types::ReplayVoteSender,
+    bank, prioritization_fee_cache::PrioritizationFeeCache, vote_sender_types::ReplayVoteSender,
 };
 use solana_sdk::pubkey::Pubkey;
 
@@ -123,9 +123,16 @@ impl JssStage {
                 &poh_recorder,
                 &cluster_info,
             ) {
+                // If a bank exist locally; wait for it to end before letting other components
+                // take over from JSS
+                if let Some(bank_start) = poh_recorder.read().unwrap().bank_start() {
+                    while bank_start.should_working_bank_still_be_processing_txs() {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                }
                 jss_enabled.store(false, std::sync::atomic::Ordering::Relaxed);
                 builder_info = None;
-                std::thread::sleep(std::time::Duration::from_millis(500));
+                std::thread::sleep(std::time::Duration::from_millis(400));
                 // FetchStageManager will revert the right TPU config
                 continue;
             } else {
