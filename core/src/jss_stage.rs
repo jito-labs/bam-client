@@ -16,10 +16,7 @@ use jito_protos::proto::{
     jss_types::{AccountComputeUnitBudget, Bundle, LeaderState, Socket},
 };
 use solana_cost_model::block_cost_limits::MAX_BLOCK_UNITS;
-use solana_gossip::{
-    cluster_info::ClusterInfo,
-    contact_info::{ContactInfo, Protocol},
-};
+use solana_gossip::cluster_info::ClusterInfo;
 use solana_ledger::blockstore_processor::TransactionStatusSender;
 use solana_poh::poh_recorder::PohRecorder;
 use solana_runtime::{
@@ -114,7 +111,6 @@ impl JssStage {
         let mut jss_connection: Option<JssConnection> = None;
         let mut builder_info = None;
         let mut leader_slot_reusables = LeaderSlotReusables::default();
-        let local_contact_info = cluster_info.my_contact_info();
 
         info!("JSS Manager started");
 
@@ -128,9 +124,9 @@ impl JssStage {
                 &poh_recorder,
                 &cluster_info,
             ) {
-                if jss_enabled.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                    Self::revert_tpu_config(&cluster_info, &local_contact_info);
-                }
+                jss_enabled.store(false, std::sync::atomic::Ordering::Relaxed);
+                builder_info = None;
+                // FetchStageManager will revert the right TPU config
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 continue;
             } else {
@@ -139,7 +135,7 @@ impl JssStage {
 
             // Grab the connection object
             let Some(mut jss_connection) = jss_connection.as_mut() else {
-                continue;
+                unreachable!("JSS connection should be available");
             };
 
             // Update TPU config (if new config is available)
@@ -331,19 +327,6 @@ impl JssStage {
                 false
             }
         }
-    }
-
-    fn revert_tpu_config(cluster_info: &Arc<ClusterInfo>, local_contact_info: &ContactInfo) {
-        let _ = cluster_info
-            .set_tpu(local_contact_info.tpu(Protocol::UDP).unwrap())
-            .inspect_err(|e| {
-                warn!("Failed to set TPU: {:?}", e);
-            });
-        let _ = cluster_info
-            .set_tpu_forwards(local_contact_info.tpu_forwards(Protocol::UDP).unwrap())
-            .inspect_err(|e| {
-                warn!("Failed to set TPU forwards: {:?}", e);
-            });
     }
 
     fn get_sockaddr(info: Option<&Socket>) -> Option<SocketAddr> {
