@@ -20,6 +20,7 @@ use solana_gossip::cluster_info::ClusterInfo;
 use solana_poh::poh_recorder::PohRecorder;
 use solana_sdk::{signature::Keypair, signer::Signer};
 use std::sync::atomic::Ordering::Relaxed;
+use thiserror::Error;
 use tokio::time::{interval, timeout};
 
 const TICKS_PER_SLOT: u64 = 64;
@@ -38,20 +39,17 @@ impl JssConnection {
         url: String,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         cluster_info: Arc<ClusterInfo>,
-    ) -> Option<Self> {
+    ) -> Result<Self, TryInitError> {
         // If a leader slot is coming up; we don't want to enable jss
         if poh_recorder.read().unwrap().would_be_leader(TICKS_PER_SLOT) {
-            return None;
+            return Err(TryInitError::MidLeaderSlotError);
         };
 
-        let backend_endpoint = tonic::transport::Endpoint::from_shared(url).ok()?;
+        let backend_endpoint = tonic::transport::Endpoint::from_shared(url)?;
         let connection_timeout = std::time::Duration::from_secs(5);
         let builder_config = Arc::new(Mutex::new(None));
 
-        let channel = timeout(connection_timeout, backend_endpoint.connect())
-            .await
-            .ok()?
-            .ok()?;
+        let channel = timeout(connection_timeout, backend_endpoint.connect()).await??;
 
         let mut validator_client = JssNodeApiClient::new(channel);
 
@@ -60,8 +58,7 @@ impl JssConnection {
             tonic::Request::new(outbound_receiver.map(|req: StartSchedulerMessage| req));
         let inbound_stream = validator_client
             .start_scheduler_stream(outbound_stream)
-            .await
-            .ok()?
+            .await?
             .into_inner();
 
         let metrics = Arc::new(JssConnectionMetrics::default());
@@ -80,7 +77,7 @@ impl JssConnection {
             is_healthy.clone(),
         ));
 
-        Some(Self {
+        Ok(Self {
             outbound_sender,
             builder_config,
             background_task,
@@ -272,4 +269,16 @@ impl JssConnectionMetrics {
             ),
         );
     }
+}
+
+#[derive(Error, Debug)]
+pub enum TryInitError {
+    #[error("In leader slot")]
+    MidLeaderSlotError,
+    #[error("Invalid URI")]
+    EndpointConnectError(#[from] tonic::transport::Error),
+    #[error("Connection timeout")]
+    ConnectionTimeout(#[from] tokio::time::error::Elapsed),
+    #[error("Stream start error")]
+    StreamStartError(#[from] tonic::Status),
 }
