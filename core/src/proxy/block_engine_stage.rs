@@ -209,6 +209,11 @@ impl BlockEngineStage {
         connection_timeout: &Duration,
         jss_enabled: &Arc<AtomicBool>,
     ) -> crate::proxy::Result<()> {
+        if jss_enabled.load(Ordering::Relaxed) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            return Ok(());
+        }
+
         // Get a copy of configs here in case they have changed at runtime
         let keypair = cluster_info.keypair().clone();
 
@@ -404,25 +409,12 @@ impl BlockEngineStage {
         let mut block_engine_stats = BlockEngineStageStats::default();
         let mut metrics_and_auth_tick = interval(METRICS_TICK);
         let mut maintenance_tick = interval(MAINTENANCE_TICK);
-        let mut jss_enabled_prev = false;
 
         info!("connected to packet and bundle stream");
 
         while !exit.load(Ordering::Relaxed) {
-            let jss_enabled = jss_enabled.load(Ordering::Relaxed);
-            if jss_enabled != jss_enabled_prev {
-                if jss_enabled {
-                    info!("jss enabled, pausing block engine stage");
-                } else {
-                    info!("jss disabled, resuming block engine stage");
-                    return Ok(());
-                }
-                jss_enabled_prev = jss_enabled;
-            }
-
-            if jss_enabled_prev {
-                std::thread::sleep(Duration::from_millis(100));
-                continue;
+            if jss_enabled.load(Ordering::Relaxed) {
+                return Ok(());
             }
 
             tokio::select! {

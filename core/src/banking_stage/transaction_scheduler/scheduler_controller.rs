@@ -103,7 +103,15 @@ where
     pub fn run(mut self) -> Result<(), SchedulerError> {
         loop {
             if self.jss_enabled.load(std::sync::atomic::Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(100));
+                // Receive incoming packets, buffer them and throw them away
+                if self
+                    .receive_and_buffer_packets(&BufferedPacketsDecision::Hold)
+                    .is_err()
+                {
+                    break;
+                }
+                self.clear_container();
+                std::thread::sleep(Duration::from_millis(10));
                 continue;
             }
 
