@@ -195,22 +195,16 @@ impl JssExecutor {
         let mut prio_graph = prio_graph::PrioGraph::new(|id: &BundleSequenceId, _graph_node| *id);
 
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
-            if !poh_recorder.read().unwrap().would_be_leader(0) {
+            let Some(bank_start) = poh_recorder.read().unwrap().bank_start() else {
                 std::thread::sleep(Duration::from_millis(1));
                 continue;
-            }
-
-            // Bank will hopefully be ready very soon
-            if poh_recorder.read().unwrap().bank_start().is_none() {
-                std::thread::sleep(Duration::from_micros(1));
-                continue;
-            }
+            };
 
             bundles.clear();
             prio_graph.clear();
             successful_count.store(0, Ordering::Relaxed);
 
-            while poh_recorder.read().unwrap().would_be_leader(0) {
+            while bank_start.should_working_bank_still_be_processing_txs() {
                 Self::maybe_ingest_new_bundle(
                     &bundle_receiver,
                     &mut prio_graph,
