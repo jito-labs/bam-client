@@ -111,6 +111,13 @@ impl JssConnection {
                         msg: Some(Msg::HeartBeat(signed_heartbeat)),
                     });
                     metrics.heartbeat_sent.fetch_add(1, Relaxed);
+
+                    // If a leader slot is coming up; we don't want to block the worker
+                    const TICKS_PER_SLOT: u64 = 64;
+                    if poh_recorder.read().unwrap().would_be_leader(TICKS_PER_SLOT) {
+                        continue;
+                    };
+
                     let Ok(resp) = validator_client.get_builder_config(GetBuilderConfigRequest {}).await else {
                         break;
                     };
