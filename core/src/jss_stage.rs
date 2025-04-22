@@ -125,8 +125,8 @@ impl JssStage {
             ) {
                 jss_enabled.store(false, std::sync::atomic::Ordering::Relaxed);
                 builder_info = None;
-                // FetchStageManager will revert the right TPU config
                 std::thread::sleep(std::time::Duration::from_millis(500));
+                // FetchStageManager will revert the right TPU config
                 continue;
             } else {
                 jss_enabled.store(true, std::sync::atomic::Ordering::Relaxed)
