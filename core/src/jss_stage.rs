@@ -231,7 +231,7 @@ impl JssStage {
                 continue;
             }
             while let Some(bundle) = buffered_bundles.pop_front() {
-                executor.schedule_bundle(&bank_start.working_bank, bundle);
+                executor.schedule_bundle(bundle);
             }
         }
     }
