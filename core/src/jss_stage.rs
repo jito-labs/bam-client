@@ -19,7 +19,7 @@ use solana_gossip::cluster_info::ClusterInfo;
 use solana_ledger::blockstore_processor::TransactionStatusSender;
 use solana_poh::poh_recorder::{BankStart, PohRecorder};
 use solana_runtime::{
-    bank, prioritization_fee_cache::PrioritizationFeeCache, vote_sender_types::ReplayVoteSender,
+    prioritization_fee_cache::PrioritizationFeeCache, vote_sender_types::ReplayVoteSender,
 };
 use solana_sdk::pubkey::Pubkey;
 
@@ -123,6 +123,11 @@ impl JssStage {
                 &poh_recorder,
                 &cluster_info,
             ) {
+                if !jss_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(400));
+                    continue;
+                }
+
                 // If a bank exist locally; wait for it to end before letting other components
                 // take over from JSS
                 if let Some(bank_start) = poh_recorder.read().unwrap().bank_start() {
@@ -132,7 +137,7 @@ impl JssStage {
                 }
                 jss_enabled.store(false, std::sync::atomic::Ordering::Relaxed);
                 builder_info = None;
-                std::thread::sleep(std::time::Duration::from_millis(400));
+                std::thread::sleep(std::time::Duration::from_millis(10));
                 // FetchStageManager will revert the right TPU config
                 continue;
             } else {
@@ -330,16 +335,21 @@ impl JssStage {
                 false
             }
         } else {
-            if let Some(current_jss_connection) = runtime.block_on(JssConnection::try_init(
+            match runtime.block_on(JssConnection::try_init(
                 jss_url.clone(),
                 poh_recorder.clone(),
                 cluster_info.clone(),
             )) {
-                jss_connection.replace(current_jss_connection);
-                info!("JSS connection initialized to url={}", jss_url);
-                true
-            } else {
-                false
+                Ok(current_jss_connection) => {
+                    jss_connection.replace(current_jss_connection);
+                    info!("JSS connection initialized to url={}", jss_url);
+                    true
+                }
+                Err(err) => {
+                    info!("Failed to connect to JSS: {}", err);
+                    *jss_connection = None;
+                    false
+                }
             }
         }
     }
