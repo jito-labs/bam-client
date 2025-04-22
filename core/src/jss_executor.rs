@@ -439,7 +439,7 @@ impl JssExecutor {
             }
 
             // Report slot metrics
-            metrics.leader_slot_action(None);
+            metrics.leader_slot_action(poh_recorder.read().unwrap().bank_start().as_ref());
             qos_service.report_metrics(slot);
         }
     }
