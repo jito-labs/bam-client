@@ -73,7 +73,7 @@ use crate::{
 use solana_sdk::hash::Hash;
 
 pub struct JssExecutor {
-    bundle_sender: crossbeam_channel::Sender<Bundle>,
+    bundle_sender: crossbeam_channel::Sender<ParsedBundle>,
     threads: Vec<std::thread::JoinHandle<()>>,
 }
 
@@ -164,16 +164,16 @@ impl JssExecutor {
     }
 
     // Serialize transactions from micro-block and send them to the scheduling thread
-    pub fn schedule_bundle(&mut self, bundle: Bundle) -> bool {
-        if bundle.packets.is_empty() {
+    pub fn schedule_bundle(&mut self, bank: &Bank, bundle: Bundle) -> bool {
+        let Some(parsed_bundle) = Self::parse_bundle(bundle, bank) else {
             return false;
-        }
-        self.bundle_sender.try_send(bundle).is_ok()
+        };
+        self.bundle_sender.try_send(parsed_bundle).is_ok()
     }
 
     /// Loop responsible for scheduling transactions to workers
     fn spawn_management_thread(
-        bundle_receiver: crossbeam_channel::Receiver<Bundle>,
+        bundle_receiver: crossbeam_channel::Receiver<ParsedBundle>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         mut workers: Vec<WorkerAccess>,
         exit: Arc<AtomicBool>,
@@ -199,7 +199,6 @@ impl JssExecutor {
             while bank_start.should_working_bank_still_be_processing_txs() {
                 Self::maybe_ingest_new_bundle(
                     &bundle_receiver,
-                    &bank_start,
                     &mut prio_graph,
                     &mut bundles,
                     &mut workers,
@@ -235,17 +234,13 @@ impl JssExecutor {
         C: std::hash::Hash + Eq + Clone + TopLevelId<BundleSequenceId> + Copy,
         D: Fn(&BundleSequenceId, &GraphNode<BundleSequenceId>) -> C,
     >(
-        bundle_receiver: &crossbeam_channel::Receiver<Bundle>,
-        bank_start: &BankStart,
+        bundle_receiver: &crossbeam_channel::Receiver<ParsedBundle>,
         prio_graph: &mut prio_graph::PrioGraph<BundleSequenceId, Pubkey, C, D>,
         bundles: &mut Vec<Option<ParsedBundleWithId>>,
         workers: &mut Vec<WorkerAccess>,
         metrics: &mut JssSchedulerMetrics,
     ) {
         if let Ok(bundle) = bundle_receiver.try_recv() {
-            let Some(bundle) = Self::parse_bundle(bundle, &bank_start.working_bank) else {
-                return;
-            };
             metrics.bundles_received += 1;
             let id = bundles.len();
             let bundle_sequence_id = BundleSequenceId { id };
@@ -916,6 +911,9 @@ impl JssExecutor {
     }
 
     fn parse_bundle(bundle: Bundle, bank: &Bank) -> Option<ParsedBundle> {
+        if bundle.packets.is_empty() {
+            return None;
+        }
         let transactions = Self::parse_transactions(bank, bundle.packets.iter());
         if transactions.len() != bundle.packets.len() {
             return None;
@@ -1475,14 +1473,14 @@ mod tests {
         };
 
         // See if the transaction is executed
-        executor.schedule_bundle(successful_bundle.clone());
-        executor.schedule_bundle(failed_bundle.clone());
+        executor.schedule_bundle(&bank, successful_bundle.clone());
+        executor.schedule_bundle(&bank, failed_bundle.clone());
         let txns = get_executed_txns(&entry_receiver, Duration::from_secs(3));
         assert_eq!(txns.len(), 1);
 
         // Make sure if you try the same thing again, it doesn't work
-        executor.schedule_bundle(successful_bundle);
-        executor.schedule_bundle(failed_bundle);
+        executor.schedule_bundle(&bank, successful_bundle);
+        executor.schedule_bundle(&bank, failed_bundle);
         let txns = get_executed_txns(&entry_receiver, Duration::from_secs(3));
         assert_eq!(txns.len(), 0);
 
@@ -1566,7 +1564,7 @@ mod tests {
             ))],
         };
 
-        executor.schedule_bundle(successful_bundle);
+        executor.schedule_bundle(&bank, successful_bundle);
         let transactions = get_executed_txns(&entry_receiver, Duration::from_secs(3));
 
         // expect to see initialize tip payment program, tip distribution program,

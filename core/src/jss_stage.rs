@@ -247,7 +247,7 @@ impl JssStage {
 
             // Receive micro-blocks
             while let Some(bundle) = jss_connection.try_recv_bundle() {
-                executor.schedule_bundle(bundle);
+                executor.schedule_bundle(&bank_start.working_bank, bundle);
             }
 
             // Receive retryable bundle IDs
