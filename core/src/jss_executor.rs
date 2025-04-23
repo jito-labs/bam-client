@@ -70,6 +70,8 @@ use crate::{
     tip_manager::TipManager,
 };
 
+use solana_sdk::hash::Hash;
+
 pub struct JssExecutor {
     bundle_sender: crossbeam_channel::Sender<Bundle>,
     threads: Vec<std::thread::JoinHandle<()>>,
@@ -388,16 +390,21 @@ impl JssExecutor {
             while current_bank_start.should_working_bank_still_be_processing_txs() {
                 let Ok(ParsedBundleWithId {
                     bundle_sequence_id,
-                    bundle:
-                        ParsedBundle {
-                            revert_on_error,
-                            transactions: txns,
-                        },
+                    mut bundle,
                 }) = receiver.recv_timeout(Duration::from_millis(1))
                 else {
                     continue;
                 };
-                let bundle_id = Self::generate_bundle_id(&txns);
+
+                bundle.reparse_if_needed(&current_bank_start.working_bank);
+                let ParsedBundle {
+                    revert_on_error,
+                    bank_hash: _,
+                    packets: _,
+                    transactions,
+                } = bundle;
+
+                let bundle_id = Self::generate_bundle_id(&transactions);
                 let (result, process_transactions_us) = measure_us!(Self::execute_record_commit(
                     &current_bank_start,
                     &qos_service,
@@ -405,7 +412,7 @@ impl JssExecutor {
                     &mut bundle_committer,
                     &mut transaction_commiter,
                     revert_on_error,
-                    txns,
+                    transactions,
                     &tip_manager,
                     &cluster_info,
                     &last_tip_updated_slot,
@@ -916,6 +923,8 @@ impl JssExecutor {
 
         Some(ParsedBundle {
             revert_on_error: bundle.revert_on_error,
+            bank_hash: bank.hash(),
+            packets: bundle.packets,
             transactions,
         })
     }
@@ -1070,7 +1079,18 @@ impl PartialOrd for BundleSequenceId {
 
 struct ParsedBundle {
     revert_on_error: bool,
+    bank_hash: Hash,
+    packets: Vec<Packet>,
     transactions: Vec<RuntimeTransaction<SanitizedTransaction>>,
+}
+
+impl ParsedBundle {
+    fn reparse_if_needed(&mut self, bank: &Bank) {
+        if self.bank_hash != bank.hash() {
+            self.transactions = JssExecutor::parse_transactions(bank, self.packets.iter());
+            self.bank_hash = bank.hash();
+        }
+    }
 }
 
 struct ParsedBundleWithId {
