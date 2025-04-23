@@ -257,6 +257,9 @@ pub trait AdminRpc {
         trust_packets: bool,
     ) -> Result<()>;
 
+    #[rpc(meta, name = "setJssUrl")]
+    fn set_jss_url(&self, meta: Self::Metadata, jss_url: Option<String>) -> Result<()>;
+
     #[rpc(meta, name = "setRelayerConfig")]
     fn set_relayer_config(
         &self,
@@ -501,6 +504,14 @@ impl AdminRpc for AdminRpcImpl {
                 "failed to set block engine config. see logs for details.",
             ))
         }
+    }
+
+    fn set_jss_url(&self, meta: Self::Metadata, jss_url: Option<String>) -> Result<()> {
+        debug!("set_jss_url request received");
+        meta.with_post_init(|post_init| {
+            *post_init.jss_url.lock().unwrap() = jss_url;
+            Ok(())
+        })
     }
 
     fn set_identity(
@@ -1099,6 +1110,7 @@ mod tests {
                     relayer_config,
                     shred_receiver_address,
                     shred_retransmit_receiver_address,
+                    jss_url: Arc::new(Mutex::new(None)),
                 }))),
                 staked_nodes_overrides: Arc::new(RwLock::new(HashMap::new())),
                 rpc_to_plugin_manager_sender: None,

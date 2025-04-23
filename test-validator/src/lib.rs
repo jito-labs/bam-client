@@ -65,7 +65,7 @@ use {
         net::{IpAddr, Ipv4Addr, SocketAddr},
         path::{Path, PathBuf},
         str::FromStr,
-        sync::{Arc, RwLock},
+        sync::{Arc, Mutex, RwLock},
         time::Duration,
     },
     tokio::time::sleep,
@@ -1034,7 +1034,7 @@ impl TestValidator {
             staked_nodes_overrides: config.staked_nodes_overrides.clone(),
             accounts_db_config,
             runtime_config,
-            jss_url: config.jss_url.clone(),
+            jss_url: Arc::new(Mutex::new(config.jss_url.clone())),
             ..ValidatorConfig::default_for_test()
         };
         if let Some(ref tower_storage) = config.tower_storage {

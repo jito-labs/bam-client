@@ -37,7 +37,7 @@ pub(crate) struct JssStage {
 impl JssStage {
     // Create and run a new instance of the JSS Manager
     pub fn new(
-        jss_url: String,
+        jss_url: Arc<Mutex<Option<String>>>,
         jss_enabled: Arc<AtomicBool>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         exit: Arc<AtomicBool>,
@@ -55,7 +55,7 @@ impl JssStage {
                     .enable_all()
                     .build()
                     .unwrap();
-                Self::start(
+                Self::loiter_and_start(
                     runtime,
                     jss_url,
                     jss_enabled,
@@ -76,10 +76,9 @@ impl JssStage {
         }
     }
 
-    // The main loop for the JSS Manager running inside an async environment
-    fn start(
+    fn loiter_and_start(
         runtime: tokio::runtime::Runtime,
-        jss_url: String,
+        jss_url: Arc<Mutex<Option<String>>>,
         jss_enabled: Arc<AtomicBool>,
         exit: Arc<AtomicBool>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
@@ -90,35 +89,83 @@ impl JssStage {
         transaction_status_sender: Option<TransactionStatusSender>,
         prioritization_fee_cache: Arc<PrioritizationFeeCache>,
     ) {
+        while !exit.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Some(current_jss_url) = jss_url.lock().unwrap().clone() {
+                Self::start(
+                    &runtime,
+                    current_jss_url,
+                    &jss_url,
+                    jss_enabled.clone(),
+                    exit.clone(),
+                    poh_recorder.clone(),
+                    cluster_info.clone(),
+                    &tip_manager,
+                    &bundle_account_locker,
+                    &replay_vote_sender,
+                    transaction_status_sender.clone(),
+                    prioritization_fee_cache.clone(),
+                );
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
+
+    // The main loop for the JSS Manager running inside an async environment
+    fn start(
+        runtime: &tokio::runtime::Runtime,
+        current_jss_url: String,
+        jss_url: &Mutex<Option<String>>,
+        jss_enabled: Arc<AtomicBool>,
+        exit: Arc<AtomicBool>,
+        poh_recorder: Arc<RwLock<PohRecorder>>,
+        cluster_info: Arc<ClusterInfo>,
+        tip_manager: &TipManager,
+        bundle_account_locker: &BundleAccountLocker,
+        replay_vote_sender: &ReplayVoteSender,
+        transaction_status_sender: Option<TransactionStatusSender>,
+        prioritization_fee_cache: Arc<PrioritizationFeeCache>,
+    ) {
         let block_builder_fee_info = Arc::new(Mutex::new(BlockBuilderFeeInfo::default()));
         let (retry_bundle_sender, retry_bundle_receiver) = crossbeam_channel::bounded(10_000);
         const WORKER_THREAD_COUNT: usize = 4;
         let mut executor = JssExecutor::new(
             WORKER_THREAD_COUNT,
             poh_recorder.clone(),
-            replay_vote_sender,
+            replay_vote_sender.clone(),
             transaction_status_sender,
             prioritization_fee_cache,
-            tip_manager,
+            tip_manager.clone(),
             exit.clone(),
             cluster_info.clone(),
             block_builder_fee_info.clone(),
-            bundle_account_locker,
+            bundle_account_locker.clone(),
             retry_bundle_sender,
         );
 
         let mut jss_connection: Option<JssConnection> = None;
         let mut builder_info = None;
         let mut leader_slot_reusables = LeaderSlotReusables::default();
+        let mut last_jss_url_check_time = std::time::Instant::now();
 
         info!("JSS Manager started");
 
         // Run until (our) world ends
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
+            if last_jss_url_check_time.elapsed().as_secs() > 1 {
+                last_jss_url_check_time = std::time::Instant::now();
+                if let Some(current_jss_url) = jss_url.lock().unwrap().clone() {
+                    if current_jss_url != current_jss_url {
+                        info!("JSS URL changed to {}", current_jss_url);
+                        break;
+                    }
+                }
+            }
+
             // See if we are connected correctly to a JSS instance
             if !Self::get_or_init_connection(
                 &runtime,
-                jss_url.clone(),
+                current_jss_url.clone(),
                 &mut jss_connection,
                 &poh_recorder,
                 &cluster_info,
