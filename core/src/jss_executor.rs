@@ -373,7 +373,7 @@ impl JssExecutor {
                 while let Ok(bundle) = receiver.try_recv() {
                     sender.send(bundle.bundle_sequence_id).unwrap();
                 }
-                std::thread::sleep(Duration::from_micros(500));
+                std::thread::sleep(Duration::from_millis(1));
                 continue;
             };
             let current_block_builder_fee_info = block_builder_fee_info.lock().unwrap().clone();
