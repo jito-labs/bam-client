@@ -228,10 +228,25 @@ impl JssStage {
             return;
         };
 
+        let mut last_tick_send_time = std::time::Instant::now();
         let mut prev_tick = 0;
         while bank_start.should_working_bank_still_be_processing_txs()
             && jss_connection.is_healthy()
         {
+            // Receive micro-blocks
+            while let Some(bundle) = jss_connection.try_recv_bundle() {
+                executor.schedule_bundle(&bank_start.working_bank, bundle);
+            }
+
+            // Receive retryable bundle IDs
+            while let Ok(bundle_id) = retry_bundle_receiver.try_recv() {
+                retryable_bundle_ids.push(bundle_id);
+            }
+
+            if last_tick_send_time.elapsed().as_millis() < 5 {
+                continue;
+            }
+
             // Send leader state every tick
             let current_tick = poh_recorder.read().unwrap().tick_height();
             if current_tick != prev_tick {
@@ -243,16 +258,7 @@ impl JssStage {
                     &mut retryable_bundle_ids,
                 );
                 jss_connection.send_leader_state(leader_state);
-            }
-
-            // Receive micro-blocks
-            while let Some(bundle) = jss_connection.try_recv_bundle() {
-                executor.schedule_bundle(&bank_start.working_bank, bundle);
-            }
-
-            // Receive retryable bundle IDs
-            while let Ok(bundle_id) = retry_bundle_receiver.try_recv() {
-                retryable_bundle_ids.push(bundle_id);
+                last_tick_send_time = std::time::Instant::now();
             }
         }
     }
