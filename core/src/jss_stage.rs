@@ -126,6 +126,7 @@ impl JssStage {
         transaction_status_sender: Option<TransactionStatusSender>,
         prioritization_fee_cache: Arc<PrioritizationFeeCache>,
     ) {
+        let executor_exit = Arc::new(AtomicBool::new(false));
         let block_builder_fee_info = Arc::new(Mutex::new(BlockBuilderFeeInfo::default()));
         let (retry_bundle_sender, retry_bundle_receiver) = crossbeam_channel::bounded(10_000);
         const WORKER_THREAD_COUNT: usize = 4;
@@ -136,7 +137,7 @@ impl JssStage {
             transaction_status_sender,
             prioritization_fee_cache,
             tip_manager.clone(),
-            exit.clone(),
+            executor_exit.clone(),
             cluster_info.clone(),
             block_builder_fee_info.clone(),
             bundle_account_locker.clone(),
@@ -159,6 +160,9 @@ impl JssStage {
                         info!("JSS URL changed to {}", current_jss_url);
                         break;
                     }
+                } else {
+                    info!("JSS URL is None; stopping JSS Manager");
+                    break;
                 }
             }
 
@@ -219,6 +223,7 @@ impl JssStage {
             }
         }
 
+        executor_exit.store(true, std::sync::atomic::Ordering::Relaxed);
         jss_enabled.store(false, std::sync::atomic::Ordering::Relaxed);
         info!("JSS Manager exiting");
     }
