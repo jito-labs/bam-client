@@ -391,7 +391,11 @@ impl JssExecutor {
                     continue;
                 };
 
-                bundle.reparse_if_needed(&current_bank_start.working_bank);
+                if !bundle.reparse_if_needed(&current_bank_start.working_bank) {
+                    // If the bundle is not valid anymore, we can just ignore it.
+                    sender.send(bundle_sequence_id).unwrap();
+                    continue;
+                }
                 let ParsedBundle {
                     revert_on_error,
                     bank_hash: _,
@@ -1083,11 +1087,17 @@ struct ParsedBundle {
 }
 
 impl ParsedBundle {
-    fn reparse_if_needed(&mut self, bank: &Bank) {
+    fn reparse_if_needed(&mut self, bank: &Bank) -> bool {
         if self.bank_hash != bank.hash() {
-            self.transactions = JssExecutor::parse_transactions(bank, self.packets.iter());
+            let new_transactions = JssExecutor::parse_transactions(bank, self.packets.iter());
+            if new_transactions.len() != self.packets.len() {
+                return false;
+            }
+            self.transactions = new_transactions;
             self.bank_hash = bank.hash();
+            return true;
         }
+        true
     }
 }
 
