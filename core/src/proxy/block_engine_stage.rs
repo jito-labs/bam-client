@@ -414,6 +414,7 @@ impl BlockEngineStage {
 
         while !exit.load(Ordering::Relaxed) {
             if jss_enabled.load(Ordering::Relaxed) {
+                info!("jss enabled, exiting block engine stage");
                 return Ok(());
             }
 
