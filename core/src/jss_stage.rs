@@ -89,6 +89,8 @@ impl JssStage {
         transaction_status_sender: Option<TransactionStatusSender>,
         prioritization_fee_cache: Arc<PrioritizationFeeCache>,
     ) {
+        info!("JSS Manager loitering for JSS URL");
+
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
             if let Some(current_jss_url) = jss_url.lock().unwrap().clone() {
                 Self::start(
