@@ -35,7 +35,7 @@ use {
         net::SocketAddr,
         path::{Path, PathBuf},
         str::FromStr,
-        sync::{Arc, RwLock},
+        sync::{Arc, Mutex, RwLock},
         thread::{self, Builder},
         time::{Duration, SystemTime},
     },
@@ -53,6 +53,7 @@ pub struct AdminRpcRequestMetadata {
     pub staked_nodes_overrides: Arc<RwLock<HashMap<Pubkey, u64>>>,
     pub post_init: Arc<RwLock<Option<AdminRpcRequestMetadataPostInit>>>,
     pub rpc_to_plugin_manager_sender: Option<Sender<GeyserPluginManagerRequest>>,
+    pub jss_url: Arc<Mutex<Option<String>>>,
 }
 
 impl Metadata for AdminRpcRequestMetadata {}
@@ -508,10 +509,8 @@ impl AdminRpc for AdminRpcImpl {
 
     fn set_jss_url(&self, meta: Self::Metadata, jss_url: Option<String>) -> Result<()> {
         debug!("set_jss_url request received");
-        meta.with_post_init(|post_init| {
-            *post_init.jss_url.lock().unwrap() = jss_url;
-            Ok(())
-        })
+        *meta.jss_url.lock().unwrap() = jss_url;
+        Ok(())
     }
 
     fn set_identity(
@@ -1110,10 +1109,10 @@ mod tests {
                     relayer_config,
                     shred_receiver_address,
                     shred_retransmit_receiver_address,
-                    jss_url: Arc::new(Mutex::new(None)),
                 }))),
                 staked_nodes_overrides: Arc::new(RwLock::new(HashMap::new())),
                 rpc_to_plugin_manager_sender: None,
+                jss_url: Arc::new(Mutex::new(None)),
             };
             let mut io = MetaIoHandler::default();
             io.extend_with(AdminRpcImpl.to_delegate());
@@ -1533,6 +1532,7 @@ mod tests {
                 post_init: post_init.clone(),
                 staked_nodes_overrides: Arc::new(RwLock::new(HashMap::new())),
                 rpc_to_plugin_manager_sender: None,
+                jss_url: Arc::new(Mutex::new(None)),
             };
 
             let _validator = Validator::new(

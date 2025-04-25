@@ -37,7 +37,7 @@ use {
         net::{IpAddr, Ipv4Addr, SocketAddr},
         path::{Path, PathBuf},
         process::exit,
-        sync::{Arc, RwLock},
+        sync::{Arc, Mutex, RwLock},
         time::{Duration, SystemTime, UNIX_EPOCH},
     },
 };
@@ -395,6 +395,8 @@ fn main() {
         } else {
             (None, None)
         };
+
+    genesis.jss_url = matches.value_of("jss_url").map(|url| url.into());
     admin_rpc_service::run(
         &ledger_path,
         admin_rpc_service::AdminRpcRequestMetadata {
@@ -407,6 +409,7 @@ fn main() {
             post_init: admin_service_post_init,
             tower_storage: tower_storage.clone(),
             rpc_to_plugin_manager_sender,
+            jss_url: Arc::new(Mutex::new(genesis.jss_url.clone())),
         },
     );
     let dashboard = if output == Output::Dashboard {
@@ -474,8 +477,6 @@ fn main() {
         account_indexes,
         ..JsonRpcConfig::default_for_test()
     });
-
-    genesis.jss_url = matches.value_of("jss_url").map(|url| url.into());
 
     if !accounts_to_clone.is_empty() {
         if let Err(e) = genesis.clone_accounts(

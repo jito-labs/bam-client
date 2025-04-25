@@ -1673,7 +1673,6 @@ impl Validator {
             relayer_config: config.relayer_config.clone(),
             shred_receiver_address: config.shred_receiver_address.clone(),
             shred_retransmit_receiver_address: config.shred_retransmit_receiver_address.clone(),
-            jss_url: config.jss_url.clone(),
         });
 
         Ok(Self {
