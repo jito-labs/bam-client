@@ -223,6 +223,8 @@ impl JssExecutor {
                 }
             }
 
+            metrics.bundles_executed_successfully =
+                successful_count.load(Ordering::Relaxed) as usize;
             metrics.report();
         }
     }
@@ -1161,6 +1163,7 @@ impl WorkerAccess {
 struct JssSchedulerMetrics {
     bundles_received: usize,
     bundles_scheduled: usize,
+    bundles_executed_successfully: usize,
 }
 
 impl JssSchedulerMetrics {
@@ -1169,6 +1172,7 @@ impl JssSchedulerMetrics {
             "jss_scheduler_metrics",
             ("bundles_received", self.bundles_received, i64),
             ("bundles_scheduled", self.bundles_scheduled, i64),
+            ("bundles_executed_successfully", self.bundles_executed_successfully, i64),
         );
         *self = Self::default();
     }
