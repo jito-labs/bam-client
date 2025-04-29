@@ -280,7 +280,7 @@ impl JssExecutor {
             };
 
             if worker.send(bundle) {
-                metrics.bundles_schueduled += 1;
+                metrics.bundles_scheduled += 1;
             }
         }
     }
@@ -1160,7 +1160,7 @@ impl WorkerAccess {
 #[derive(Default)]
 struct JssSchedulerMetrics {
     bundles_received: usize,
-    bundles_schueduled: usize,
+    bundles_scheduled: usize,
 }
 
 impl JssSchedulerMetrics {
@@ -1168,7 +1168,7 @@ impl JssSchedulerMetrics {
         datapoint_info!(
             "jss_scheduler_metrics",
             ("bundles_received", self.bundles_received, i64),
-            ("bundles_scheduled", self.bundles_schueduled, i64),
+            ("bundles_scheduled", self.bundles_scheduled, i64),
         );
         *self = Self::default();
     }
