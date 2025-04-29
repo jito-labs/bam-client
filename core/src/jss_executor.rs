@@ -1174,9 +1174,6 @@ impl JssSchedulerMetrics {
     }
 }
 
-// Per worker tracking of:
-// - LeaderSlotMetrics
-
 struct JssWorkerMetrics {
     leader_slot_metrics_tracker: LeaderSlotMetricsTracker,
 }
