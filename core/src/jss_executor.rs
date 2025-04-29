@@ -274,10 +274,10 @@ impl JssExecutor {
                 prio_graph.unblock(&bundle_id);
             }
 
-            let Some(bundle_id) = prio_graph.pop() else {
-                continue;
-            };
-            let Some(bundle) = bundles[bundle_id.id].take() else {
+            let Some(bundle) = prio_graph
+                .pop()
+                .and_then(|bundle_id| bundles[bundle_id.id].take())
+            else {
                 continue;
             };
 
@@ -1172,7 +1172,11 @@ impl JssSchedulerMetrics {
             "jss_scheduler_metrics",
             ("bundles_received", self.bundles_received, i64),
             ("bundles_scheduled", self.bundles_scheduled, i64),
-            ("bundles_executed_successfully", self.bundles_executed_successfully, i64),
+            (
+                "bundles_executed_successfully",
+                self.bundles_executed_successfully,
+                i64
+            ),
         );
         *self = Self::default();
     }
