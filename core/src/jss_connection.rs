@@ -40,11 +40,6 @@ impl JssConnection {
         poh_recorder: Arc<RwLock<PohRecorder>>,
         cluster_info: Arc<ClusterInfo>,
     ) -> Result<Self, TryInitError> {
-        // If a leader slot is coming up; we don't want to enable jss
-        if poh_recorder.read().unwrap().would_be_leader(TICKS_PER_SLOT) {
-            return Err(TryInitError::MidLeaderSlotError);
-        };
-
         let backend_endpoint = tonic::transport::Endpoint::from_shared(url)?;
         let connection_timeout = std::time::Duration::from_secs(5);
         let builder_config = Arc::new(Mutex::new(None));
