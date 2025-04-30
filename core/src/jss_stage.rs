@@ -176,11 +176,6 @@ impl JssStage {
                 &poh_recorder,
                 &cluster_info,
             ) {
-                if !jss_enabled.load(std::sync::atomic::Ordering::Relaxed) {
-                    std::thread::sleep(std::time::Duration::from_millis(400));
-                    continue;
-                }
-
                 // If a bank exist locally; wait for it to end before letting other components
                 // take over from JSS
                 if let Some(bank_start) = poh_recorder.read().unwrap().bank_start() {
