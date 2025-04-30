@@ -192,7 +192,7 @@ impl JssExecutor {
                 continue;
             };
 
-            if !bank.should_working_bank_still_be_processing_txs() {
+            if !bank_start.should_working_bank_still_be_processing_txs() {
                 std::thread::sleep(Duration::from_millis(1));
                 continue;
             }
