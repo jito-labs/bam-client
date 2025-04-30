@@ -181,13 +181,6 @@ impl JssStage {
                     continue;
                 }
 
-                // If a bank exist locally; wait for it to end before letting other components
-                // take over from JSS
-                if let Some(bank_start) = poh_recorder.read().unwrap().bank_start() {
-                    while bank_start.should_working_bank_still_be_processing_txs() {
-                        std::thread::sleep(std::time::Duration::from_millis(5));
-                    }
-                }
                 jss_enabled.store(false, std::sync::atomic::Ordering::Relaxed);
                 builder_info = None;
                 std::thread::sleep(std::time::Duration::from_millis(10));
