@@ -192,6 +192,11 @@ impl JssExecutor {
                 continue;
             };
 
+            if !bank.should_working_bank_still_be_processing_txs() {
+                std::thread::sleep(Duration::from_millis(1));
+                continue;
+            }
+
             bundles.clear();
             prio_graph.clear();
             successful_count.store(0, Ordering::Relaxed);
