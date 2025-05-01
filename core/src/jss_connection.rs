@@ -53,7 +53,8 @@ impl JssConnection {
             tonic::Request::new(outbound_receiver.map(|req: StartSchedulerMessage| req));
         let inbound_stream = validator_client
             .start_scheduler_stream(outbound_stream)
-            .await.map_err(|e| {
+            .await
+            .map_err(|e| {
                 error!("Failed to start scheduler stream: {:?}", e);
                 TryInitError::StreamStartError(e)
             })?

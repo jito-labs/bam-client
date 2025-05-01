@@ -92,7 +92,8 @@ impl JssStage {
         info!("JSS Manager loitering for JSS URL");
 
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
-            if let Some(current_jss_url) = jss_url.lock().unwrap().clone() {
+            let current_jss_url = jss_url.lock().unwrap().clone();
+            if let Some(current_jss_url) = current_jss_url {
                 Self::start(
                     &runtime,
                     current_jss_url,
@@ -155,7 +156,9 @@ impl JssStage {
 
         // Run until (our) world ends
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
+            info!("JSS URL is {}", current_jss_url);
             if last_jss_url_check_time.elapsed().as_secs() > 1 {
+                info!("Checking for JSS URL change");
                 last_jss_url_check_time = std::time::Instant::now();
                 if let Some(current_jss_url) = jss_url.lock().unwrap().clone() {
                     if current_jss_url != current_jss_url {
@@ -166,6 +169,7 @@ impl JssStage {
                     info!("JSS URL is None; stopping JSS Manager");
                     break;
                 }
+                info!("JSS URL is still {}", current_jss_url);
             }
 
             // See if we are connected correctly to a JSS instance
@@ -177,6 +181,7 @@ impl JssStage {
                 &cluster_info,
             ) {
                 if !jss_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+                    info!("JSS connection is not healthy; waiting for JSS to become available");
                     std::thread::sleep(std::time::Duration::from_millis(400));
                     continue;
                 }
@@ -187,6 +192,7 @@ impl JssStage {
                 // FetchStageManager will revert the right TPU config
                 continue;
             } else {
+                info!("JSS connection is healthy");
                 jss_enabled.store(true, std::sync::atomic::Ordering::Relaxed)
             }
 
