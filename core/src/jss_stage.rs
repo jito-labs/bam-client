@@ -151,6 +151,7 @@ impl JssStage {
         let mut builder_info = None;
         let mut leader_slot_reusables = LeaderSlotReusables::default();
         let mut last_jss_url_check_time = std::time::Instant::now();
+        let mut last_leader_slot = 0;
 
         info!("JSS Manager started");
 
@@ -206,7 +207,9 @@ impl JssStage {
             }
 
             const TICK_LOOKAHEAD: u64 = 8;
-            if poh_recorder.read().unwrap().would_be_leader(TICK_LOOKAHEAD) {
+            if poh_recorder.read().unwrap().would_be_leader(TICK_LOOKAHEAD) &&
+                poh_recorder.read().unwrap().get_current_slot() != last_leader_slot {
+                last_leader_slot = poh_recorder.read().unwrap().get_current_slot();
                 Self::run_leader_slot_mode(
                     &mut jss_connection,
                     &poh_recorder,
