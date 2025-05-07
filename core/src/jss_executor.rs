@@ -925,13 +925,28 @@ impl JssExecutor {
         if bundle.packets.is_empty() {
             return None;
         }
+
+        let Ok(revert_on_error) = bundle
+            .packets
+            .iter()
+            .map(|p| {
+                p.meta
+                    .as_ref()
+                    .and_then(|meta| meta.flags.as_ref())
+                    .map_or(false, |flags| flags.revertable)
+            })
+            .all_equal_value()
+        else {
+            return None;
+        };
+
         let transactions = Self::parse_transactions(bank, bundle.packets.iter());
         if transactions.len() != bundle.packets.len() {
             return None;
         }
 
         Some(ParsedBundle {
-            revert_on_error: bundle.revert_on_error,
+            revert_on_error,
             bank_hash: bank.hash(),
             packets: bundle.packets,
             transactions,
