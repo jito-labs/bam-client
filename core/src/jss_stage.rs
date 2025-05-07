@@ -12,7 +12,7 @@ use std::{
 
 use jito_protos::proto::{
     jss_api::BuilderConfigResp,
-    jss_types::{LeaderState, Socket},
+    jss_types::{BundleResult, LeaderState, Socket},
 };
 use solana_cost_model::block_cost_limits::MAX_BLOCK_UNITS;
 use solana_gossip::cluster_info::ClusterInfo;
@@ -236,7 +236,7 @@ impl JssStage {
         jss_connection: &mut JssConnection,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         executor: &mut JssExecutor,
-        retry_bundle_receiver: &crossbeam_channel::Receiver<[u8; 32]>,
+        retry_bundle_receiver: &crossbeam_channel::Receiver<BundleResult>,
     ) {
         let current_slot = poh_recorder.read().unwrap().get_current_slot();
         let current_tick = poh_recorder.read().unwrap().tick_height()

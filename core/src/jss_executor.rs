@@ -16,9 +16,8 @@ use std::{
 };
 
 use itertools::Itertools;
-use jito_protos::proto::jss_types::{Bundle, Packet};
+use jito_protos::proto::jss_types::{bundle_result, Bundle, BundleResult, Invalid, Packet, Processed, Retryable};
 use prio_graph::{AccessKind, GraphNode, TopLevelId};
-use sha2::Digest;
 use solana_bundle::{
     derive_bundle_id_from_sanitized_transactions, BundleExecutionError, SanitizedBundle,
 };
@@ -89,7 +88,7 @@ impl JssExecutor {
         cluster_info: Arc<ClusterInfo>,
         block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
         bundle_account_locker: BundleAccountLocker,
-        retry_bundle_sender: crossbeam_channel::Sender<[u8; 32]>,
+        retry_bundle_sender: crossbeam_channel::Sender<BundleResult>,
     ) -> Self {
         let (bundle_committer, transaction_commiter) = Self::build_committers(
             replay_vote_sender.clone(),
@@ -178,7 +177,7 @@ impl JssExecutor {
         mut workers: Vec<WorkerAccess>,
         exit: Arc<AtomicBool>,
         successful_count: Arc<AtomicUsize>,
-        retry_bundle_sender: crossbeam_channel::Sender<[u8; 32]>,
+        retry_bundle_sender: crossbeam_channel::Sender<BundleResult>,
     ) {
         info!("spawned management thread");
 
@@ -223,8 +222,12 @@ impl JssExecutor {
 
             for bundle in bundles.iter_mut() {
                 if let Some(bundle) = bundle.take() {
-                    let bundle_id = Self::generate_bundle_id(&bundle.bundle.transactions);
-                    let _ = retry_bundle_sender.try_send(bundle_id);
+                    let _ = retry_bundle_sender.try_send(BundleResult {
+                        seq_id: bundle.bundle_sequence_id.id as u32,
+                        result: Some(bundle_result::Result::Retryable(
+                            Retryable {},
+                        )),
+                    });
                 }
             }
 
@@ -303,7 +306,7 @@ impl JssExecutor {
         cluster_info: Arc<ClusterInfo>,
         block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
         bundle_account_locker: BundleAccountLocker,
-        retry_bundle_sender: crossbeam_channel::Sender<[u8; 32]>,
+        retry_bundle_sender: crossbeam_channel::Sender<BundleResult>,
     ) -> (Vec<std::thread::JoinHandle<()>>, Vec<WorkerAccess>) {
         let mut threads = Vec::new();
         let mut workers = Vec::new();
@@ -367,7 +370,7 @@ impl JssExecutor {
         last_tip_updated_slot: Arc<Mutex<u64>>,
         block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
         bundle_account_locker: BundleAccountLocker,
-        retry_bundle_sender: crossbeam_channel::Sender<[u8; 32]>,
+        retry_bundle_sender: crossbeam_channel::Sender<BundleResult>,
     ) {
         info!("spawned worker thread {}", id);
 
@@ -410,7 +413,6 @@ impl JssExecutor {
                     transactions,
                 } = bundle;
 
-                let bundle_id = Self::generate_bundle_id(&transactions);
                 let (result, process_transactions_us) = measure_us!(Self::execute_record_commit(
                     &current_bank_start,
                     &qos_service,
@@ -432,9 +434,21 @@ impl JssExecutor {
                 // Send back if potentially retry-able
                 if result.is_success() {
                     successful_count.fetch_add(1, Ordering::Relaxed);
-                } else if result.is_retryable() {
-                    retry_bundle_sender.try_send(bundle_id).unwrap();
                 }
+
+                let response_result = Some(if result.is_retryable() {
+                    bundle_result::Result::Retryable(Retryable {})
+                } else if result.is_success() {
+                    bundle_result::Result::Processed(Processed {
+                        cus_consumed: 0, // TODO
+                    })
+                } else {
+                    bundle_result::Result::Invalid(Invalid {})
+                });
+                let _ = retry_bundle_sender.try_send(BundleResult {
+                    seq_id: bundle_sequence_id.id as u32,
+                    result: response_result,
+                });
 
                 // Update metrics
                 metrics
@@ -455,18 +469,6 @@ impl JssExecutor {
             metrics.leader_slot_action(poh_recorder.read().unwrap().bank_start().as_ref());
             qos_service.report_metrics(slot);
         }
-    }
-
-    fn generate_bundle_id(transactions: &[RuntimeTransaction<SanitizedTransaction>]) -> [u8; 32] {
-        let mut hasher = sha2::Sha256::new();
-        for transaction in transactions {
-            let Some(signature) = transaction.signatures().first() else {
-                continue;
-            };
-            hasher.update(signature.as_ref());
-        }
-
-        hasher.finalize().into()
     }
 
     /// Executes and records transactions or bundles
