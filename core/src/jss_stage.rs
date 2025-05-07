@@ -284,8 +284,8 @@ impl JssStage {
             }
 
             // Receive retryable bundle IDs
-            while let Ok(bundle_id) = retry_bundle_receiver.try_recv() {
-                todo!("Handle retryable bundle ID: {:?}", bundle_id);
+            while let Ok(bundle_result) = retry_bundle_receiver.try_recv() {
+                jss_connection.send_bundle_result(bundle_result);
             }
 
             if last_tick_send_time.elapsed().as_millis() < 5 {
