@@ -131,7 +131,7 @@ impl JssStage {
     ) {
         let executor_exit = Arc::new(AtomicBool::new(false));
         let block_builder_fee_info = Arc::new(Mutex::new(BlockBuilderFeeInfo::default()));
-        let (retry_bundle_sender, retry_bundle_receiver) = crossbeam_channel::bounded(10_000);
+        let (bundle_result_sender, bundle_result_receiver) = crossbeam_channel::bounded(10_000);
         const WORKER_THREAD_COUNT: usize = 4;
         let mut executor = JssExecutor::new(
             WORKER_THREAD_COUNT,
@@ -144,7 +144,7 @@ impl JssStage {
             cluster_info.clone(),
             block_builder_fee_info.clone(),
             bundle_account_locker.clone(),
-            retry_bundle_sender,
+            bundle_result_sender,
         );
 
         let mut jss_connection: Option<JssConnection> = None;
@@ -214,7 +214,7 @@ impl JssStage {
                     &mut jss_connection,
                     &poh_recorder,
                     &mut executor,
-                    &retry_bundle_receiver,
+                    &bundle_result_receiver,
                 );
             } else {
                 std::thread::sleep(std::time::Duration::from_millis(5));
@@ -236,7 +236,7 @@ impl JssStage {
         jss_connection: &mut JssConnection,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         executor: &mut JssExecutor,
-        retry_bundle_receiver: &crossbeam_channel::Receiver<BundleResult>,
+        bundle_result_receiver: &crossbeam_channel::Receiver<BundleResult>,
     ) {
         let current_slot = poh_recorder.read().unwrap().get_current_slot();
         let current_tick = poh_recorder.read().unwrap().tick_height()
@@ -251,7 +251,7 @@ impl JssStage {
         // Drain out the old micro-blocks and retryable bundle IDs
         // One of the annoying side-effects of re-using the channel between slots
         jss_connection.drain_bundles();
-        retry_bundle_receiver.try_iter().for_each(|_| ());
+        bundle_result_receiver.try_iter().for_each(|_| ());
 
         // Since this function is triggered ahead of the leader slot
         // Let's send an initial leader state (that might exclude information from a real bank
@@ -284,7 +284,7 @@ impl JssStage {
             }
 
             // Receive retryable bundle IDs
-            while let Ok(bundle_result) = retry_bundle_receiver.try_recv() {
+            while let Ok(bundle_result) = bundle_result_receiver.try_recv() {
                 jss_connection.send_bundle_result(bundle_result);
             }
 

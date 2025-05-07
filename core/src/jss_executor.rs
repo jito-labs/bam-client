@@ -88,7 +88,7 @@ impl JssExecutor {
         cluster_info: Arc<ClusterInfo>,
         block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
         bundle_account_locker: BundleAccountLocker,
-        retry_bundle_sender: crossbeam_channel::Sender<BundleResult>,
+        bundle_result_sender: crossbeam_channel::Sender<BundleResult>,
     ) -> Self {
         let (bundle_committer, transaction_commiter) = Self::build_committers(
             replay_vote_sender.clone(),
@@ -108,7 +108,7 @@ impl JssExecutor {
             cluster_info,
             block_builder_fee_info,
             bundle_account_locker,
-            retry_bundle_sender.clone(),
+            bundle_result_sender.clone(),
         );
 
         const BUNDLE_CHANNEL_SIZE: usize = 100_000;
@@ -122,7 +122,7 @@ impl JssExecutor {
                     worker_handles,
                     exit,
                     successful_count,
-                    retry_bundle_sender,
+                    bundle_result_sender,
                 );
             })
             .unwrap();
@@ -177,7 +177,7 @@ impl JssExecutor {
         mut workers: Vec<WorkerAccess>,
         exit: Arc<AtomicBool>,
         successful_count: Arc<AtomicUsize>,
-        retry_bundle_sender: crossbeam_channel::Sender<BundleResult>,
+        bundle_result_sender: crossbeam_channel::Sender<BundleResult>,
     ) {
         info!("spawned management thread");
 
@@ -222,7 +222,7 @@ impl JssExecutor {
 
             for bundle in bundles.iter_mut() {
                 if let Some(bundle) = bundle.take() {
-                    let _ = retry_bundle_sender.try_send(BundleResult {
+                    let _ = bundle_result_sender.try_send(BundleResult {
                         seq_id: bundle.bundle_sequence_id.id as u32,
                         result: Some(bundle_result::Result::Retryable(
                             Retryable {},
@@ -306,7 +306,7 @@ impl JssExecutor {
         cluster_info: Arc<ClusterInfo>,
         block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
         bundle_account_locker: BundleAccountLocker,
-        retry_bundle_sender: crossbeam_channel::Sender<BundleResult>,
+        bundle_result_sender: crossbeam_channel::Sender<BundleResult>,
     ) -> (Vec<std::thread::JoinHandle<()>>, Vec<WorkerAccess>) {
         let mut threads = Vec::new();
         let mut workers = Vec::new();
@@ -327,7 +327,7 @@ impl JssExecutor {
             let last_tip_updated_slot = last_tip_updated_slot.clone();
             let block_builder_fee_info = block_builder_fee_info.clone();
             let bundle_account_locker = bundle_account_locker.clone();
-            let retry_bundle_sender = retry_bundle_sender.clone();
+            let bundle_result_sender = bundle_result_sender.clone();
             threads.push(
                 std::thread::Builder::new()
                     .name(format!("jss_executor_worker_{}", id))
@@ -346,7 +346,7 @@ impl JssExecutor {
                             last_tip_updated_slot,
                             block_builder_fee_info,
                             bundle_account_locker,
-                            retry_bundle_sender,
+                            bundle_result_sender,
                         );
                     })
                     .unwrap(),
@@ -370,7 +370,7 @@ impl JssExecutor {
         last_tip_updated_slot: Arc<Mutex<u64>>,
         block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
         bundle_account_locker: BundleAccountLocker,
-        retry_bundle_sender: crossbeam_channel::Sender<BundleResult>,
+        bundle_result_sender: crossbeam_channel::Sender<BundleResult>,
     ) {
         info!("spawned worker thread {}", id);
 
@@ -445,7 +445,7 @@ impl JssExecutor {
                 } else {
                     bundle_result::Result::Invalid(Invalid {})
                 });
-                let _ = retry_bundle_sender.try_send(BundleResult {
+                let _ = bundle_result_sender.try_send(BundleResult {
                     seq_id: bundle_sequence_id.id as u32,
                     result: response_result,
                 });
@@ -1456,7 +1456,7 @@ mod tests {
         } = create_test_fixture(1);
 
         let (replay_vote_sender, _) = crossbeam_channel::unbounded();
-        let (retry_bundle_sender, _) = crossbeam_channel::unbounded();
+        let (bundle_result_sender, _) = crossbeam_channel::unbounded();
         let keypair = Arc::new(Keypair::new());
         let cluster_info = {
             let node = Node::new_localhost_with_pubkey(&keypair.pubkey());
@@ -1475,11 +1475,11 @@ mod tests {
             cluster_info,
             Arc::new(Mutex::new(BlockBuilderFeeInfo::default())),
             BundleAccountLocker::default(),
-            retry_bundle_sender,
+            bundle_result_sender,
         );
 
         let successful_bundle = Bundle {
-            revert_on_error: false,
+            seq_id: 0,
             packets: vec![jds_packet_from_versioned_tx(&VersionedTransaction::from(
                 transfer(
                     &genesis_config_info.mint_keypair,
@@ -1490,7 +1490,7 @@ mod tests {
             ))],
         };
         let failed_bundle = Bundle {
-            revert_on_error: true,
+            seq_id: 1,
             packets: vec![
                 // This one would go through
                 jds_packet_from_versioned_tx(&VersionedTransaction::from(transfer(
@@ -1560,7 +1560,7 @@ mod tests {
         } = create_test_fixture(1);
 
         let (replay_vote_sender, _) = crossbeam_channel::unbounded();
-        let (retry_bundle_sender, _) = crossbeam_channel::unbounded();
+        let (bundle_result_sender, _) = crossbeam_channel::unbounded();
         let keypair = Arc::new(leader_keypair);
         let cluster_info = {
             let node = Node::new_localhost_with_pubkey(&keypair.pubkey());
@@ -1584,13 +1584,13 @@ mod tests {
                 block_builder_commission: 5,
             })),
             BundleAccountLocker::default(),
-            retry_bundle_sender,
+            bundle_result_sender,
         );
 
         let tip_accounts = tip_manager.get_tip_accounts();
         let tip_account = tip_accounts.iter().collect::<Vec<_>>()[0];
         let successful_bundle = Bundle {
-            revert_on_error: true,
+            seq_id: 0,
             packets: vec![jds_packet_from_versioned_tx(&VersionedTransaction::from(
                 transfer(
                     &genesis_config_info.mint_keypair,
