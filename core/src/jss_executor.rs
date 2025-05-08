@@ -619,6 +619,7 @@ impl JssExecutor {
             return ExecutionResult {
                 status: ExecutionStatus::Retryable,
                 summary,
+                ..Default::default()
             };
         }
 
@@ -637,6 +638,7 @@ impl JssExecutor {
             return ExecutionResult {
                 status: ExecutionStatus::Retryable,
                 summary,
+                ..Default::default()
             };
         }
 
@@ -692,7 +694,14 @@ impl JssExecutor {
             ExecutionStatus::Success
         };
 
-        ExecutionResult { status, summary }
+        let cus_consumed = result.commit_transaction_details.iter().map(|c| match c {
+            CommitTransactionDetails::Committed {
+                compute_units,
+                loaded_accounts_data_size: _,
+            } => *compute_units,
+            CommitTransactionDetails::NotCommitted => 0,
+        }).collect_vec();
+        ExecutionResult { status, summary, cus_consumed }
     }
 
     fn execute_commit_record_transaction(
@@ -730,6 +739,7 @@ impl JssExecutor {
             return ExecutionResult {
                 status: ExecutionStatus::Failure,
                 summary,
+                ..Default::default()
             };
         }
 
@@ -747,6 +757,7 @@ impl JssExecutor {
             return ExecutionResult {
                 status: ExecutionStatus::Retryable,
                 summary,
+                ..Default::default()
             };
         }
 
@@ -806,6 +817,7 @@ impl JssExecutor {
             return ExecutionResult {
                 status: ExecutionStatus::Retryable,
                 summary,
+                ..Default::default()
             };
         }
 
@@ -814,6 +826,7 @@ impl JssExecutor {
             return ExecutionResult {
                 status: ExecutionStatus::Failure,
                 summary,
+                ..Default::default()
             };
         }
 
@@ -845,6 +858,7 @@ impl JssExecutor {
             return ExecutionResult {
                 status: ExecutionStatus::Retryable,
                 summary,
+                ..Default::default()
             };
         }
 
@@ -891,7 +905,7 @@ impl JssExecutor {
             ExecutionStatus::Failure
         };
 
-        return ExecutionResult { status, summary };
+        return ExecutionResult { status, summary, cus_consumed: vec![cu] };
     }
 
     fn bundle_touches_tip_pdas(bundle: &SanitizedBundle, tip_pdas: &HashSet<Pubkey>) -> bool {
@@ -1043,6 +1057,7 @@ enum ExecutionStatus {
 struct ExecutionResult {
     status: ExecutionStatus,
     summary: ProcessTransactionsSummary,
+    cus_consumed: Vec<u64>,
 }
 
 impl Default for ExecutionResult {
@@ -1065,6 +1080,7 @@ impl Default for ExecutionResult {
                 min_prioritization_fees: 0,
                 max_prioritization_fees: 0,
             },
+            cus_consumed: vec![],
         }
     }
 }
