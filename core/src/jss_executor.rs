@@ -437,7 +437,7 @@ impl JssExecutor {
                     bundle_result::Result::Retryable(Retryable {})
                 } else if result.is_success() {
                     bundle_result::Result::Processed(Processed {
-                        cus_consumed: 0, // TODO
+                        cus_consumed: vec![], // TODO
                     })
                 } else {
                     bundle_result::Result::Invalid(Invalid {})
