@@ -432,11 +432,7 @@ impl JssExecutor {
                 // Unblock next bundles
                 sender.send(bundle_sequence_id).unwrap();
 
-                // Send back if potentially retry-able
-                if result.is_success() {
-                    successful_count.fetch_add(1, Ordering::Relaxed);
-                }
-
+                // Send back the result to JSS
                 let response_result = Some(if result.is_retryable() {
                     bundle_result::Result::Retryable(Retryable {})
                 } else if result.is_success() {
@@ -450,6 +446,10 @@ impl JssExecutor {
                     seq_id: jss_seq_id,
                     result: response_result,
                 });
+
+                if result.is_success() {
+                    successful_count.fetch_add(1, Ordering::Relaxed);
+                }
 
                 // Update metrics
                 metrics
