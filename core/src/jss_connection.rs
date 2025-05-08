@@ -199,10 +199,7 @@ impl JssConnection {
         self.metrics.leaderstate_sent.fetch_add(1, Relaxed);
     }
 
-    pub fn send_bundle_result(
-        &mut self,
-        result: jito_protos::proto::jss_types::BundleResult,
-    ) {
+    pub fn send_bundle_result(&mut self, result: jito_protos::proto::jss_types::BundleResult) {
         let _ = self.outbound_sender.try_send(StartSchedulerMessage {
             msg: Some(Msg::BundleResult(result)),
         });

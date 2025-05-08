@@ -16,7 +16,9 @@ use std::{
 };
 
 use itertools::Itertools;
-use jito_protos::proto::jss_types::{bundle_result, Bundle, BundleResult, Invalid, Packet, Processed, Retryable};
+use jito_protos::proto::jss_types::{
+    bundle_result, Bundle, BundleResult, Invalid, Packet, Processed, Retryable,
+};
 use prio_graph::{AccessKind, GraphNode, TopLevelId};
 use solana_bundle::{
     derive_bundle_id_from_sanitized_transactions, BundleExecutionError, SanitizedBundle,
@@ -224,9 +226,7 @@ impl JssExecutor {
                 if let Some(bundle) = bundle.take() {
                     let _ = bundle_result_sender.try_send(BundleResult {
                         seq_id: bundle.bundle_ordering_id.id as u32,
-                        result: Some(bundle_result::Result::Retryable(
-                            Retryable {},
-                        )),
+                        result: Some(bundle_result::Result::Retryable(Retryable {})),
                     });
                 }
             }
@@ -694,14 +694,22 @@ impl JssExecutor {
             ExecutionStatus::Success
         };
 
-        let cus_consumed = result.commit_transaction_details.iter().map(|c| match c {
-            CommitTransactionDetails::Committed {
-                compute_units,
-                loaded_accounts_data_size: _,
-            } => *compute_units,
-            CommitTransactionDetails::NotCommitted => 0,
-        }).collect_vec();
-        ExecutionResult { status, summary, cus_consumed }
+        let cus_consumed = result
+            .commit_transaction_details
+            .iter()
+            .map(|c| match c {
+                CommitTransactionDetails::Committed {
+                    compute_units,
+                    loaded_accounts_data_size: _,
+                } => *compute_units,
+                CommitTransactionDetails::NotCommitted => 0,
+            })
+            .collect_vec();
+        ExecutionResult {
+            status,
+            summary,
+            cus_consumed,
+        }
     }
 
     fn execute_commit_record_transaction(
@@ -905,7 +913,11 @@ impl JssExecutor {
             ExecutionStatus::Failure
         };
 
-        return ExecutionResult { status, summary, cus_consumed: vec![cu] };
+        return ExecutionResult {
+            status,
+            summary,
+            cus_consumed: vec![cu],
+        };
     }
 
     fn bundle_touches_tip_pdas(bundle: &SanitizedBundle, tip_pdas: &HashSet<Pubkey>) -> bool {
