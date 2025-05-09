@@ -17,7 +17,8 @@ use std::{
 
 use itertools::Itertools;
 use jito_protos::proto::jss_types::{
-    bundle_result, Bundle, BundleResult, Invalid, Packet, Processed, Retryable, TransactionProcessedResult,
+    bundle_result, Bundle, BundleResult, Invalid, Packet, Processed, Retryable,
+    TransactionProcessedResult,
 };
 use prio_graph::{AccessKind, GraphNode, TopLevelId};
 use solana_bundle::{
@@ -436,12 +437,17 @@ impl JssExecutor {
                 let response_result = Some(if result.is_retryable() {
                     bundle_result::Result::Retryable(Retryable {})
                 } else if result.is_success() {
-                    let transaction_results = result.cus_consumed.iter().map(|cus| {
-                        TransactionProcessedResult {
-                            cus_consumed: *cus as u32,
-                            feepayer_balance_after_lamports: 0,
-                        }
-                    }).collect_vec();
+                    let transaction_results = result
+                        .cus_consumed
+                        .iter()
+                        .zip(result.feepayer_balance_after_lamports.iter())
+                        .map(
+                            |(cus, feepayer_balance_after_lamports)| TransactionProcessedResult {
+                                cus_consumed: *cus as u32,
+                                feepayer_balance_after_lamports: *feepayer_balance_after_lamports,
+                            },
+                        )
+                        .collect_vec();
                     bundle_result::Result::Processed(Processed {
                         transaction_results,
                     })
@@ -711,10 +717,21 @@ impl JssExecutor {
                 CommitTransactionDetails::NotCommitted => 0,
             })
             .collect_vec();
+        let feepayer_balance_after_lamports = sanitized_bundle
+            .transactions
+            .iter()
+            .map(|tx| {
+                bank_start
+                    .working_bank
+                    .get_balance(tx.message().fee_payer())
+            })
+            .collect_vec();
+
         ExecutionResult {
             status,
             summary,
             cus_consumed,
+            feepayer_balance_after_lamports,
         }
     }
 
@@ -919,10 +936,16 @@ impl JssExecutor {
             ExecutionStatus::Failure
         };
 
+        let feepayer_balance_after_lamports = transactions
+            .iter()
+            .map(|tx| bank.get_balance(tx.message().fee_payer()))
+            .collect_vec();
+
         return ExecutionResult {
             status,
             summary,
             cus_consumed: vec![cu],
+            feepayer_balance_after_lamports,
         };
     }
 
@@ -1076,6 +1099,7 @@ struct ExecutionResult {
     status: ExecutionStatus,
     summary: ProcessTransactionsSummary,
     cus_consumed: Vec<u64>,
+    feepayer_balance_after_lamports: Vec<u64>,
 }
 
 impl Default for ExecutionResult {
@@ -1099,6 +1123,7 @@ impl Default for ExecutionResult {
                 max_prioritization_fees: 0,
             },
             cus_consumed: vec![],
+            feepayer_balance_after_lamports: vec![],
         }
     }
 }
