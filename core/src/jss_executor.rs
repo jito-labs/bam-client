@@ -17,7 +17,7 @@ use std::{
 
 use itertools::Itertools;
 use jito_protos::proto::jss_types::{
-    bundle_result, Bundle, BundleResult, Invalid, Packet, Processed, Retryable,
+    bundle_result, Bundle, BundleResult, Invalid, Packet, Processed, Retryable, TransactionProcessedResult,
 };
 use prio_graph::{AccessKind, GraphNode, TopLevelId};
 use solana_bundle::{
@@ -436,8 +436,14 @@ impl JssExecutor {
                 let response_result = Some(if result.is_retryable() {
                     bundle_result::Result::Retryable(Retryable {})
                 } else if result.is_success() {
+                    let transaction_results = result.cus_consumed.iter().map(|cus| {
+                        TransactionProcessedResult {
+                            cus_consumed: *cus as u32,
+                            feepayer_balance_after_lamports: 0,
+                        }
+                    }).collect_vec();
                     bundle_result::Result::Processed(Processed {
-                        cus_consumed: vec![], // TODO
+                        transaction_results,
                     })
                 } else {
                     bundle_result::Result::Invalid(Invalid {})
