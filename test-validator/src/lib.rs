@@ -65,7 +65,7 @@ use {
         net::{IpAddr, Ipv4Addr, SocketAddr},
         path::{Path, PathBuf},
         str::FromStr,
-        sync::{Arc, RwLock},
+        sync::{Arc, Mutex, RwLock},
         time::Duration,
     },
     tokio::time::sleep,
@@ -136,7 +136,7 @@ pub struct TestValidatorGenesis {
     pub tpu_enable_udp: bool,
     pub geyser_plugin_manager: Arc<RwLock<GeyserPluginManager>>,
     admin_rpc_service_post_init: Arc<RwLock<Option<AdminRpcRequestMetadataPostInit>>>,
-    pub jss_url: Option<String>,
+    pub jss_url: Arc<Mutex<Option<String>>>,
 }
 
 impl Default for TestValidatorGenesis {
@@ -170,7 +170,7 @@ impl Default for TestValidatorGenesis {
             geyser_plugin_manager: Arc::new(RwLock::new(GeyserPluginManager::new())),
             admin_rpc_service_post_init:
                 Arc::<RwLock<Option<AdminRpcRequestMetadataPostInit>>>::default(),
-            jss_url: None,
+            jss_url: Arc::new(Mutex::new(None)),
         }
     }
 }

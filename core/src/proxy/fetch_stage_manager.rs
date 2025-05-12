@@ -100,6 +100,9 @@ impl FetchStageManager {
                 }
                 
                 if jss_enabled_prev {
+                    fetch_connected = false;
+                    heartbeat_received = false;
+                    pending_disconnect = false;
                     std::thread::sleep(Duration::from_millis(100));
                     continue;
                 }

@@ -23,6 +23,7 @@ use solana_bundle::{
     derive_bundle_id_from_sanitized_transactions, BundleExecutionError, SanitizedBundle,
 };
 use solana_compute_budget_instruction::instructions_processor::process_compute_budget_instructions;
+use solana_gossip::cluster_info::ClusterInfo;
 use solana_ledger::{
     blockstore_processor::TransactionStatusSender, token_balances::collect_token_balances,
 };
@@ -37,7 +38,7 @@ use solana_runtime::{
 use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
 use solana_sdk::{
     clock::MAX_PROCESSING_AGE,
-    packet::PacketFlags,
+    packet::{PacketFlags, PACKET_DATA_SIZE},
     pubkey::Pubkey,
     signature::Keypair,
     transaction::{SanitizedTransaction, TransactionError},
@@ -69,6 +70,8 @@ use crate::{
     tip_manager::TipManager,
 };
 
+use solana_sdk::hash::Hash;
+
 pub struct JssExecutor {
     bundle_sender: crossbeam_channel::Sender<ParsedBundle>,
     threads: Vec<std::thread::JoinHandle<()>>,
@@ -83,7 +86,7 @@ impl JssExecutor {
         prioritization_fee_cache: Arc<PrioritizationFeeCache>,
         tip_manager: TipManager,
         exit: Arc<AtomicBool>,
-        keypair: Arc<Keypair>,
+        cluster_info: Arc<ClusterInfo>,
         block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
         bundle_account_locker: BundleAccountLocker,
         retry_bundle_sender: crossbeam_channel::Sender<[u8; 32]>,
@@ -103,7 +106,7 @@ impl JssExecutor {
             exit.clone(),
             tip_manager.clone(),
             successful_count.clone(),
-            keypair,
+            cluster_info,
             block_builder_fee_info,
             bundle_account_locker,
             retry_bundle_sender.clone(),
@@ -162,18 +165,8 @@ impl JssExecutor {
 
     // Serialize transactions from micro-block and send them to the scheduling thread
     pub fn schedule_bundle(&mut self, bank: &Bank, bundle: Bundle) -> bool {
-        if bundle.packets.is_empty() {
+        let Some(parsed_bundle) = Self::parse_bundle(bundle, bank) else {
             return false;
-        }
-
-        let transactions = Self::parse_transactions(bank, bundle.packets.iter());
-        if transactions.is_empty() {
-            return false;
-        }
-
-        let parsed_bundle = ParsedBundle {
-            revert_on_error: bundle.revert_on_error,
-            transactions,
         };
         self.bundle_sender.try_send(parsed_bundle).is_ok()
     }
@@ -194,14 +187,13 @@ impl JssExecutor {
         let mut prio_graph = prio_graph::PrioGraph::new(|id: &BundleSequenceId, _graph_node| *id);
 
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
-            if !poh_recorder.read().unwrap().would_be_leader(0) {
+            let Some(bank_start) = poh_recorder.read().unwrap().bank_start() else {
                 std::thread::sleep(Duration::from_millis(1));
                 continue;
-            }
+            };
 
-            // Bank will hopefully be ready very soon
-            if poh_recorder.read().unwrap().bank_start().is_none() {
-                std::thread::sleep(Duration::from_micros(1));
+            if !bank_start.should_working_bank_still_be_processing_txs() {
+                std::thread::sleep(Duration::from_millis(1));
                 continue;
             }
 
@@ -209,7 +201,7 @@ impl JssExecutor {
             prio_graph.clear();
             successful_count.store(0, Ordering::Relaxed);
 
-            while poh_recorder.read().unwrap().would_be_leader(0) {
+            while bank_start.should_working_bank_still_be_processing_txs() {
                 Self::maybe_ingest_new_bundle(
                     &bundle_receiver,
                     &mut prio_graph,
@@ -236,6 +228,8 @@ impl JssExecutor {
                 }
             }
 
+            metrics.bundles_executed_successfully =
+                successful_count.load(Ordering::Relaxed) as usize;
             metrics.report();
         }
     }
@@ -285,15 +279,15 @@ impl JssExecutor {
                 prio_graph.unblock(&bundle_id);
             }
 
-            let Some(bundle_id) = prio_graph.pop() else {
-                continue;
-            };
-            let Some(bundle) = bundles[bundle_id.id].take() else {
+            let Some(bundle) = prio_graph
+                .pop()
+                .and_then(|bundle_id| bundles[bundle_id.id].take())
+            else {
                 continue;
             };
 
             if worker.send(bundle) {
-                metrics.bundles_schueduled += 1;
+                metrics.bundles_scheduled += 1;
             }
         }
     }
@@ -306,7 +300,7 @@ impl JssExecutor {
         exit: Arc<AtomicBool>,
         tip_manager: TipManager,
         successful_count: Arc<AtomicUsize>,
-        keypair: Arc<Keypair>,
+        cluster_info: Arc<ClusterInfo>,
         block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
         bundle_account_locker: BundleAccountLocker,
         retry_bundle_sender: crossbeam_channel::Sender<[u8; 32]>,
@@ -326,7 +320,7 @@ impl JssExecutor {
             let exit = exit.clone();
             let tip_manager = tip_manager.clone();
             let successful_count = successful_count.clone();
-            let keypair = keypair.clone();
+            let cluster_info = cluster_info.clone();
             let last_tip_updated_slot = last_tip_updated_slot.clone();
             let block_builder_fee_info = block_builder_fee_info.clone();
             let bundle_account_locker = bundle_account_locker.clone();
@@ -345,7 +339,7 @@ impl JssExecutor {
                             exit,
                             tip_manager,
                             successful_count,
-                            keypair,
+                            cluster_info,
                             last_tip_updated_slot,
                             block_builder_fee_info,
                             bundle_account_locker,
@@ -369,7 +363,7 @@ impl JssExecutor {
         exit: Arc<AtomicBool>,
         tip_manager: TipManager,
         successful_count: Arc<AtomicUsize>,
-        keypair: Arc<Keypair>,
+        cluster_info: Arc<ClusterInfo>,
         last_tip_updated_slot: Arc<Mutex<u64>>,
         block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
         bundle_account_locker: BundleAccountLocker,
@@ -386,7 +380,7 @@ impl JssExecutor {
                 while let Ok(bundle) = receiver.try_recv() {
                     sender.send(bundle.bundle_sequence_id).unwrap();
                 }
-                std::thread::sleep(Duration::from_micros(500));
+                std::thread::sleep(Duration::from_millis(1));
                 continue;
             };
             let current_block_builder_fee_info = block_builder_fee_info.lock().unwrap().clone();
@@ -398,16 +392,25 @@ impl JssExecutor {
             while current_bank_start.should_working_bank_still_be_processing_txs() {
                 let Ok(ParsedBundleWithId {
                     bundle_sequence_id,
-                    bundle:
-                        ParsedBundle {
-                            revert_on_error,
-                            transactions: txns,
-                        },
+                    mut bundle,
                 }) = receiver.recv_timeout(Duration::from_millis(1))
                 else {
                     continue;
                 };
-                let bundle_id = Self::generate_bundle_id(&txns);
+
+                if !bundle.reparse_if_needed(&current_bank_start.working_bank) {
+                    // If the bundle is not valid anymore, we can just ignore it.
+                    sender.send(bundle_sequence_id).unwrap();
+                    continue;
+                }
+                let ParsedBundle {
+                    revert_on_error,
+                    bank_hash: _,
+                    packets: _,
+                    transactions,
+                } = bundle;
+
+                let bundle_id = Self::generate_bundle_id(&transactions);
                 let (result, process_transactions_us) = measure_us!(Self::execute_record_commit(
                     &current_bank_start,
                     &qos_service,
@@ -415,9 +418,9 @@ impl JssExecutor {
                     &mut bundle_committer,
                     &mut transaction_commiter,
                     revert_on_error,
-                    txns,
+                    transactions,
                     &tip_manager,
-                    &keypair,
+                    &cluster_info,
                     &last_tip_updated_slot,
                     &current_block_builder_fee_info,
                     &bundle_account_locker,
@@ -449,7 +452,7 @@ impl JssExecutor {
             }
 
             // Report slot metrics
-            metrics.leader_slot_action(None);
+            metrics.leader_slot_action(poh_recorder.read().unwrap().bank_start().as_ref());
             qos_service.report_metrics(slot);
         }
     }
@@ -476,7 +479,7 @@ impl JssExecutor {
         revert_on_error: bool,
         transactions: Vec<RuntimeTransaction<SanitizedTransaction>>,
         tip_manager: &TipManager,
-        keypair: &Keypair,
+        cluster_info: &ClusterInfo,
         last_tip_updated_slot: &Mutex<u64>,
         block_builder_fee_info: &BlockBuilderFeeInfo,
         bundle_account_locker: &BundleAccountLocker,
@@ -497,7 +500,7 @@ impl JssExecutor {
                         &recorder,
                         bundle_committer,
                         tip_manager,
-                        keypair,
+                        &cluster_info.keypair(),
                         block_builder_fee_info,
                         bundle_account_locker,
                     ) {
@@ -897,7 +900,10 @@ impl JssExecutor {
         })
     }
 
-    fn get_min_max_fees(bank: &Bank, transactions: &[RuntimeTransaction<SanitizedTransaction>]) -> (u64, u64) {
+    fn get_min_max_fees(
+        bank: &Bank,
+        transactions: &[RuntimeTransaction<SanitizedTransaction>],
+    ) -> (u64, u64) {
         let min_max = transactions
             .iter()
             .filter_map(|transaction| {
@@ -915,12 +921,33 @@ impl JssExecutor {
         (min_prioritization_fees, max_prioritization_fees)
     }
 
+    fn parse_bundle(bundle: Bundle, bank: &Bank) -> Option<ParsedBundle> {
+        if bundle.packets.is_empty() {
+            return None;
+        }
+        let transactions = Self::parse_transactions(bank, bundle.packets.iter());
+        if transactions.len() != bundle.packets.len() {
+            return None;
+        }
+
+        Some(ParsedBundle {
+            revert_on_error: bundle.revert_on_error,
+            bank_hash: bank.hash(),
+            packets: bundle.packets,
+            transactions,
+        })
+    }
+
     fn parse_transactions<'a>(
         bank: &Bank,
         packets: impl Iterator<Item = &'a Packet>,
     ) -> Vec<RuntimeTransaction<SanitizedTransaction>> {
         packets
             .filter_map(|packet| {
+                if packet.data.len() > PACKET_DATA_SIZE {
+                    return None;
+                }
+
                 let mut solana_packet = solana_sdk::packet::Packet::default();
                 solana_packet.meta_mut().size = packet.data.len() as usize;
                 solana_packet.meta_mut().set_discard(false);
@@ -951,7 +978,7 @@ impl JssExecutor {
                 }
                 let packet = ImmutableDeserializedPacket::new(solana_packet).ok()?;
                 let sanitized_transaction = packet.build_sanitized_transaction(
-                    false,
+                    bank.vote_only_bank(),
                     bank,
                     bank.get_reserved_account_keys(),
                 )?;
@@ -1061,7 +1088,24 @@ impl PartialOrd for BundleSequenceId {
 
 struct ParsedBundle {
     revert_on_error: bool,
+    bank_hash: Hash,
+    packets: Vec<Packet>,
     transactions: Vec<RuntimeTransaction<SanitizedTransaction>>,
+}
+
+impl ParsedBundle {
+    fn reparse_if_needed(&mut self, bank: &Bank) -> bool {
+        if self.bank_hash != bank.hash() {
+            let new_transactions = JssExecutor::parse_transactions(bank, self.packets.iter());
+            if new_transactions.len() != self.packets.len() {
+                return false;
+            }
+            self.transactions = new_transactions;
+            self.bank_hash = bank.hash();
+            return true;
+        }
+        true
+    }
 }
 
 struct ParsedBundleWithId {
@@ -1123,7 +1167,8 @@ impl WorkerAccess {
 #[derive(Default)]
 struct JssSchedulerMetrics {
     bundles_received: usize,
-    bundles_schueduled: usize,
+    bundles_scheduled: usize,
+    bundles_executed_successfully: usize,
 }
 
 impl JssSchedulerMetrics {
@@ -1131,14 +1176,16 @@ impl JssSchedulerMetrics {
         datapoint_info!(
             "jss_scheduler_metrics",
             ("bundles_received", self.bundles_received, i64),
-            ("bundles_scheduled", self.bundles_schueduled, i64),
+            ("bundles_scheduled", self.bundles_scheduled, i64),
+            (
+                "bundles_executed_successfully",
+                self.bundles_executed_successfully,
+                i64
+            ),
         );
         *self = Self::default();
     }
 }
-
-// Per worker tracking of:
-// - LeaderSlotMetrics
 
 struct JssWorkerMetrics {
     leader_slot_metrics_tracker: LeaderSlotMetricsTracker,
@@ -1175,6 +1222,7 @@ mod tests {
     use crossbeam_channel::Receiver;
     use jito_protos::proto::jss_types::{self, Bundle};
     use jito_tip_distribution::sdk::derive_tip_distribution_account_address;
+    use solana_gossip::cluster_info::{ClusterInfo, Node};
     use solana_ledger::{
         blockstore::Blockstore, genesis_utils::GenesisConfigInfo, get_tmp_ledger_path_auto_delete,
         leader_schedule_cache::LeaderScheduleCache,
@@ -1201,6 +1249,7 @@ mod tests {
         system_transaction::transfer,
         transaction::VersionedTransaction,
     };
+    use solana_streamer::socket::SocketAddrSpace;
     use solana_vote_program::vote_state::VoteState;
 
     use crate::{
@@ -1391,6 +1440,12 @@ mod tests {
 
         let (replay_vote_sender, _) = crossbeam_channel::unbounded();
         let (retry_bundle_sender, _) = crossbeam_channel::unbounded();
+        let keypair = Arc::new(Keypair::new());
+        let cluster_info = {
+            let node = Node::new_localhost_with_pubkey(&keypair.pubkey());
+            ClusterInfo::new(node.info, keypair.clone(), SocketAddrSpace::Unspecified)
+        };
+        let cluster_info = Arc::new(cluster_info);
 
         let mut executor = super::JssExecutor::new(
             1,
@@ -1400,7 +1455,7 @@ mod tests {
             Arc::new(PrioritizationFeeCache::default()),
             TipManager::new(TipManagerConfig::default()),
             exit.clone(),
-            Arc::new(Keypair::new()),
+            cluster_info,
             Arc::new(Mutex::new(BlockBuilderFeeInfo::default())),
             BundleAccountLocker::default(),
             retry_bundle_sender,
@@ -1490,6 +1545,11 @@ mod tests {
         let (replay_vote_sender, _) = crossbeam_channel::unbounded();
         let (retry_bundle_sender, _) = crossbeam_channel::unbounded();
         let keypair = Arc::new(leader_keypair);
+        let cluster_info = {
+            let node = Node::new_localhost_with_pubkey(&keypair.pubkey());
+            ClusterInfo::new(node.info, keypair.clone(), SocketAddrSpace::Unspecified)
+        };
+        let cluster_info = Arc::new(cluster_info);
         let block_builder_pubkey = Pubkey::new_unique();
 
         let tip_manager = get_tip_manager(&genesis_config_info.voting_keypair.pubkey());
@@ -1501,7 +1561,7 @@ mod tests {
             Arc::new(PrioritizationFeeCache::default()),
             tip_manager.clone(),
             exit.clone(),
-            keypair.clone(),
+            cluster_info,
             Arc::new(Mutex::new(BlockBuilderFeeInfo {
                 block_builder: block_builder_pubkey.clone(),
                 block_builder_commission: 5,

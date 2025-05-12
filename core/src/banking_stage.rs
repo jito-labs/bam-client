@@ -1353,6 +1353,7 @@ mod tests {
                     HashSet::default(),
                     BundleAccountLocker::default(),
                     |_| 0,
+                    Arc::new(AtomicBool::new(false)),
                 );
 
                 // wait for banking_stage to eat the packets
@@ -1702,6 +1703,7 @@ mod tests {
                     HashSet::from_iter([blacklisted_keypair.pubkey()]),
                     BundleAccountLocker::default(),
                     |_| 0,
+                    Arc::new(AtomicBool::new(false)),
                 );
 
                 // bad tx

@@ -1,7 +1,7 @@
 //! The `tpu` module implements the Transaction Processing Unit, a
 //! multi-stage transaction processing pipeline in software.
 
-use crate::jss_manager::JssManager;
+use crate::jss_stage::JssStage;
 pub use solana_sdk::net::DEFAULT_TPU_COALESCE;
 // allow multiple connections for NAT and any open/close overlap
 #[deprecated(
@@ -112,7 +112,7 @@ pub struct Tpu {
     block_engine_stage: BlockEngineStage,
     fetch_stage_manager: FetchStageManager,
     bundle_stage: BundleStage,
-    jss_manager: Option<JssManager>,
+    jss_manager: JssStage,
 }
 
 impl Tpu {
@@ -161,7 +161,7 @@ impl Tpu {
         tip_manager_config: TipManagerConfig,
         shred_receiver_address: Arc<RwLock<Option<SocketAddr>>>,
         preallocated_bundle_cost: u64,
-        jss_url: Option<String>,
+        jss_url: Arc<Mutex<Option<String>>>,
     ) -> (Self, Vec<Arc<dyn NotifyKeyUpdate + Sync + Send>>) {
         let TpuSockets {
             transactions: transactions_sockets,
@@ -264,7 +264,7 @@ impl Tpu {
         let (packet_sender, packet_receiver) = unbounded();
         let (bundle_sender, bundle_receiver) = unbounded();
 
-        let jss_enabled = Arc::new(AtomicBool::new(jss_url.is_some()));
+        let jss_enabled = Arc::new(AtomicBool::new(jss_url.lock().unwrap().is_some()));
 
         let sigverify_stage = {
             let verifier = TransactionSigVerifier::new(non_vote_sender.clone());
@@ -417,22 +417,18 @@ impl Tpu {
         );
 
         let exit_for_jss: Arc<AtomicBool> = exit.clone();
-        let jss_manager = jss_enabled
-            .load(std::sync::atomic::Ordering::SeqCst)
-            .then(|| {
-                JssManager::new(
-                    jss_url.unwrap(),
-                    jss_enabled,
-                    poh_recorder.clone(),
-                    exit_for_jss,
-                    cluster_info.clone(),
-                    replay_vote_sender.clone(),
-                    transaction_status_sender.clone(),
-                    prioritization_fee_cache.clone(),
-                    tip_manager.clone(),
-                    bundle_account_locker,
-                )
-            });
+        let jss_manager = JssStage::new(
+            jss_url,
+            jss_enabled,
+            poh_recorder.clone(),
+            exit_for_jss,
+            cluster_info.clone(),
+            replay_vote_sender.clone(),
+            transaction_status_sender.clone(),
+            prioritization_fee_cache.clone(),
+            tip_manager.clone(),
+            bundle_account_locker,
+        );
 
         (
             Self {
@@ -481,9 +477,7 @@ impl Tpu {
         if let Some(tpu_entry_notifier) = self.tpu_entry_notifier {
             tpu_entry_notifier.join()?;
         }
-        if let Some(jss_manager) = self.jss_manager {
-            jss_manager.join()?;
-        }
+        self.jss_manager.join()?;
         let _ = broadcast_result?;
         if let Some(tracer_thread_hdl) = self.tracer_thread_hdl {
             if let Err(tracer_result) = tracer_thread_hdl.join()? {
