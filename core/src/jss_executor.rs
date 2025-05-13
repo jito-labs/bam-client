@@ -16,13 +16,16 @@ use std::{
 };
 
 use itertools::Itertools;
-use jito_protos::proto::jss_types::{Bundle, Packet};
+use jito_protos::proto::jss_types::{
+    bundle_result, Bundle, BundleResult, Invalid, Packet, Processed, Retryable,
+    TransactionProcessedResult,
+};
 use prio_graph::{AccessKind, GraphNode, TopLevelId};
-use sha2::Digest;
 use solana_bundle::{
     derive_bundle_id_from_sanitized_transactions, BundleExecutionError, SanitizedBundle,
 };
 use solana_compute_budget_instruction::instructions_processor::process_compute_budget_instructions;
+use solana_gossip::cluster_info::ClusterInfo;
 use solana_ledger::{
     blockstore_processor::TransactionStatusSender, token_balances::collect_token_balances,
 };
@@ -37,7 +40,7 @@ use solana_runtime::{
 use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
 use solana_sdk::{
     clock::MAX_PROCESSING_AGE,
-    packet::PacketFlags,
+    packet::{PacketFlags, PACKET_DATA_SIZE},
     pubkey::Pubkey,
     signature::Keypair,
     transaction::{SanitizedTransaction, TransactionError},
@@ -69,6 +72,8 @@ use crate::{
     tip_manager::TipManager,
 };
 
+use solana_sdk::hash::Hash;
+
 pub struct JssExecutor {
     bundle_sender: crossbeam_channel::Sender<ParsedBundle>,
     threads: Vec<std::thread::JoinHandle<()>>,
@@ -83,10 +88,10 @@ impl JssExecutor {
         prioritization_fee_cache: Arc<PrioritizationFeeCache>,
         tip_manager: TipManager,
         exit: Arc<AtomicBool>,
-        keypair: Arc<Keypair>,
+        cluster_info: Arc<ClusterInfo>,
         block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
         bundle_account_locker: BundleAccountLocker,
-        retry_bundle_sender: crossbeam_channel::Sender<[u8; 32]>,
+        bundle_result_sender: crossbeam_channel::Sender<BundleResult>,
     ) -> Self {
         let (bundle_committer, transaction_commiter) = Self::build_committers(
             replay_vote_sender.clone(),
@@ -103,10 +108,10 @@ impl JssExecutor {
             exit.clone(),
             tip_manager.clone(),
             successful_count.clone(),
-            keypair,
+            cluster_info,
             block_builder_fee_info,
             bundle_account_locker,
-            retry_bundle_sender.clone(),
+            bundle_result_sender.clone(),
         );
 
         const BUNDLE_CHANNEL_SIZE: usize = 100_000;
@@ -120,7 +125,7 @@ impl JssExecutor {
                     worker_handles,
                     exit,
                     successful_count,
-                    retry_bundle_sender,
+                    bundle_result_sender,
                 );
             })
             .unwrap();
@@ -162,18 +167,8 @@ impl JssExecutor {
 
     // Serialize transactions from micro-block and send them to the scheduling thread
     pub fn schedule_bundle(&mut self, bank: &Bank, bundle: Bundle) -> bool {
-        if bundle.packets.is_empty() {
+        let Some(parsed_bundle) = Self::parse_bundle(bundle, bank) else {
             return false;
-        }
-
-        let transactions = Self::parse_transactions(bank, bundle.packets.iter());
-        if transactions.is_empty() {
-            return false;
-        }
-
-        let parsed_bundle = ParsedBundle {
-            revert_on_error: bundle.revert_on_error,
-            transactions,
         };
         self.bundle_sender.try_send(parsed_bundle).is_ok()
     }
@@ -185,23 +180,22 @@ impl JssExecutor {
         mut workers: Vec<WorkerAccess>,
         exit: Arc<AtomicBool>,
         successful_count: Arc<AtomicUsize>,
-        retry_bundle_sender: crossbeam_channel::Sender<[u8; 32]>,
+        bundle_result_sender: crossbeam_channel::Sender<BundleResult>,
     ) {
         info!("spawned management thread");
 
         let mut metrics = JssSchedulerMetrics::default();
         let mut bundles = Vec::new();
-        let mut prio_graph = prio_graph::PrioGraph::new(|id: &BundleSequenceId, _graph_node| *id);
+        let mut prio_graph = prio_graph::PrioGraph::new(|id: &BundleOrderingId, _graph_node| *id);
 
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
-            if !poh_recorder.read().unwrap().would_be_leader(0) {
+            let Some(bank_start) = poh_recorder.read().unwrap().bank_start() else {
                 std::thread::sleep(Duration::from_millis(1));
                 continue;
-            }
+            };
 
-            // Bank will hopefully be ready very soon
-            if poh_recorder.read().unwrap().bank_start().is_none() {
-                std::thread::sleep(Duration::from_micros(1));
+            if !bank_start.should_working_bank_still_be_processing_txs() {
+                std::thread::sleep(Duration::from_millis(1));
                 continue;
             }
 
@@ -209,7 +203,7 @@ impl JssExecutor {
             prio_graph.clear();
             successful_count.store(0, Ordering::Relaxed);
 
-            while poh_recorder.read().unwrap().would_be_leader(0) {
+            while bank_start.should_working_bank_still_be_processing_txs() {
                 Self::maybe_ingest_new_bundle(
                     &bundle_receiver,
                     &mut prio_graph,
@@ -231,11 +225,15 @@ impl JssExecutor {
 
             for bundle in bundles.iter_mut() {
                 if let Some(bundle) = bundle.take() {
-                    let bundle_id = Self::generate_bundle_id(&bundle.bundle.transactions);
-                    let _ = retry_bundle_sender.try_send(bundle_id);
+                    let _ = bundle_result_sender.try_send(BundleResult {
+                        seq_id: bundle.bundle_ordering_id.id as u32,
+                        result: Some(bundle_result::Result::Retryable(Retryable {})),
+                    });
                 }
             }
 
+            metrics.bundles_executed_successfully =
+                successful_count.load(Ordering::Relaxed) as usize;
             metrics.report();
         }
     }
@@ -244,11 +242,11 @@ impl JssExecutor {
     /// If a worker is available between incoming transactions, it schedules the next batch
     /// so that no workers has to wait.
     fn maybe_ingest_new_bundle<
-        C: std::hash::Hash + Eq + Clone + TopLevelId<BundleSequenceId> + Copy,
-        D: Fn(&BundleSequenceId, &GraphNode<BundleSequenceId>) -> C,
+        C: std::hash::Hash + Eq + Clone + TopLevelId<BundleOrderingId> + Copy,
+        D: Fn(&BundleOrderingId, &GraphNode<BundleOrderingId>) -> C,
     >(
         bundle_receiver: &crossbeam_channel::Receiver<ParsedBundle>,
-        prio_graph: &mut prio_graph::PrioGraph<BundleSequenceId, Pubkey, C, D>,
+        prio_graph: &mut prio_graph::PrioGraph<BundleOrderingId, Pubkey, C, D>,
         bundles: &mut Vec<Option<ParsedBundleWithId>>,
         workers: &mut Vec<WorkerAccess>,
         metrics: &mut JssSchedulerMetrics,
@@ -256,13 +254,13 @@ impl JssExecutor {
         if let Ok(bundle) = bundle_receiver.try_recv() {
             metrics.bundles_received += 1;
             let id = bundles.len();
-            let bundle_sequence_id = BundleSequenceId { id };
+            let bundle_sequence_id = BundleOrderingId { id };
             prio_graph.insert_transaction(
                 bundle_sequence_id,
                 Self::get_bundle_account_access(&bundle.transactions),
             );
             bundles.push(Some(ParsedBundleWithId {
-                bundle_sequence_id,
+                bundle_ordering_id: bundle_sequence_id,
                 bundle,
             }));
             Self::schedule_next_batch(prio_graph, bundles, workers, metrics);
@@ -272,10 +270,10 @@ impl JssExecutor {
     /// Schedules the next batch of transactions to workers, by checking if any worker is available.
     /// If a worker is available, it pops the next bundle from the prio-graph and sends it to the worker.
     fn schedule_next_batch<
-        C: std::hash::Hash + Eq + Clone + TopLevelId<BundleSequenceId> + Copy,
-        D: Fn(&BundleSequenceId, &GraphNode<BundleSequenceId>) -> C,
+        C: std::hash::Hash + Eq + Clone + TopLevelId<BundleOrderingId> + Copy,
+        D: Fn(&BundleOrderingId, &GraphNode<BundleOrderingId>) -> C,
     >(
-        prio_graph: &mut prio_graph::PrioGraph<BundleSequenceId, Pubkey, C, D>,
+        prio_graph: &mut prio_graph::PrioGraph<BundleOrderingId, Pubkey, C, D>,
         bundles: &mut Vec<Option<ParsedBundleWithId>>,
         workers: &mut Vec<WorkerAccess>,
         metrics: &mut JssSchedulerMetrics,
@@ -285,15 +283,15 @@ impl JssExecutor {
                 prio_graph.unblock(&bundle_id);
             }
 
-            let Some(bundle_id) = prio_graph.pop() else {
-                continue;
-            };
-            let Some(bundle) = bundles[bundle_id.id].take() else {
+            let Some(bundle) = prio_graph
+                .pop()
+                .and_then(|bundle_id| bundles[bundle_id.id].take())
+            else {
                 continue;
             };
 
             if worker.send(bundle) {
-                metrics.bundles_schueduled += 1;
+                metrics.bundles_scheduled += 1;
             }
         }
     }
@@ -306,10 +304,10 @@ impl JssExecutor {
         exit: Arc<AtomicBool>,
         tip_manager: TipManager,
         successful_count: Arc<AtomicUsize>,
-        keypair: Arc<Keypair>,
+        cluster_info: Arc<ClusterInfo>,
         block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
         bundle_account_locker: BundleAccountLocker,
-        retry_bundle_sender: crossbeam_channel::Sender<[u8; 32]>,
+        bundle_result_sender: crossbeam_channel::Sender<BundleResult>,
     ) -> (Vec<std::thread::JoinHandle<()>>, Vec<WorkerAccess>) {
         let mut threads = Vec::new();
         let mut workers = Vec::new();
@@ -326,11 +324,11 @@ impl JssExecutor {
             let exit = exit.clone();
             let tip_manager = tip_manager.clone();
             let successful_count = successful_count.clone();
-            let keypair = keypair.clone();
+            let cluster_info = cluster_info.clone();
             let last_tip_updated_slot = last_tip_updated_slot.clone();
             let block_builder_fee_info = block_builder_fee_info.clone();
             let bundle_account_locker = bundle_account_locker.clone();
-            let retry_bundle_sender = retry_bundle_sender.clone();
+            let bundle_result_sender = bundle_result_sender.clone();
             threads.push(
                 std::thread::Builder::new()
                     .name(format!("jss_executor_worker_{}", id))
@@ -345,11 +343,11 @@ impl JssExecutor {
                             exit,
                             tip_manager,
                             successful_count,
-                            keypair,
+                            cluster_info,
                             last_tip_updated_slot,
                             block_builder_fee_info,
                             bundle_account_locker,
-                            retry_bundle_sender,
+                            bundle_result_sender,
                         );
                     })
                     .unwrap(),
@@ -365,15 +363,15 @@ impl JssExecutor {
         mut bundle_committer: bundle_stage::committer::Committer,
         mut transaction_commiter: banking_stage::committer::Committer,
         receiver: crossbeam_channel::Receiver<ParsedBundleWithId>,
-        sender: crossbeam_channel::Sender<BundleSequenceId>,
+        sender: crossbeam_channel::Sender<BundleOrderingId>,
         exit: Arc<AtomicBool>,
         tip_manager: TipManager,
         successful_count: Arc<AtomicUsize>,
-        keypair: Arc<Keypair>,
+        cluster_info: Arc<ClusterInfo>,
         last_tip_updated_slot: Arc<Mutex<u64>>,
         block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
         bundle_account_locker: BundleAccountLocker,
-        retry_bundle_sender: crossbeam_channel::Sender<[u8; 32]>,
+        bundle_result_sender: crossbeam_channel::Sender<BundleResult>,
     ) {
         info!("spawned worker thread {}", id);
 
@@ -384,9 +382,9 @@ impl JssExecutor {
             let Some(current_bank_start) = poh_recorder.read().unwrap().bank_start() else {
                 // If we get a bundle when no bank is active; we can just ignore it.
                 while let Ok(bundle) = receiver.try_recv() {
-                    sender.send(bundle.bundle_sequence_id).unwrap();
+                    sender.send(bundle.bundle_ordering_id).unwrap();
                 }
-                std::thread::sleep(Duration::from_micros(500));
+                std::thread::sleep(Duration::from_millis(1));
                 continue;
             };
             let current_block_builder_fee_info = block_builder_fee_info.lock().unwrap().clone();
@@ -397,17 +395,26 @@ impl JssExecutor {
 
             while current_bank_start.should_working_bank_still_be_processing_txs() {
                 let Ok(ParsedBundleWithId {
-                    bundle_sequence_id,
-                    bundle:
-                        ParsedBundle {
-                            revert_on_error,
-                            transactions: txns,
-                        },
+                    bundle_ordering_id: bundle_sequence_id,
+                    mut bundle,
                 }) = receiver.recv_timeout(Duration::from_millis(1))
                 else {
                     continue;
                 };
-                let bundle_id = Self::generate_bundle_id(&txns);
+
+                if !bundle.reparse_if_needed(&current_bank_start.working_bank) {
+                    // If the bundle is not valid anymore, we can just ignore it.
+                    sender.send(bundle_sequence_id).unwrap();
+                    continue;
+                }
+                let ParsedBundle {
+                    jss_seq_id,
+                    revert_on_error,
+                    bank_hash: _,
+                    packets: _,
+                    transactions,
+                } = bundle;
+
                 let (result, process_transactions_us) = measure_us!(Self::execute_record_commit(
                     &current_bank_start,
                     &qos_service,
@@ -415,9 +422,9 @@ impl JssExecutor {
                     &mut bundle_committer,
                     &mut transaction_commiter,
                     revert_on_error,
-                    txns,
+                    transactions,
                     &tip_manager,
-                    &keypair,
+                    &cluster_info,
                     &last_tip_updated_slot,
                     &current_block_builder_fee_info,
                     &bundle_account_locker,
@@ -426,11 +433,34 @@ impl JssExecutor {
                 // Unblock next bundles
                 sender.send(bundle_sequence_id).unwrap();
 
-                // Send back if potentially retry-able
+                // Send back the result to JSS
+                let response_result = Some(if result.is_retryable() {
+                    bundle_result::Result::Retryable(Retryable {})
+                } else if result.is_success() {
+                    let transaction_results = result
+                        .cus_consumed
+                        .iter()
+                        .zip(result.feepayer_balance_after_lamports.iter())
+                        .map(
+                            |(cus, feepayer_balance_after_lamports)| TransactionProcessedResult {
+                                cus_consumed: *cus as u32,
+                                feepayer_balance_after_lamports: *feepayer_balance_after_lamports,
+                            },
+                        )
+                        .collect_vec();
+                    bundle_result::Result::Processed(Processed {
+                        transaction_results,
+                    })
+                } else {
+                    bundle_result::Result::Invalid(Invalid {})
+                });
+                let _ = bundle_result_sender.try_send(BundleResult {
+                    seq_id: jss_seq_id,
+                    result: response_result,
+                });
+
                 if result.is_success() {
                     successful_count.fetch_add(1, Ordering::Relaxed);
-                } else if result.is_retryable() {
-                    retry_bundle_sender.try_send(bundle_id).unwrap();
                 }
 
                 // Update metrics
@@ -449,21 +479,9 @@ impl JssExecutor {
             }
 
             // Report slot metrics
-            metrics.leader_slot_action(None);
+            metrics.leader_slot_action(poh_recorder.read().unwrap().bank_start().as_ref());
             qos_service.report_metrics(slot);
         }
-    }
-
-    fn generate_bundle_id(transactions: &[RuntimeTransaction<SanitizedTransaction>]) -> [u8; 32] {
-        let mut hasher = sha2::Sha256::new();
-        for transaction in transactions {
-            let Some(signature) = transaction.signatures().first() else {
-                continue;
-            };
-            hasher.update(signature.as_ref());
-        }
-
-        hasher.finalize().into()
     }
 
     /// Executes and records transactions or bundles
@@ -476,7 +494,7 @@ impl JssExecutor {
         revert_on_error: bool,
         transactions: Vec<RuntimeTransaction<SanitizedTransaction>>,
         tip_manager: &TipManager,
-        keypair: &Keypair,
+        cluster_info: &ClusterInfo,
         last_tip_updated_slot: &Mutex<u64>,
         block_builder_fee_info: &BlockBuilderFeeInfo,
         bundle_account_locker: &BundleAccountLocker,
@@ -497,7 +515,7 @@ impl JssExecutor {
                         &recorder,
                         bundle_committer,
                         tip_manager,
-                        keypair,
+                        &cluster_info.keypair(),
                         block_builder_fee_info,
                         bundle_account_locker,
                     ) {
@@ -613,6 +631,7 @@ impl JssExecutor {
             return ExecutionResult {
                 status: ExecutionStatus::Retryable,
                 summary,
+                ..Default::default()
             };
         }
 
@@ -631,6 +650,7 @@ impl JssExecutor {
             return ExecutionResult {
                 status: ExecutionStatus::Retryable,
                 summary,
+                ..Default::default()
             };
         }
 
@@ -686,7 +706,33 @@ impl JssExecutor {
             ExecutionStatus::Success
         };
 
-        ExecutionResult { status, summary }
+        let cus_consumed = result
+            .commit_transaction_details
+            .iter()
+            .map(|c| match c {
+                CommitTransactionDetails::Committed {
+                    compute_units,
+                    loaded_accounts_data_size: _,
+                } => *compute_units,
+                CommitTransactionDetails::NotCommitted => 0,
+            })
+            .collect_vec();
+        let feepayer_balance_after_lamports = sanitized_bundle
+            .transactions
+            .iter()
+            .map(|tx| {
+                bank_start
+                    .working_bank
+                    .get_balance(tx.message().fee_payer())
+            })
+            .collect_vec();
+
+        ExecutionResult {
+            status,
+            summary,
+            cus_consumed,
+            feepayer_balance_after_lamports,
+        }
     }
 
     fn execute_commit_record_transaction(
@@ -724,6 +770,7 @@ impl JssExecutor {
             return ExecutionResult {
                 status: ExecutionStatus::Failure,
                 summary,
+                ..Default::default()
             };
         }
 
@@ -741,6 +788,7 @@ impl JssExecutor {
             return ExecutionResult {
                 status: ExecutionStatus::Retryable,
                 summary,
+                ..Default::default()
             };
         }
 
@@ -800,6 +848,7 @@ impl JssExecutor {
             return ExecutionResult {
                 status: ExecutionStatus::Retryable,
                 summary,
+                ..Default::default()
             };
         }
 
@@ -808,6 +857,7 @@ impl JssExecutor {
             return ExecutionResult {
                 status: ExecutionStatus::Failure,
                 summary,
+                ..Default::default()
             };
         }
 
@@ -839,6 +889,7 @@ impl JssExecutor {
             return ExecutionResult {
                 status: ExecutionStatus::Retryable,
                 summary,
+                ..Default::default()
             };
         }
 
@@ -885,7 +936,17 @@ impl JssExecutor {
             ExecutionStatus::Failure
         };
 
-        return ExecutionResult { status, summary };
+        let feepayer_balance_after_lamports = transactions
+            .iter()
+            .map(|tx| bank.get_balance(tx.message().fee_payer()))
+            .collect_vec();
+
+        return ExecutionResult {
+            status,
+            summary,
+            cus_consumed: vec![cu],
+            feepayer_balance_after_lamports,
+        };
     }
 
     fn bundle_touches_tip_pdas(bundle: &SanitizedBundle, tip_pdas: &HashSet<Pubkey>) -> bool {
@@ -897,7 +958,10 @@ impl JssExecutor {
         })
     }
 
-    fn get_min_max_fees(bank: &Bank, transactions: &[RuntimeTransaction<SanitizedTransaction>]) -> (u64, u64) {
+    fn get_min_max_fees(
+        bank: &Bank,
+        transactions: &[RuntimeTransaction<SanitizedTransaction>],
+    ) -> (u64, u64) {
         let min_max = transactions
             .iter()
             .filter_map(|transaction| {
@@ -915,12 +979,49 @@ impl JssExecutor {
         (min_prioritization_fees, max_prioritization_fees)
     }
 
+    fn parse_bundle(bundle: Bundle, bank: &Bank) -> Option<ParsedBundle> {
+        if bundle.packets.is_empty() {
+            return None;
+        }
+
+        let Ok(revert_on_error) = bundle
+            .packets
+            .iter()
+            .map(|p| {
+                p.meta
+                    .as_ref()
+                    .and_then(|meta| meta.flags.as_ref())
+                    .map_or(false, |flags| flags.revertable)
+            })
+            .all_equal_value()
+        else {
+            return None;
+        };
+
+        let transactions = Self::parse_transactions(bank, bundle.packets.iter());
+        if transactions.len() != bundle.packets.len() {
+            return None;
+        }
+
+        Some(ParsedBundle {
+            jss_seq_id: bundle.seq_id,
+            revert_on_error,
+            bank_hash: bank.hash(),
+            packets: bundle.packets,
+            transactions,
+        })
+    }
+
     fn parse_transactions<'a>(
         bank: &Bank,
         packets: impl Iterator<Item = &'a Packet>,
     ) -> Vec<RuntimeTransaction<SanitizedTransaction>> {
         packets
             .filter_map(|packet| {
+                if packet.data.len() > PACKET_DATA_SIZE {
+                    return None;
+                }
+
                 let mut solana_packet = solana_sdk::packet::Packet::default();
                 solana_packet.meta_mut().size = packet.data.len() as usize;
                 solana_packet.meta_mut().set_discard(false);
@@ -951,7 +1052,7 @@ impl JssExecutor {
                 }
                 let packet = ImmutableDeserializedPacket::new(solana_packet).ok()?;
                 let sanitized_transaction = packet.build_sanitized_transaction(
-                    false,
+                    bank.vote_only_bank(),
                     bank,
                     bank.get_reserved_account_keys(),
                 )?;
@@ -997,6 +1098,8 @@ enum ExecutionStatus {
 struct ExecutionResult {
     status: ExecutionStatus,
     summary: ProcessTransactionsSummary,
+    cus_consumed: Vec<u64>,
+    feepayer_balance_after_lamports: Vec<u64>,
 }
 
 impl Default for ExecutionResult {
@@ -1019,6 +1122,8 @@ impl Default for ExecutionResult {
                 min_prioritization_fees: 0,
                 max_prioritization_fees: 0,
             },
+            cus_consumed: vec![],
+            feepayer_balance_after_lamports: vec![],
         }
     }
 }
@@ -1037,35 +1142,53 @@ impl ExecutionResult {
 /// Since bundles are already sorted, FIFO assignment of ids
 /// can be used to determine priority.
 #[derive(Hash, Eq, PartialEq, Clone, Copy)]
-struct BundleSequenceId {
+struct BundleOrderingId {
     id: usize,
 }
 
-impl TopLevelId<Self> for BundleSequenceId {
+impl TopLevelId<Self> for BundleOrderingId {
     fn id(&self) -> Self {
         *self
     }
 }
 
-impl Ord for BundleSequenceId {
+impl Ord for BundleOrderingId {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.id.cmp(&other.id).reverse()
     }
 }
 
-impl PartialOrd for BundleSequenceId {
+impl PartialOrd for BundleOrderingId {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
 struct ParsedBundle {
+    jss_seq_id: u32,
     revert_on_error: bool,
+    bank_hash: Hash,
+    packets: Vec<Packet>,
     transactions: Vec<RuntimeTransaction<SanitizedTransaction>>,
 }
 
+impl ParsedBundle {
+    fn reparse_if_needed(&mut self, bank: &Bank) -> bool {
+        if self.bank_hash != bank.hash() {
+            let new_transactions = JssExecutor::parse_transactions(bank, self.packets.iter());
+            if new_transactions.len() != self.packets.len() {
+                return false;
+            }
+            self.transactions = new_transactions;
+            self.bank_hash = bank.hash();
+            return true;
+        }
+        true
+    }
+}
+
 struct ParsedBundleWithId {
-    bundle_sequence_id: BundleSequenceId,
+    bundle_ordering_id: BundleOrderingId,
     bundle: ParsedBundle,
 }
 
@@ -1073,14 +1196,14 @@ struct ParsedBundleWithId {
 struct WorkerAccess {
     sender: crossbeam_channel::Sender<ParsedBundleWithId>,
     in_flight: u32,
-    receiver: crossbeam_channel::Receiver<BundleSequenceId>,
+    receiver: crossbeam_channel::Receiver<BundleOrderingId>,
 }
 
 impl WorkerAccess {
     /// Creates a new worker with the given sender.
     fn new(
         sender: crossbeam_channel::Sender<ParsedBundleWithId>,
-        receiver: crossbeam_channel::Receiver<BundleSequenceId>,
+        receiver: crossbeam_channel::Receiver<BundleOrderingId>,
     ) -> Self {
         Self {
             sender,
@@ -1105,7 +1228,7 @@ impl WorkerAccess {
     }
 
     /// Gets the id of the bundle that the worker is done with
-    fn get_unblocking_bundle(&mut self) -> Option<BundleSequenceId> {
+    fn get_unblocking_bundle(&mut self) -> Option<BundleOrderingId> {
         if let Ok(id) = self.receiver.try_recv() {
             self.in_flight -= 1;
             return Some(id);
@@ -1123,7 +1246,8 @@ impl WorkerAccess {
 #[derive(Default)]
 struct JssSchedulerMetrics {
     bundles_received: usize,
-    bundles_schueduled: usize,
+    bundles_scheduled: usize,
+    bundles_executed_successfully: usize,
 }
 
 impl JssSchedulerMetrics {
@@ -1131,14 +1255,16 @@ impl JssSchedulerMetrics {
         datapoint_info!(
             "jss_scheduler_metrics",
             ("bundles_received", self.bundles_received, i64),
-            ("bundles_scheduled", self.bundles_schueduled, i64),
+            ("bundles_scheduled", self.bundles_scheduled, i64),
+            (
+                "bundles_executed_successfully",
+                self.bundles_executed_successfully,
+                i64
+            ),
         );
         *self = Self::default();
     }
 }
-
-// Per worker tracking of:
-// - LeaderSlotMetrics
 
 struct JssWorkerMetrics {
     leader_slot_metrics_tracker: LeaderSlotMetricsTracker,
@@ -1175,6 +1301,7 @@ mod tests {
     use crossbeam_channel::Receiver;
     use jito_protos::proto::jss_types::{self, Bundle};
     use jito_tip_distribution::sdk::derive_tip_distribution_account_address;
+    use solana_gossip::cluster_info::{ClusterInfo, Node};
     use solana_ledger::{
         blockstore::Blockstore, genesis_utils::GenesisConfigInfo, get_tmp_ledger_path_auto_delete,
         leader_schedule_cache::LeaderScheduleCache,
@@ -1201,6 +1328,7 @@ mod tests {
         system_transaction::transfer,
         transaction::VersionedTransaction,
     };
+    use solana_streamer::socket::SocketAddrSpace;
     use solana_vote_program::vote_state::VoteState;
 
     use crate::{
@@ -1390,7 +1518,13 @@ mod tests {
         } = create_test_fixture(1);
 
         let (replay_vote_sender, _) = crossbeam_channel::unbounded();
-        let (retry_bundle_sender, _) = crossbeam_channel::unbounded();
+        let (bundle_result_sender, _) = crossbeam_channel::unbounded();
+        let keypair = Arc::new(Keypair::new());
+        let cluster_info = {
+            let node = Node::new_localhost_with_pubkey(&keypair.pubkey());
+            ClusterInfo::new(node.info, keypair.clone(), SocketAddrSpace::Unspecified)
+        };
+        let cluster_info = Arc::new(cluster_info);
 
         let mut executor = super::JssExecutor::new(
             1,
@@ -1400,14 +1534,14 @@ mod tests {
             Arc::new(PrioritizationFeeCache::default()),
             TipManager::new(TipManagerConfig::default()),
             exit.clone(),
-            Arc::new(Keypair::new()),
+            cluster_info,
             Arc::new(Mutex::new(BlockBuilderFeeInfo::default())),
             BundleAccountLocker::default(),
-            retry_bundle_sender,
+            bundle_result_sender,
         );
 
         let successful_bundle = Bundle {
-            revert_on_error: false,
+            seq_id: 0,
             packets: vec![jds_packet_from_versioned_tx(&VersionedTransaction::from(
                 transfer(
                     &genesis_config_info.mint_keypair,
@@ -1418,7 +1552,7 @@ mod tests {
             ))],
         };
         let failed_bundle = Bundle {
-            revert_on_error: true,
+            seq_id: 1,
             packets: vec![
                 // This one would go through
                 jds_packet_from_versioned_tx(&VersionedTransaction::from(transfer(
@@ -1488,8 +1622,13 @@ mod tests {
         } = create_test_fixture(1);
 
         let (replay_vote_sender, _) = crossbeam_channel::unbounded();
-        let (retry_bundle_sender, _) = crossbeam_channel::unbounded();
+        let (bundle_result_sender, _) = crossbeam_channel::unbounded();
         let keypair = Arc::new(leader_keypair);
+        let cluster_info = {
+            let node = Node::new_localhost_with_pubkey(&keypair.pubkey());
+            ClusterInfo::new(node.info, keypair.clone(), SocketAddrSpace::Unspecified)
+        };
+        let cluster_info = Arc::new(cluster_info);
         let block_builder_pubkey = Pubkey::new_unique();
 
         let tip_manager = get_tip_manager(&genesis_config_info.voting_keypair.pubkey());
@@ -1501,19 +1640,19 @@ mod tests {
             Arc::new(PrioritizationFeeCache::default()),
             tip_manager.clone(),
             exit.clone(),
-            keypair.clone(),
+            cluster_info,
             Arc::new(Mutex::new(BlockBuilderFeeInfo {
                 block_builder: block_builder_pubkey.clone(),
                 block_builder_commission: 5,
             })),
             BundleAccountLocker::default(),
-            retry_bundle_sender,
+            bundle_result_sender,
         );
 
         let tip_accounts = tip_manager.get_tip_accounts();
         let tip_account = tip_accounts.iter().collect::<Vec<_>>()[0];
         let successful_bundle = Bundle {
-            revert_on_error: true,
+            seq_id: 0,
             packets: vec![jds_packet_from_versioned_tx(&VersionedTransaction::from(
                 transfer(
                     &genesis_config_info.mint_keypair,
