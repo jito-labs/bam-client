@@ -475,6 +475,8 @@ fn main() {
         ..JsonRpcConfig::default_for_test()
     });
 
+    genesis.jss_url = matches.value_of("jss_url").map(|url| url.into());
+
     if !accounts_to_clone.is_empty() {
         if let Err(e) = genesis.clone_accounts(
             accounts_to_clone,
