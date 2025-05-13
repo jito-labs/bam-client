@@ -12,7 +12,7 @@ use std::{
 
 use jito_protos::proto::{
     jss_api::BuilderConfigResp,
-    jss_types::{AccountComputeUnitBudget, LeaderState, Socket},
+    jss_types::{BundleResult, LeaderState, Socket},
 };
 use solana_cost_model::block_cost_limits::MAX_BLOCK_UNITS;
 use solana_gossip::cluster_info::ClusterInfo;
@@ -131,7 +131,7 @@ impl JssStage {
     ) {
         let executor_exit = Arc::new(AtomicBool::new(false));
         let block_builder_fee_info = Arc::new(Mutex::new(BlockBuilderFeeInfo::default()));
-        let (retry_bundle_sender, retry_bundle_receiver) = crossbeam_channel::bounded(10_000);
+        let (bundle_result_sender, bundle_result_receiver) = crossbeam_channel::bounded(10_000);
         const WORKER_THREAD_COUNT: usize = 4;
         let mut executor = JssExecutor::new(
             WORKER_THREAD_COUNT,
@@ -144,12 +144,11 @@ impl JssStage {
             cluster_info.clone(),
             block_builder_fee_info.clone(),
             bundle_account_locker.clone(),
-            retry_bundle_sender,
+            bundle_result_sender,
         );
 
         let mut jss_connection: Option<JssConnection> = None;
         let mut builder_info = None;
-        let mut leader_slot_reusables = LeaderSlotReusables::default();
         let mut last_jss_url_check_time = std::time::Instant::now();
         let mut last_leader_slot = 0;
 
@@ -207,15 +206,15 @@ impl JssStage {
             }
 
             const TICK_LOOKAHEAD: u64 = 8;
-            if poh_recorder.read().unwrap().would_be_leader(TICK_LOOKAHEAD) &&
-                poh_recorder.read().unwrap().get_current_slot() != last_leader_slot {
+            if poh_recorder.read().unwrap().would_be_leader(TICK_LOOKAHEAD)
+                && poh_recorder.read().unwrap().get_current_slot() != last_leader_slot
+            {
                 last_leader_slot = poh_recorder.read().unwrap().get_current_slot();
                 Self::run_leader_slot_mode(
                     &mut jss_connection,
                     &poh_recorder,
                     &mut executor,
-                    &retry_bundle_receiver,
-                    &mut leader_slot_reusables,
+                    &bundle_result_receiver,
                 );
             } else {
                 std::thread::sleep(std::time::Duration::from_millis(5));
@@ -237,8 +236,7 @@ impl JssStage {
         jss_connection: &mut JssConnection,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         executor: &mut JssExecutor,
-        retry_bundle_receiver: &crossbeam_channel::Receiver<[u8; 32]>,
-        leader_slot_reusables: &mut LeaderSlotReusables,
+        bundle_result_receiver: &crossbeam_channel::Receiver<BundleResult>,
     ) {
         let current_slot = poh_recorder.read().unwrap().get_current_slot();
         let current_tick = poh_recorder.read().unwrap().tick_height()
@@ -250,19 +248,15 @@ impl JssStage {
             current_tick
         );
 
-        leader_slot_reusables.clear();
-        let mut retryable_bundle_ids = &mut leader_slot_reusables.retryable_outgoing_bundle_ids;
-
         // Drain out the old micro-blocks and retryable bundle IDs
         // One of the annoying side-effects of re-using the channel between slots
         jss_connection.drain_bundles();
-        retry_bundle_receiver.try_iter().for_each(|_| ());
+        bundle_result_receiver.try_iter().for_each(|_| ());
 
         // Since this function is triggered ahead of the leader slot
         // Let's send an initial leader state (that might exclude information from a real bank
         // since a bank may not be available yet)
-        let leader_state =
-            Self::generate_leader_state(current_slot, None, &mut retryable_bundle_ids);
+        let leader_state = Self::generate_leader_state(current_slot, None);
         jss_connection.send_leader_state(leader_state);
 
         // Wait up to 400ms for a bank_start
@@ -290,8 +284,8 @@ impl JssStage {
             }
 
             // Receive retryable bundle IDs
-            while let Ok(bundle_id) = retry_bundle_receiver.try_recv() {
-                retryable_bundle_ids.push(bundle_id);
+            while let Ok(bundle_result) = bundle_result_receiver.try_recv() {
+                jss_connection.send_bundle_result(bundle_result);
             }
 
             if last_tick_send_time.elapsed().as_millis() < 5 {
@@ -303,11 +297,7 @@ impl JssStage {
             if current_tick != prev_tick {
                 prev_tick = current_tick;
                 let current_slot = poh_recorder.read().unwrap().get_current_slot();
-                let leader_state = Self::generate_leader_state(
-                    current_slot,
-                    Some(&bank_start),
-                    &mut retryable_bundle_ids,
-                );
+                let leader_state = Self::generate_leader_state(current_slot, Some(&bank_start));
                 jss_connection.send_leader_state(leader_state);
                 last_tick_send_time = std::time::Instant::now();
             }
@@ -319,57 +309,23 @@ impl JssStage {
     /// - Account CU budgets are only included for accounts approaching limits
     /// - Retryable bundle IDs are cleared after being included in a leader state
     /// - Slot CU budget accurately reflects remaining compute units
-    fn generate_leader_state(
-        current_slot: u64,
-        bank_start: Option<&BankStart>,
-        retryable_bundle_ids: &mut Vec<[u8; 32]>,
-    ) -> LeaderState {
+    fn generate_leader_state(current_slot: u64, bank_start: Option<&BankStart>) -> LeaderState {
         if let Some(bank_start) = bank_start {
             let bank = bank_start.working_bank.as_ref();
             let max_block_cu = bank.read_cost_tracker().unwrap().block_cost_limit();
             let consumed_block_cu = bank.read_cost_tracker().unwrap().block_cost();
             let slot_cu_budget = max_block_cu.saturating_sub(consumed_block_cu) as u32;
 
-            let account_cost_limit = bank.read_cost_tracker().unwrap().account_cost_limit;
-            let slot_account_cu_budget = bank
-                .read_cost_tracker()
-                .unwrap()
-                .cost_by_writable_accounts
-                .iter()
-                .filter_map(|(pubkey, cost)| {
-                    let pubkey = pubkey.to_bytes().to_vec();
-                    let available_cus = account_cost_limit.saturating_sub(*cost);
-
-                    // If available_cus is within 90% of the account_cost_limit, skip it
-                    // (Efficiency optimization)
-                    if available_cus > ((account_cost_limit / 10) * 9) {
-                        return None;
-                    }
-
-                    Some(AccountComputeUnitBudget {
-                        pubkey,
-                        available_cus,
-                    })
-                })
-                .collect();
-
             return LeaderState {
                 slot: bank.slot(),
                 tick: bank.tick_height() as u32,
                 slot_cu_budget,
-                slot_account_cu_budget,
-                retryable_bundle_ids: retryable_bundle_ids
-                    .drain(..)
-                    .map(|id| id.to_vec())
-                    .collect(),
             };
         } else {
             return LeaderState {
                 slot: current_slot + 1,
                 tick: 0,
                 slot_cu_budget: MAX_BLOCK_UNITS as u32,
-                slot_account_cu_budget: vec![],
-                retryable_bundle_ids: vec![],
             };
         }
     }
@@ -452,16 +408,5 @@ impl JssStage {
             thread.join()?;
         }
         Ok(())
-    }
-}
-
-#[derive(Default)]
-struct LeaderSlotReusables {
-    retryable_outgoing_bundle_ids: Vec<[u8; 32]>,
-}
-
-impl LeaderSlotReusables {
-    fn clear(&mut self) {
-        self.retryable_outgoing_bundle_ids.clear();
     }
 }
