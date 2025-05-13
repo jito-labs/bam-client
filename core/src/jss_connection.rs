@@ -141,7 +141,6 @@ impl JssConnection {
                 inbound = inbound_stream.message() => {
                     let Ok(Some(inbound)) = inbound else {
                         error!("Failed to receive message from inbound stream");
-                        is_healthy.store(false, Relaxed);
                         break;
                     };
 
@@ -161,6 +160,7 @@ impl JssConnection {
                 }
             }
         }
+        is_healthy.store(false, Relaxed);
     }
 
     fn create_signed_heartbeat(
