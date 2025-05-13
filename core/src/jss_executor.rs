@@ -928,7 +928,7 @@ impl JssExecutor {
 
         let status = if results
             .processed_counts
-            .processed_with_successful_result_count
+            .processed_transactions_count
             == 1
         {
             ExecutionStatus::Success
