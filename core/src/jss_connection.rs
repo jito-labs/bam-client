@@ -216,6 +216,7 @@ impl JssConnection {
 
 impl Drop for JssConnection {
     fn drop(&mut self) {
+        self.is_healthy.store(false, Relaxed);
         self.background_task.abort();
     }
 }
