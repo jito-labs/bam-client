@@ -411,14 +411,19 @@ impl Consumer {
         }
     }
 
-    pub fn early_bailout_batch_output() -> ProcessTransactionBatchOutput {
+    pub fn early_bailout_batch_output(txn_count: usize) -> ProcessTransactionBatchOutput {
         ProcessTransactionBatchOutput {
             cost_model_throttled_transactions_count: 0,
             cost_model_us: 0,
             execute_and_commit_transactions_output: ExecuteAndCommitTransactionsOutput {
-                transaction_counts: LeaderProcessedTransactionCounts::default(),
+                transaction_counts: LeaderProcessedTransactionCounts{
+                    attempted_processing_count: txn_count as u64,
+                    .. Default::default()
+                },
                 retryable_transaction_indexes: vec![],
-                commit_transactions_result: Err(PohRecorderError::MaxHeightReached),
+                commit_transactions_result: (0..txn_count)
+                    .map(|_| Ok(CommitTransactionDetails::NotCommitted))
+                    .collect(),
                 execute_and_commit_timings: LeaderExecuteAndCommitTimings::default(),
                 error_counters: TransactionErrorMetrics::default(),
                 min_prioritization_fees: 0,
@@ -440,7 +445,7 @@ impl Consumer {
         let check_results =
             bank.check_transactions(txs, &pre_results, MAX_PROCESSING_AGE, &mut error_counters);
         if revert_on_error && check_results.iter().any(|result| result.is_err()) {
-            return Self::early_bailout_batch_output();
+            return Self::early_bailout_batch_output(txs.len());
         }
 
         // If checks passed, verify pre-compiles and continue processing on success.
@@ -462,7 +467,7 @@ impl Consumer {
             })
             .collect();
         if revert_on_error && check_results.iter().any(|result| result.is_err()) {
-            return Self::early_bailout_batch_output();
+            return Self::early_bailout_batch_output(txs.len());
         }
 
         let mut output = self.process_and_record_transactions_with_pre_results(
@@ -593,7 +598,7 @@ impl Consumer {
         ));
         drop(bundle_account_locks);
         if revert_on_error && batch.sanitized_transactions().len() != txs.len() {
-            return Self::early_bailout_batch_output();
+            return Self::early_bailout_batch_output(txs.len());
         }
 
         // retryable_txs includes AccountInUse, WouldExceedMaxBlockCostLimit
