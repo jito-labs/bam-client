@@ -33,7 +33,7 @@ use {
         pubkey::Pubkey,
         saturating_add_assign,
         timing::timestamp,
-        transaction::{self, SanitizedTransaction, TransactionError, VersionedTransaction},
+        transaction::{self, TransactionError, VersionedTransaction},
     },
     solana_svm::{
         account_loader::{validate_fee_payer, TransactionCheckResult},
@@ -411,6 +411,22 @@ impl Consumer {
         }
     }
 
+    pub fn early_bailout_batch_output() -> ProcessTransactionBatchOutput {
+        ProcessTransactionBatchOutput {
+            cost_model_throttled_transactions_count: 0,
+            cost_model_us: 0,
+            execute_and_commit_transactions_output: ExecuteAndCommitTransactionsOutput {
+                transaction_counts: LeaderProcessedTransactionCounts::default(),
+                retryable_transaction_indexes: vec![],
+                commit_transactions_result: Err(PohRecorderError::MaxHeightReached),
+                execute_and_commit_timings: LeaderExecuteAndCommitTimings::default(),
+                error_counters: TransactionErrorMetrics::default(),
+                min_prioritization_fees: 0,
+                max_prioritization_fees: 0,
+            },
+        }
+    }
+
     pub fn process_and_record_transactions(
         &self,
         bank: &Arc<Bank>,
@@ -424,19 +440,7 @@ impl Consumer {
         let check_results =
             bank.check_transactions(txs, &pre_results, MAX_PROCESSING_AGE, &mut error_counters);
         if revert_on_error && check_results.iter().any(|result| result.is_err()) {
-            return ProcessTransactionBatchOutput {
-                cost_model_throttled_transactions_count: 0,
-                cost_model_us: 0,
-                execute_and_commit_transactions_output: ExecuteAndCommitTransactionsOutput {
-                    transaction_counts: LeaderProcessedTransactionCounts::default(),
-                    retryable_transaction_indexes: vec![],
-                    commit_transactions_result: Err(PohRecorderError::MaxHeightReached),
-                    execute_and_commit_timings: LeaderExecuteAndCommitTimings::default(),
-                    error_counters,
-                    min_prioritization_fees: 0,
-                    max_prioritization_fees: 0,
-                },
-            };
+            return Self::early_bailout_batch_output();
         }
 
         // If checks passed, verify pre-compiles and continue processing on success.
@@ -458,19 +462,7 @@ impl Consumer {
             })
             .collect();
         if revert_on_error && check_results.iter().any(|result| result.is_err()) {
-            return ProcessTransactionBatchOutput {
-                cost_model_throttled_transactions_count: 0,
-                cost_model_us: 0,
-                execute_and_commit_transactions_output: ExecuteAndCommitTransactionsOutput {
-                    transaction_counts: LeaderProcessedTransactionCounts::default(),
-                    retryable_transaction_indexes: vec![],
-                    commit_transactions_result: Err(PohRecorderError::MaxHeightReached),
-                    execute_and_commit_timings: LeaderExecuteAndCommitTimings::default(),
-                    error_counters,
-                    min_prioritization_fees: 0,
-                    max_prioritization_fees: 0,
-                },
-            };
+            return Self::early_bailout_batch_output();
         }
 
         let mut output = self.process_and_record_transactions_with_pre_results(
@@ -601,19 +593,7 @@ impl Consumer {
         ));
         drop(bundle_account_locks);
         if revert_on_error && batch.sanitized_transactions().len() != txs.len() {
-            return ProcessTransactionBatchOutput {
-                cost_model_throttled_transactions_count,
-                cost_model_us,
-                execute_and_commit_transactions_output: ExecuteAndCommitTransactionsOutput {
-                    transaction_counts: LeaderProcessedTransactionCounts::default(),
-                    retryable_transaction_indexes: vec![],
-                    commit_transactions_result: Err(PohRecorderError::MaxHeightReached),
-                    execute_and_commit_timings: LeaderExecuteAndCommitTimings::default(),
-                    error_counters: TransactionErrorMetrics::default(),
-                    min_prioritization_fees: 0,
-                    max_prioritization_fees: 0,
-                },
-            };
+            return Self::early_bailout_batch_output();
         }
 
         // retryable_txs includes AccountInUse, WouldExceedMaxBlockCostLimit
