@@ -85,7 +85,7 @@ fn bench_entry_lock_accounts(c: &mut Criterion) {
                 for batch in &transaction_batches {
                     let results =
                         accounts.lock_accounts(black_box(batch.iter()), MAX_TX_ACCOUNT_LOCKS);
-                    accounts.unlock_accounts(batch.iter().zip(&results));
+                    accounts.unlock_accounts(batch.iter().zip(&results), false);
                 }
             })
         });

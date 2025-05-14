@@ -1,11 +1,15 @@
 use {
-    solana_sdk::clock::{Epoch, Slot},
+    jito_protos::proto::bam_types::TransactionCommittedResult,
+    solana_sdk::{
+        clock::{Epoch, Slot},
+        transaction::TransactionError,
+    },
     std::fmt::Display,
 };
 
 /// A unique identifier for a transaction batch.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-pub struct TransactionBatchId(u64);
+pub struct TransactionBatchId(pub u64);
 
 impl TransactionBatchId {
     pub fn new(index: u64) -> Self {
@@ -41,6 +45,9 @@ pub struct ConsumeWork<Tx> {
     pub ids: Vec<TransactionId>,
     pub transactions: Vec<Tx>,
     pub max_ages: Vec<MaxAge>,
+    pub revert_on_error: bool,
+    pub respond_with_extra_info: bool,
+    pub schedulable_slot: Option<Slot>,
 }
 
 /// Message: [Worker -> Scheduler]
@@ -48,4 +55,22 @@ pub struct ConsumeWork<Tx> {
 pub struct FinishedConsumeWork<Tx> {
     pub work: ConsumeWork<Tx>,
     pub retryable_indexes: Vec<usize>,
+    pub extra_info: Option<FinishedConsumeWorkExtraInfo>,
+}
+
+pub struct FinishedConsumeWorkExtraInfo {
+    pub processed_results: Vec<TransactionResult>,
+}
+
+#[derive(Clone, Debug)]
+pub enum TransactionResult {
+    Committed(TransactionCommittedResult),
+    NotCommitted(NotCommittedReason),
+}
+
+#[derive(Clone, Debug)]
+pub enum NotCommittedReason {
+    PohTimeout,
+    BatchRevert,
+    Error(TransactionError),
 }

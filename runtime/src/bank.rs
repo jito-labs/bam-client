@@ -3191,6 +3191,7 @@ impl Bank {
         transaction_results: impl Iterator<Item = Result<()>>,
         additional_read_locks: Option<&HashSet<Pubkey>>,
         additional_write_locks: Option<&HashSet<Pubkey>>,
+        batched_locking: bool,
     ) -> TransactionBatch<'a, 'b, Tx> {
         // this lock_results could be: Ok, AccountInUse, WouldExceedBlockMaxLimit or WouldExceedAccountMaxLimit
         let tx_account_lock_limit = self.get_transaction_account_lock_limit();
@@ -3200,8 +3201,17 @@ impl Bank {
             tx_account_lock_limit,
             additional_read_locks,
             additional_write_locks,
+            batched_locking,
         );
-        TransactionBatch::new(lock_results, self, OwnedOrBorrowed::Borrowed(transactions))
+        if batched_locking {
+            TransactionBatch::new_batched(
+                lock_results,
+                self,
+                OwnedOrBorrowed::Borrowed(transactions),
+            )
+        } else {
+            TransactionBatch::new(lock_results, self, OwnedOrBorrowed::Borrowed(transactions))
+        }
     }
 
     /// Prepare a locked transaction batch from a list of sanitized transactions, and their cost
@@ -3401,8 +3411,9 @@ impl Bank {
     pub fn unlock_accounts<'a, Tx: SVMMessage + 'a>(
         &self,
         txs_and_results: impl Iterator<Item = (&'a Tx, &'a Result<()>)> + Clone,
+        batched: bool,
     ) {
-        self.rc.accounts.unlock_accounts(txs_and_results)
+        self.rc.accounts.unlock_accounts(txs_and_results, batched);
     }
 
     pub fn remove_unrooted_slots(&self, slots: &[(Slot, BankId)]) {

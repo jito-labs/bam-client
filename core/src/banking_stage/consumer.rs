@@ -11,10 +11,15 @@ use {
         unprocessed_transaction_storage::{ConsumeScannerPayload, UnprocessedTransactionStorage},
         BankingStageStats,
     },
-    crate::bundle_stage::bundle_account_locker::BundleAccountLocker,
+    crate::{
+        bundle_stage::bundle_account_locker::BundleAccountLocker,
+        proxy::block_engine_stage::BlockBuilderFeeInfo, tip_manager::TipManager,
+    },
     agave_feature_set as feature_set,
+    ahash::AHashSet,
     itertools::Itertools,
     solana_fee::FeeFeatures,
+    solana_gossip::cluster_info::ClusterInfo,
     solana_ledger::token_balances::collect_token_balances,
     solana_measure::{measure::Measure, measure_us},
     solana_poh::poh_recorder::{
@@ -33,7 +38,7 @@ use {
         pubkey::Pubkey,
         saturating_add_assign,
         timing::timestamp,
-        transaction::{self, TransactionError},
+        transaction::{self, TransactionError, VersionedTransaction},
     },
     solana_svm::{
         account_loader::{validate_fee_payer, TransactionCheckResult},
@@ -43,9 +48,10 @@ use {
     },
     solana_transaction_status::PreBalanceInfo,
     std::{
+        cell::Cell,
         collections::HashSet,
         num::Saturating,
-        sync::{atomic::Ordering, Arc},
+        sync::{atomic::Ordering, Arc, Mutex},
         time::Instant,
     },
 };
@@ -75,6 +81,8 @@ pub struct ExecuteAndCommitTransactionsOutput {
     pub(crate) error_counters: TransactionErrorMetrics,
     pub(crate) min_prioritization_fees: u64,
     pub(crate) max_prioritization_fees: u64,
+
+    pub(crate) transaction_errors: Vec<Option<TransactionError>>,
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -89,6 +97,14 @@ pub struct LeaderProcessedTransactionCounts {
     pub(crate) processed_with_successful_result_count: u64,
 }
 
+#[derive(Clone)]
+pub struct TipProcessingDependencies {
+    pub tip_manager: TipManager,
+    pub last_tip_updated_slot: Arc<Mutex<u64>>,
+    pub block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
+    pub cluster_info: Arc<ClusterInfo>,
+}
+
 pub struct Consumer {
     committer: Committer,
     transaction_recorder: TransactionRecorder,
@@ -96,6 +112,24 @@ pub struct Consumer {
     log_messages_bytes_limit: Option<usize>,
     blacklisted_accounts: HashSet<Pubkey>,
     bundle_account_locker: BundleAccountLocker,
+
+    tip_processing_dependencies: Option<TipProcessingDependencies>,
+
+    reusable_seen_messages: Cell<AHashSet<solana_sdk::hash::Hash>>,
+    seq_not_conflict_batch_reusables: Cell<SeqNotConflictBatchReusables>,
+}
+
+#[derive(Default)]
+struct SeqNotConflictBatchReusables {
+    aggregate_write_locks: AHashSet<Pubkey>,
+    aggregate_read_locks: AHashSet<Pubkey>,
+}
+
+impl SeqNotConflictBatchReusables {
+    pub fn clear(&mut self) {
+        self.aggregate_write_locks.clear();
+        self.aggregate_read_locks.clear();
+    }
 }
 
 impl Consumer {
@@ -114,6 +148,31 @@ impl Consumer {
             log_messages_bytes_limit,
             blacklisted_accounts,
             bundle_account_locker,
+            tip_processing_dependencies: None,
+            reusable_seen_messages: Cell::new(AHashSet::new()),
+            seq_not_conflict_batch_reusables: Cell::new(SeqNotConflictBatchReusables::default()),
+        }
+    }
+
+    pub fn new_with_maybe_tip_processing(
+        committer: Committer,
+        transaction_recorder: TransactionRecorder,
+        qos_service: QosService,
+        log_messages_bytes_limit: Option<usize>,
+        blacklisted_accounts: HashSet<Pubkey>,
+        bundle_account_locker: BundleAccountLocker,
+        tip_processing_dependencies: Option<TipProcessingDependencies>,
+    ) -> Self {
+        Self {
+            committer,
+            transaction_recorder,
+            qos_service,
+            log_messages_bytes_limit,
+            blacklisted_accounts,
+            bundle_account_locker,
+            tip_processing_dependencies,
+            reusable_seen_messages: Cell::new(AHashSet::new()),
+            seq_not_conflict_batch_reusables: Cell::new(SeqNotConflictBatchReusables::default()),
         }
     }
 
@@ -197,7 +256,8 @@ impl Consumer {
                 &payload.sanitized_transactions,
                 banking_stage_stats,
                 payload.slot_metrics_tracker,
-                reservation_cb
+                reservation_cb,
+                false,
             ));
         payload
             .slot_metrics_tracker
@@ -246,13 +306,15 @@ impl Consumer {
         banking_stage_stats: &BankingStageStats,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
         reservation_cb: &impl Fn(&Bank) -> u64,
+        revert_on_error: bool,
     ) -> ProcessTransactionsSummary {
         let (mut process_transactions_summary, process_transactions_us) = measure_us!(self
             .process_transactions(
                 bank,
                 bank_creation_time,
                 sanitized_transactions,
-                reservation_cb
+                reservation_cb,
+                revert_on_error,
             ));
         slot_metrics_tracker.increment_process_transactions_us(process_transactions_us);
         banking_stage_stats
@@ -305,6 +367,7 @@ impl Consumer {
         bank_creation_time: &Instant,
         transactions: &[impl TransactionWithMeta],
         reservation_cb: &impl Fn(&Bank) -> u64,
+        revert_on_error: bool,
     ) -> ProcessTransactionsSummary {
         let mut chunk_start = 0;
         let mut all_retryable_tx_indexes = vec![];
@@ -319,13 +382,29 @@ impl Consumer {
         while chunk_start != transactions.len() {
             let chunk_end = std::cmp::min(
                 transactions.len(),
-                chunk_start + TARGET_NUM_TRANSACTIONS_PER_BATCH,
+                if revert_on_error {
+                    transactions.len()
+                } else {
+                    chunk_start + TARGET_NUM_TRANSACTIONS_PER_BATCH
+                },
             );
+            let txs = &transactions[chunk_start..chunk_end];
+
+            // Update tip account receivers if needed
+            if !self.run_tip_programs_if_needed(bank, txs, &reservation_cb) {
+                error!("Error running tip programs for transactions: {:?}", txs);
+                datapoint_error!(
+                    "process_transactions_error",
+                    ("error", "tip_programs_error", String),
+                );
+            }
+
             let process_transaction_batch_output = self.process_and_record_transactions(
                 bank,
-                &transactions[chunk_start..chunk_end],
+                txs,
                 chunk_start,
                 reservation_cb,
+                revert_on_error,
             );
 
             let ProcessTransactionBatchOutput {
@@ -404,17 +483,88 @@ impl Consumer {
         }
     }
 
+    fn run_tip_programs_if_needed(
+        &self,
+        bank: &Arc<Bank>,
+        txs: &[impl TransactionWithMeta],
+        reservation_cb: &impl Fn(&Bank) -> u64,
+    ) -> bool {
+        let Some(tip_processing_dependencies) = &self.tip_processing_dependencies else {
+            return true;
+        };
+        let TipProcessingDependencies {
+            tip_manager,
+            last_tip_updated_slot,
+            block_builder_fee_info,
+            cluster_info,
+        } = tip_processing_dependencies;
+
+        // Return true if no tip accounts touched
+        let tip_accounts = tip_manager.get_tip_accounts();
+        if !txs.iter().any(|tx| {
+            tx.account_keys()
+                .iter()
+                .any(|key| tip_accounts.contains(key))
+        }) {
+            return true;
+        }
+
+        let keypair = cluster_info.keypair();
+
+        let mut last_tip_updated_slot_guard = last_tip_updated_slot.lock().unwrap();
+        if bank.slot() == *last_tip_updated_slot_guard {
+            return true;
+        }
+
+        let initialize_tip_programs_bundle =
+            tip_manager.get_initialize_tip_programs_bundle(bank, &keypair);
+        if let Some(init_bundle) = initialize_tip_programs_bundle {
+            let txs = init_bundle.transactions;
+            let result = self.process_and_record_transactions(bank, &txs, 0, reservation_cb, true);
+            if result
+                .execute_and_commit_transactions_output
+                .commit_transactions_result
+                .is_err()
+            {
+                return false;
+            }
+        }
+
+        let block_builder_fee_info = (*block_builder_fee_info.lock().unwrap()).clone();
+        if block_builder_fee_info.block_builder == Pubkey::default() {
+            return false;
+        }
+        if let Ok(Some(tip_crank_bundle)) =
+            tip_manager.get_tip_programs_crank_bundle(bank, &keypair, &block_builder_fee_info)
+        {
+            let txs = tip_crank_bundle.transactions;
+            let result = self.process_and_record_transactions(bank, &txs, 0, reservation_cb, true);
+            if result
+                .execute_and_commit_transactions_output
+                .commit_transactions_result
+                .is_err()
+            {
+                return false;
+            }
+        }
+
+        *last_tip_updated_slot_guard = bank.slot();
+        true
+    }
+
     pub fn process_and_record_transactions(
         &self,
         bank: &Arc<Bank>,
         txs: &[impl TransactionWithMeta],
         chunk_offset: usize,
         reservation_cb: &impl Fn(&Bank) -> u64,
+        revert_on_error: bool,
     ) -> ProcessTransactionBatchOutput {
         let mut error_counters = TransactionErrorMetrics::default();
         let pre_results = vec![Ok(()); txs.len()];
         let check_results =
             bank.check_transactions(txs, &pre_results, MAX_PROCESSING_AGE, &mut error_counters);
+
         // If checks passed, verify pre-compiles and continue processing on success.
         let move_precompile_verification_to_svm = bank
             .feature_set
@@ -433,12 +583,14 @@ impl Consumer {
                 Err(err) => Err(err),
             })
             .collect();
+
         let mut output = self.process_and_record_transactions_with_pre_results(
             bank,
             txs,
             chunk_offset,
             check_results.into_iter(),
             reservation_cb,
+            revert_on_error,
         );
 
         // Accumulate error counters from the initial checks into final results
@@ -446,6 +598,7 @@ impl Consumer {
             .execute_and_commit_transactions_output
             .error_counters
             .accumulate(&error_counters);
+
         output
     }
 
@@ -455,6 +608,7 @@ impl Consumer {
         txs: &[impl TransactionWithMeta],
         max_ages: &[MaxAge],
         reservation_cb: &impl Fn(&Bank) -> u64,
+        revert_on_error: bool,
     ) -> ProcessTransactionBatchOutput {
         let move_precompile_verification_to_svm = bank
             .feature_set
@@ -497,6 +651,7 @@ impl Consumer {
             0,
             pre_results,
             reservation_cb,
+            revert_on_error,
         )
     }
 
@@ -507,7 +662,18 @@ impl Consumer {
         chunk_offset: usize,
         pre_results: impl Iterator<Item = Result<(), TransactionError>>,
         reservation_cb: &impl Fn(&Bank) -> u64,
+        revert_on_error: bool,
     ) -> ProcessTransactionBatchOutput {
+        // Check for duplicate transactions
+        let mut seen_messages = self.reusable_seen_messages.take();
+        seen_messages.clear();
+        let pre_results = txs.iter().zip(pre_results).map(|(tx, result)| {
+            result?;
+            if !seen_messages.insert(*tx.message_hash()) {
+                return Err(TransactionError::AlreadyProcessed);
+            }
+            Ok(())
+        });
         let (
             (transaction_qos_cost_results, cost_model_throttled_transactions_count),
             cost_model_us,
@@ -517,6 +683,7 @@ impl Consumer {
             pre_results,
             reservation_cb
         ));
+        self.reusable_seen_messages.set(seen_messages);
 
         // Only lock accounts for those transactions are selected for the block;
         // Once accounts are locked, other threads cannot encode transactions that will modify the
@@ -530,7 +697,8 @@ impl Consumer {
                 Err(err) => Err(err.clone()),
             }),
             Some(&bundle_account_locks.read_locks()),
-            Some(&bundle_account_locks.write_locks())
+            Some(&bundle_account_locks.write_locks()),
+            revert_on_error,
         ));
         drop(bundle_account_locks);
 
@@ -538,7 +706,7 @@ impl Consumer {
         // WouldExceedMaxAccountCostLimit, WouldExceedMaxVoteCostLimit
         // and WouldExceedMaxAccountDataCostLimit
         let mut execute_and_commit_transactions_output =
-            self.execute_and_commit_transactions_locked(bank, &batch);
+            self.execute_and_commit_transactions_locked(bank, &batch, revert_on_error);
 
         // Once the accounts are new transactions can enter the pipeline to process them
         let (_, unlock_us) = measure_us!(drop(batch));
@@ -592,6 +760,7 @@ impl Consumer {
         &self,
         bank: &Arc<Bank>,
         batch: &TransactionBatch<impl TransactionWithMeta>,
+        revert_on_error: bool,
     ) -> ExecuteAndCommitTransactionsOutput {
         let transaction_status_sender_enabled = self.committer.transaction_status_sender_enabled();
         let mut execute_and_commit_timings = LeaderExecuteAndCommitTimings::default();
@@ -658,6 +827,30 @@ impl Consumer {
                 Ok(_) => None,
             })
             .collect();
+        if revert_on_error && batch.lock_results().iter().any(|res| res.is_err()) {
+            return ExecuteAndCommitTransactionsOutput {
+                transaction_counts: LeaderProcessedTransactionCounts {
+                    attempted_processing_count: batch.sanitized_transactions().len() as u64,
+                    ..Default::default()
+                },
+                retryable_transaction_indexes,
+                commit_transactions_result: Ok((0..batch.sanitized_transactions().len())
+                    .map(|_| CommitTransactionDetails::NotCommitted)
+                    .collect()),
+                execute_and_commit_timings,
+                error_counters,
+                min_prioritization_fees,
+                max_prioritization_fees,
+                transaction_errors: batch
+                    .lock_results()
+                    .iter()
+                    .map(|res| match res {
+                        Ok(_) => None,
+                        Err(error) => Some(error.clone()),
+                    })
+                    .collect(),
+            };
+        }
 
         let (load_and_execute_transactions_output, load_execute_us) = measure_us!(bank
             .load_and_execute_transactions(
@@ -678,6 +871,35 @@ impl Consumer {
                 }
             ));
         execute_and_commit_timings.load_execute_us = load_execute_us;
+        let successful_count = load_and_execute_transactions_output
+            .processed_counts
+            .processed_with_successful_result_count as usize;
+        let transaction_errors = load_and_execute_transactions_output
+            .processing_results
+            .iter()
+            .map(|result| match result {
+                Ok(_) => None,
+                Err(error) => Some(error.clone()),
+            })
+            .collect_vec();
+
+        if revert_on_error && successful_count != batch.sanitized_transactions().len() {
+            return ExecuteAndCommitTransactionsOutput {
+                transaction_counts: LeaderProcessedTransactionCounts {
+                    attempted_processing_count: batch.sanitized_transactions().len() as u64,
+                    ..Default::default()
+                },
+                retryable_transaction_indexes,
+                commit_transactions_result: Ok((0..batch.sanitized_transactions().len())
+                    .map(|_| CommitTransactionDetails::NotCommitted)
+                    .collect()),
+                execute_and_commit_timings,
+                error_counters,
+                min_prioritization_fees,
+                max_prioritization_fees,
+                transaction_errors,
+            };
+        }
 
         let LoadAndExecuteTransactionsOutput {
             processing_results,
@@ -707,9 +929,17 @@ impl Consumer {
         let (freeze_lock, freeze_lock_us) = measure_us!(bank.freeze_lock());
         execute_and_commit_timings.freeze_lock_us = freeze_lock_us;
 
+        let mut reusables = self.seq_not_conflict_batch_reusables.take();
+        let batches = Self::create_sequential_non_conflicting_batches(
+            &mut reusables,
+            processed_transactions
+                .into_iter()
+                .zip(batch.sanitized_transactions().iter()),
+        );
+
         let (record_transactions_summary, record_us) = measure_us!(self
             .transaction_recorder
-            .record_transactions(bank.slot(), vec![processed_transactions]));
+            .record_transactions(bank.slot(), batches));
         execute_and_commit_timings.record_us = record_us;
 
         let RecordTransactionsSummary {
@@ -741,6 +971,7 @@ impl Consumer {
                 error_counters,
                 min_prioritization_fees,
                 max_prioritization_fees,
+                transaction_errors,
             };
         }
 
@@ -791,7 +1022,52 @@ impl Consumer {
             error_counters,
             min_prioritization_fees,
             max_prioritization_fees,
+            transaction_errors,
         }
+    }
+
+    fn create_sequential_non_conflicting_batches<'a>(
+        reusables: &mut SeqNotConflictBatchReusables,
+        transactions: impl Iterator<Item = (VersionedTransaction, &'a (impl TransactionWithMeta + 'a))>,
+    ) -> Vec<Vec<VersionedTransaction>> {
+        let mut result = vec![];
+        let mut current_batch = vec![];
+        reusables.clear();
+        let SeqNotConflictBatchReusables {
+            aggregate_write_locks,
+            aggregate_read_locks,
+        } = reusables;
+
+        for (transaction, transaction_info) in transactions {
+            let account_keys = transaction_info.account_keys();
+            let write_account_locks = account_keys
+                .iter()
+                .enumerate()
+                .filter_map(|(index, key)| transaction_info.is_writable(index).then_some(key));
+            let read_account_locks = account_keys
+                .iter()
+                .enumerate()
+                .filter_map(|(index, key)| (!transaction_info.is_writable(index)).then_some(key));
+            let has_contention = write_account_locks.clone().any(|key| {
+                aggregate_write_locks.contains(key) || aggregate_read_locks.contains(key)
+            }) || read_account_locks
+                .clone()
+                .any(|key| aggregate_write_locks.contains(key));
+            if has_contention {
+                result.push(std::mem::take(&mut current_batch));
+                aggregate_write_locks.clear();
+                aggregate_read_locks.clear();
+            }
+            current_batch.push(transaction);
+            aggregate_write_locks.extend(write_account_locks.cloned());
+            aggregate_read_locks.extend(read_account_locks.cloned());
+        }
+
+        if !current_batch.is_empty() {
+            result.push(current_batch);
+        }
+
+        result
     }
 
     pub fn check_fee_payer_unlocked(
@@ -876,16 +1152,21 @@ impl Consumer {
 mod tests {
     use {
         super::*,
-        crate::banking_stage::{
-            immutable_deserialized_packet::DeserializedPacketError,
-            tests::{create_slow_genesis_config, sanitize_transactions, simulate_poh},
-            unprocessed_packet_batches::{DeserializedPacket, UnprocessedPacketBatches},
-            unprocessed_transaction_storage::ThreadType,
+        crate::{
+            banking_stage::{
+                immutable_deserialized_packet::DeserializedPacketError,
+                tests::{create_slow_genesis_config, sanitize_transactions, simulate_poh},
+                unprocessed_packet_batches::{DeserializedPacket, UnprocessedPacketBatches},
+                unprocessed_transaction_storage::ThreadType,
+            },
+            tip_manager::{TipDistributionAccountConfig, TipManagerConfig},
         },
         agave_reserved_account_keys::ReservedAccountKeys,
         crossbeam_channel::{unbounded, Receiver},
+        jito_tip_distribution::sdk::derive_tip_distribution_account_address,
         solana_cost_model::{cost_model::CostModel, transaction_cost::TransactionCost},
         solana_entry::entry::{next_entry, next_versioned_entry},
+        solana_gossip::cluster_info::Node,
         solana_ledger::{
             blockstore::{entries_to_test_shreds, Blockstore},
             blockstore_processor::TransactionStatusSender,
@@ -898,8 +1179,13 @@ mod tests {
         },
         solana_perf::packet::Packet,
         solana_poh::poh_recorder::{PohRecorder, Record, WorkingBankEntry},
+        solana_program_test::programs::spl_programs,
         solana_rpc::transaction_status_service::TransactionStatusService,
-        solana_runtime::{bank_forks::BankForks, prioritization_fee_cache::PrioritizationFeeCache},
+        solana_runtime::{
+            bank_forks::BankForks, genesis_utils::create_genesis_config_with_leader_ex,
+            installed_scheduler_pool::BankWithScheduler,
+            prioritization_fee_cache::PrioritizationFeeCache,
+        },
         solana_runtime_transaction::runtime_transaction::RuntimeTransaction,
         solana_sdk::{
             account::AccountSharedData,
@@ -909,29 +1195,37 @@ mod tests {
                 state::{AddressLookupTable, LookupTableMeta},
             },
             compute_budget,
-            fee_calculator::FeeCalculator,
+            fee_calculator::{
+                FeeCalculator, FeeRateGovernor, DEFAULT_TARGET_LAMPORTS_PER_SIGNATURE,
+            },
+            genesis_config::ClusterType,
             hash::Hash,
             instruction::InstructionError,
             message::{
                 v0::{self, MessageAddressTableLookup},
                 Message, MessageHeader, VersionedMessage,
             },
+            native_token::sol_to_lamports,
             nonce::{self, state::DurableNonce},
             nonce_account::verify_nonce_account,
             poh_config::PohConfig,
             pubkey::Pubkey,
+            rent::Rent,
             signature::Keypair,
             signer::Signer,
             system_instruction, system_program, system_transaction,
             transaction::{Transaction, VersionedTransaction},
         },
+        solana_streamer::socket::SocketAddrSpace,
         solana_svm::account_loader::CheckedTransactionDetails,
         solana_timings::{ExecuteTimings, ProgramTiming},
         solana_transaction_status::{TransactionStatusMeta, VersionedTransactionWithStatusMeta},
+        solana_vote_program::vote_state::VoteState,
         std::{
             borrow::Cow,
             num::Saturating,
             path::Path,
+            str::FromStr,
             sync::{
                 atomic::{AtomicBool, AtomicU64},
                 RwLock,
@@ -945,12 +1239,14 @@ mod tests {
     fn execute_transactions_with_dummy_poh_service(
         bank: Arc<Bank>,
         transactions: Vec<Transaction>,
-    ) -> ProcessTransactionsSummary {
+        revert_on_error: bool,
+        tip_processing_dependencies: Option<TipProcessingDependencies>,
+    ) -> (ProcessTransactionsSummary, Vec<VersionedTransaction>) {
         let transactions = sanitize_transactions(transactions);
         let ledger_path = get_tmp_ledger_path_auto_delete!();
         let blockstore = Blockstore::open(ledger_path.path())
             .expect("Expected to be able to open database ledger");
-        let (poh_recorder, _entry_receiver, record_receiver) = PohRecorder::new(
+        let (poh_recorder, entry_receiver, record_receiver) = PohRecorder::new(
             bank.tick_height(),
             bank.last_blockhash(),
             bank.clone(),
@@ -977,16 +1273,33 @@ mod tests {
             replay_vote_sender,
             Arc::new(PrioritizationFeeCache::new(0u64)),
         );
-        let consumer = Consumer::new(
+        let consumer = Consumer::new_with_maybe_tip_processing(
             committer,
             recorder,
             QosService::new(1),
             None,
             HashSet::default(),
             BundleAccountLocker::default(),
+            tip_processing_dependencies,
         );
-        let process_transactions_summary =
-            consumer.process_transactions(&bank, &Instant::now(), &transactions, &|_| 0);
+        let process_transactions_summary = consumer.process_transactions(
+            &bank,
+            &Instant::now(),
+            &transactions,
+            &|_| 0,
+            revert_on_error,
+        );
+
+        let recorded: Vec<VersionedTransaction> = entry_receiver
+            .try_iter()
+            .flat_map(|entry| {
+                entry
+                    .entries_ticks
+                    .iter()
+                    .flat_map(|(entry, _)| entry.transactions.clone())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
 
         poh_recorder
             .read()
@@ -995,7 +1308,7 @@ mod tests {
             .store(true, Ordering::Relaxed);
         let _ = poh_simulator.join();
 
-        process_transactions_summary
+        (process_transactions_summary, recorded)
     }
 
     fn generate_new_address_lookup_table(
@@ -1173,7 +1486,7 @@ mod tests {
             );
 
             let process_transactions_batch_output =
-                consumer.process_and_record_transactions(&bank, &transactions, 0, &|_| 0);
+                consumer.process_and_record_transactions(&bank, &transactions, 0, &|_| 0, false);
 
             let ExecuteAndCommitTransactionsOutput {
                 transaction_counts,
@@ -1225,7 +1538,7 @@ mod tests {
             )]);
 
             let process_transactions_batch_output =
-                consumer.process_and_record_transactions(&bank, &transactions, 0, &|_| 0);
+                consumer.process_and_record_transactions(&bank, &transactions, 0, &|_| 0, false);
 
             let ExecuteAndCommitTransactionsOutput {
                 transaction_counts,
@@ -1377,7 +1690,7 @@ mod tests {
             );
 
             let process_transactions_batch_output =
-                consumer.process_and_record_transactions(&bank, &transactions, 0, &|_| 0);
+                consumer.process_and_record_transactions(&bank, &transactions, 0, &|_| 0, false);
             let ExecuteAndCommitTransactionsOutput {
                 transaction_counts,
                 commit_transactions_result,
@@ -1492,7 +1805,7 @@ mod tests {
             );
 
             let process_transactions_batch_output =
-                consumer.process_and_record_transactions(&bank, &transactions, 0, &|_| 0);
+                consumer.process_and_record_transactions(&bank, &transactions, 0, &|_| 0, false);
 
             let ExecuteAndCommitTransactionsOutput {
                 transaction_counts,
@@ -1594,7 +1907,7 @@ mod tests {
             )]);
 
             let process_transactions_batch_output =
-                consumer.process_and_record_transactions(&bank, &transactions, 0, &|_| 0);
+                consumer.process_and_record_transactions(&bank, &transactions, 0, &|_| 0, false);
 
             let ExecuteAndCommitTransactionsOutput {
                 transaction_counts,
@@ -1624,7 +1937,7 @@ mod tests {
             ]);
 
             let process_transactions_batch_output =
-                consumer.process_and_record_transactions(&bank, &transactions, 0, &|_| 0);
+                consumer.process_and_record_transactions(&bank, &transactions, 0, &|_| 0, false);
 
             let ExecuteAndCommitTransactionsOutput {
                 transaction_counts,
@@ -1748,7 +2061,7 @@ mod tests {
             );
 
             let process_transactions_batch_output =
-                consumer.process_and_record_transactions(&bank, &transactions, 0, &|_| 0);
+                consumer.process_and_record_transactions(&bank, &transactions, 0, &|_| 0, false);
 
             poh_recorder
                 .read()
@@ -1797,15 +2110,16 @@ mod tests {
         // InstructionError::InsufficientFunds that is then committed. Needs to be
         // MAX_NUM_TRANSACTIONS_PER_BATCH at least so it doesn't conflict on account locks
         // with the below transaction
-        let mut transactions = vec![
-            system_transaction::transfer(
-                &mint_keypair,
-                &Pubkey::new_unique(),
-                lamports + 1,
-                genesis_config.hash(),
-            );
-            TARGET_NUM_TRANSACTIONS_PER_BATCH
-        ];
+        let mut transactions = (0..TARGET_NUM_TRANSACTIONS_PER_BATCH)
+            .map(|_| {
+                system_transaction::transfer(
+                    &mint_keypair,
+                    &Pubkey::new_unique(),
+                    lamports + 1,
+                    genesis_config.hash(),
+                )
+            })
+            .collect_vec();
 
         // Make one transaction that will succeed.
         transactions.push(system_transaction::transfer(
@@ -1816,12 +2130,15 @@ mod tests {
         ));
 
         let transactions_len = transactions.len();
-        let ProcessTransactionsSummary {
-            reached_max_poh_height,
-            transaction_counts,
-            retryable_transaction_indexes,
-            ..
-        } = execute_transactions_with_dummy_poh_service(bank, transactions);
+        let (
+            ProcessTransactionsSummary {
+                reached_max_poh_height,
+                transaction_counts,
+                retryable_transaction_indexes,
+                ..
+            },
+            _,
+        ) = execute_transactions_with_dummy_poh_service(bank, transactions, false, None);
 
         // All the transactions should have been replayed, but only 1 committed
         assert!(!reached_max_poh_height);
@@ -1857,15 +2174,16 @@ mod tests {
             .set_limits(u64::MAX, u64::MAX, u64::MAX);
 
         // Make all repetitive transactions that conflict on the `mint_keypair`, so only 1 should be executed
-        let mut transactions = vec![
-            system_transaction::transfer(
-                &mint_keypair,
-                &Pubkey::new_unique(),
-                1,
-                genesis_config.hash()
-            );
-            TARGET_NUM_TRANSACTIONS_PER_BATCH
-        ];
+        let mut transactions = (0..TARGET_NUM_TRANSACTIONS_PER_BATCH)
+            .map(|_| {
+                system_transaction::transfer(
+                    &mint_keypair,
+                    &Pubkey::new_unique(),
+                    1,
+                    genesis_config.hash(),
+                )
+            })
+            .collect_vec();
 
         // Make one more in separate batch that also conflicts, but because it's in a separate batch, it
         // should be executed
@@ -1877,12 +2195,15 @@ mod tests {
         ));
 
         let transactions_len = transactions.len();
-        let ProcessTransactionsSummary {
-            reached_max_poh_height,
-            transaction_counts,
-            retryable_transaction_indexes,
-            ..
-        } = execute_transactions_with_dummy_poh_service(bank, transactions);
+        let (
+            ProcessTransactionsSummary {
+                reached_max_poh_height,
+                transaction_counts,
+                retryable_transaction_indexes,
+                ..
+            },
+            _,
+        ) = execute_transactions_with_dummy_poh_service(bank, transactions, false, None);
 
         // All the transactions should have been replayed, but only 2 committed (first and last)
         assert!(!reached_max_poh_height);
@@ -1960,7 +2281,7 @@ mod tests {
             );
 
             let process_transactions_summary =
-                consumer.process_transactions(&bank, &Instant::now(), &transactions, &|_| 0);
+                consumer.process_transactions(&bank, &Instant::now(), &transactions, &|_| 0, false);
 
             let ProcessTransactionsSummary {
                 reached_max_poh_height,
@@ -2096,7 +2417,8 @@ mod tests {
                 BundleAccountLocker::default(),
             );
 
-            let _ = consumer.process_and_record_transactions(&bank, &transactions, 0, &|_| 0);
+            let _ =
+                consumer.process_and_record_transactions(&bank, &transactions, 0, &|_| 0, false);
 
             drop(consumer); // drop/disconnect transaction_status_sender
 
@@ -2250,8 +2572,13 @@ mod tests {
                 BundleAccountLocker::default(),
             );
 
-            let _ =
-                consumer.process_and_record_transactions(&bank, &[sanitized_tx.clone()], 0, &|_| 0);
+            let _ = consumer.process_and_record_transactions(
+                &bank,
+                &[sanitized_tx.clone()],
+                0,
+                &|_| 0,
+                false,
+            );
 
             drop(consumer); // drop/disconnect transaction_status_sender
 
@@ -2738,5 +3065,376 @@ mod tests {
             ]),
             [0, 3, 4, 5]
         );
+    }
+
+    #[test]
+    fn test_process_transactions_instruction_error_revert_on_error() {
+        solana_logger::setup();
+        let lamports = 10_000;
+        let GenesisConfigInfo {
+            genesis_config,
+            mint_keypair,
+            ..
+        } = create_slow_genesis_config(lamports);
+        let (bank, _bank_forks) = Bank::new_no_wallclock_throttle_for_tests(&genesis_config);
+        // set cost tracker limits to MAX so it will not filter out TXs
+        bank.write_cost_tracker()
+            .unwrap()
+            .set_limits(u64::MAX, u64::MAX, u64::MAX);
+
+        // Transfer more than the balance of the mint keypair, should cause a
+        // InstructionError::InsufficientFunds that is then committed. Needs to be
+        // MAX_NUM_TRANSACTIONS_PER_BATCH at least so it doesn't conflict on account locks
+        // with the below transaction
+        let mut transactions = vec![
+            system_transaction::transfer(
+                &mint_keypair,
+                &Pubkey::new_unique(),
+                lamports + 1,
+                genesis_config.hash(),
+            );
+            TARGET_NUM_TRANSACTIONS_PER_BATCH
+        ];
+
+        // Make one transaction that will succeed.
+        transactions.push(system_transaction::transfer(
+            &mint_keypair,
+            &Pubkey::new_unique(),
+            1,
+            genesis_config.hash(),
+        ));
+
+        let transactions_len = transactions.len();
+        let (
+            ProcessTransactionsSummary {
+                reached_max_poh_height,
+                transaction_counts,
+                retryable_transaction_indexes,
+                ..
+            },
+            _,
+        ) = execute_transactions_with_dummy_poh_service(bank, transactions, true, None);
+
+        assert!(!reached_max_poh_height);
+        assert_eq!(
+            transaction_counts,
+            CommittedTransactionsCounts {
+                attempted_processing_count: transactions_len as u64,
+                // None commited; because the first transaction was an error
+                committed_transactions_count: 0,
+                committed_transactions_with_successful_result_count: 0,
+                processed_but_failed_commit: 0,
+            }
+        );
+        assert_eq!(retryable_transaction_indexes, Vec::<usize>::new(),);
+    }
+
+    pub fn create_test_recorder(
+        bank: &Arc<Bank>,
+        blockstore: Arc<Blockstore>,
+        poh_config: Option<PohConfig>,
+        leader_schedule_cache: Option<Arc<LeaderScheduleCache>>,
+    ) -> (
+        Arc<AtomicBool>,
+        Arc<RwLock<PohRecorder>>,
+        JoinHandle<()>,
+        Receiver<WorkingBankEntry>,
+    ) {
+        let leader_schedule_cache = match leader_schedule_cache {
+            Some(provided_cache) => provided_cache,
+            None => Arc::new(LeaderScheduleCache::new_from_bank(bank)),
+        };
+        let exit = Arc::new(AtomicBool::new(false));
+        let poh_config = poh_config.unwrap_or_default();
+
+        let (mut poh_recorder, entry_receiver, record_receiver) = PohRecorder::new(
+            bank.tick_height(),
+            bank.last_blockhash(),
+            bank.clone(),
+            Some((4, 4)),
+            bank.ticks_per_slot(),
+            blockstore,
+            &leader_schedule_cache,
+            &poh_config,
+            exit.clone(),
+        );
+        poh_recorder.set_bank(
+            BankWithScheduler::new_without_scheduler(bank.clone()),
+            false,
+        );
+
+        let poh_recorder = Arc::new(RwLock::new(poh_recorder));
+        let poh_simulator = simulate_poh(record_receiver, &poh_recorder);
+
+        (exit, poh_recorder, poh_simulator, entry_receiver)
+    }
+
+    struct TestFixture {
+        genesis_config_info: GenesisConfigInfo,
+        leader_keypair: Keypair,
+        bank: Arc<Bank>,
+        exit: Arc<AtomicBool>,
+        poh_recorder: Arc<RwLock<PohRecorder>>,
+        poh_simulator: JoinHandle<()>,
+        entry_receiver: Receiver<WorkingBankEntry>,
+        bank_forks: Arc<RwLock<BankForks>>,
+    }
+
+    fn create_test_fixture(mint_sol: u64) -> TestFixture {
+        let mint_keypair = Keypair::new();
+        let leader_keypair = Keypair::new();
+        let voting_keypair = Keypair::new();
+
+        let rent = Rent::default();
+
+        let mut genesis_config = create_genesis_config_with_leader_ex(
+            sol_to_lamports(mint_sol as f64),
+            &mint_keypair.pubkey(),
+            &leader_keypair.pubkey(),
+            &voting_keypair.pubkey(),
+            &solana_sdk::pubkey::new_rand(),
+            rent.minimum_balance(VoteState::size_of()) + sol_to_lamports(1_000_000.0),
+            sol_to_lamports(1_000_000.0),
+            FeeRateGovernor {
+                // Initialize with a non-zero fee
+                lamports_per_signature: DEFAULT_TARGET_LAMPORTS_PER_SIGNATURE / 2,
+                ..FeeRateGovernor::default()
+            },
+            rent.clone(), // most tests don't expect rent
+            ClusterType::Development,
+            spl_programs(&rent),
+        );
+        genesis_config.ticks_per_slot *= 8;
+
+        // workaround for https://github.com/solana-labs/solana/issues/30085
+        // the test can deploy and use spl_programs in the genensis slot without waiting for the next one
+        let (bank, bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
+
+        let bank = Arc::new(Bank::new_from_parent(bank, &Pubkey::default(), 1));
+
+        let ledger_path = get_tmp_ledger_path_auto_delete!();
+        let blockstore = Arc::new(
+            Blockstore::open(ledger_path.path())
+                .expect("Expected to be able to open database ledger"),
+        );
+
+        let (exit, poh_recorder, poh_simulator, entry_receiver) =
+            create_test_recorder(&bank, blockstore, Some(PohConfig::default()), None);
+
+        let validator_pubkey = voting_keypair.pubkey();
+        TestFixture {
+            genesis_config_info: GenesisConfigInfo {
+                genesis_config,
+                mint_keypair,
+                voting_keypair,
+                validator_pubkey,
+            },
+            leader_keypair,
+            bank,
+            bank_forks,
+            exit,
+            poh_recorder,
+            poh_simulator,
+            entry_receiver,
+        }
+    }
+
+    pub fn get_executed_txns(
+        entry_receiver: &Receiver<WorkingBankEntry>,
+        wait: Duration,
+    ) -> Vec<VersionedTransaction> {
+        let mut transactions = Vec::new();
+        let start = std::time::Instant::now();
+        while start.elapsed() < wait {
+            let Ok(WorkingBankEntry {
+                bank: _wbe_bank,
+                entries_ticks,
+            }) = entry_receiver.try_recv()
+            else {
+                continue;
+            };
+            for (entry, _) in entries_ticks {
+                if !entry.transactions.is_empty() {
+                    transactions.extend(entry.transactions);
+                }
+            }
+        }
+        transactions
+    }
+
+    fn get_tip_manager(vote_account: &Pubkey) -> TipManager {
+        TipManager::new(TipManagerConfig {
+            tip_payment_program_id: Pubkey::from_str("T1pyyaTNZsKv2WcRAB8oVnk93mLJw2XzjtVYqCsaHqt")
+                .unwrap(),
+            tip_distribution_program_id: Pubkey::from_str(
+                "4R3gSG8BpU4t19KYj8CfnbtRpnT8gtk4dvTHxVRwc2r7",
+            )
+            .unwrap(),
+            tip_distribution_account_config: TipDistributionAccountConfig {
+                merkle_root_upload_authority: Pubkey::new_unique(),
+                vote_account: *vote_account,
+                commission_bps: 10,
+            },
+        })
+    }
+
+    #[test]
+    fn test_handle_tip_programs() {
+        let TestFixture {
+            genesis_config_info,
+            leader_keypair,
+            bank,
+            exit,
+            poh_recorder,
+            poh_simulator,
+            entry_receiver,
+            bank_forks: _bank_forks,
+        } = create_test_fixture(1);
+
+        let (replay_vote_sender, _) = crossbeam_channel::unbounded();
+        let keypair = Arc::new(leader_keypair);
+        let cluster_info = {
+            let node = Node::new_localhost_with_pubkey(&keypair.pubkey());
+            ClusterInfo::new(node.info, keypair.clone(), SocketAddrSpace::Unspecified)
+        };
+        let cluster_info = Arc::new(cluster_info);
+        let block_builder_pubkey = Pubkey::new_unique();
+
+        let tip_manager = get_tip_manager(&genesis_config_info.voting_keypair.pubkey());
+
+        let tip_accounts = tip_manager.get_tip_accounts();
+        let tip_account = tip_accounts.iter().collect::<Vec<_>>()[0];
+        let txns = sanitize_transactions(vec![system_transaction::transfer(
+            &genesis_config_info.mint_keypair,
+            tip_account,
+            1000,
+            genesis_config_info.genesis_config.hash(),
+        )]);
+
+        let tip_processing_dependencies = TipProcessingDependencies {
+            tip_manager: tip_manager.clone(),
+            last_tip_updated_slot: Arc::new(Mutex::new(0)),
+            block_builder_fee_info: Arc::new(Mutex::new(BlockBuilderFeeInfo {
+                block_builder: block_builder_pubkey,
+                block_builder_commission: 5,
+            })),
+            cluster_info,
+        };
+
+        let committer = Committer::new(
+            None,
+            replay_vote_sender,
+            Arc::new(PrioritizationFeeCache::new(0u64)),
+        );
+        let recorder = poh_recorder.read().unwrap().new_recorder();
+        let consumer = Consumer::new_with_maybe_tip_processing(
+            committer,
+            recorder,
+            QosService::new(1),
+            None,
+            HashSet::default(),
+            BundleAccountLocker::default(),
+            Some(tip_processing_dependencies),
+        );
+
+        let transactions =
+            std::thread::spawn(move || get_executed_txns(&entry_receiver, Duration::from_secs(5)));
+
+        let _ = consumer.process_transactions(&bank, &Instant::now(), &txns, &|_| 0, false);
+
+        let transactions = transactions.join().unwrap();
+
+        assert_eq!(transactions.len(), 5);
+
+        // expect to see initialize tip payment program, tip distribution program,
+        // initialize tip distribution account, change tip receiver + change block builder
+        assert_eq!(
+            transactions[0],
+            tip_manager
+                .initialize_tip_payment_program_tx(&bank, &keypair)
+                .to_versioned_transaction()
+        );
+        assert_eq!(
+            transactions[1],
+            tip_manager
+                .initialize_tip_distribution_config_tx(&bank, &keypair)
+                .to_versioned_transaction()
+        );
+        assert_eq!(
+            transactions[2],
+            tip_manager
+                .initialize_tip_distribution_account_tx(&bank, &keypair)
+                .to_versioned_transaction()
+        );
+        // the first tip receiver + block builder are the initializer (keypair.pubkey()) as set by the
+        // TipPayment program during initialization
+        let bank_start = poh_recorder.read().unwrap().bank_start().unwrap();
+        assert_eq!(
+            transactions[3],
+            tip_manager
+                .build_change_tip_receiver_and_block_builder_tx(
+                    &keypair.pubkey(),
+                    &derive_tip_distribution_account_address(
+                        &tip_manager.tip_distribution_program_id(),
+                        &genesis_config_info.validator_pubkey,
+                        bank_start.working_bank.epoch()
+                    )
+                    .0,
+                    &bank_start.working_bank,
+                    &keypair,
+                    &keypair.pubkey(),
+                    &block_builder_pubkey,
+                    5
+                )
+                .to_versioned_transaction()
+        );
+
+        poh_recorder
+            .write()
+            .unwrap()
+            .is_exited
+            .store(true, Ordering::Relaxed);
+        exit.store(true, Ordering::Relaxed);
+        poh_simulator.join().unwrap();
+    }
+
+    #[test]
+    fn test_create_sequential_non_conflicting_batches() {
+        let a = Pubkey::new_unique();
+        let b = Pubkey::new_unique();
+        let c = Pubkey::new_unique();
+        let d = Pubkey::new_unique();
+        let txns = vec![
+            Transaction::new_unsigned(Message::new(
+                &[system_instruction::transfer(&a, &b, 1)],
+                Some(&Pubkey::new_unique()),
+            )),
+            Transaction::new_unsigned(Message::new(
+                &[system_instruction::transfer(&d, &d, 1)],
+                Some(&Pubkey::new_unique()),
+            )),
+            Transaction::new_unsigned(Message::new(
+                &[system_instruction::transfer(&b, &c, 1)],
+                Some(&Pubkey::new_unique()),
+            )),
+        ];
+        let txn_infos = txns
+            .iter()
+            .map(|tx| RuntimeTransaction::from_transaction_for_tests(tx.clone()))
+            .collect::<Vec<_>>();
+        let txns = txns
+            .into_iter()
+            .map(VersionedTransaction::from)
+            .collect::<Vec<_>>();
+        let mut reusables = SeqNotConflictBatchReusables::default();
+        let batches = Consumer::create_sequential_non_conflicting_batches(
+            &mut reusables,
+            txns.into_iter().zip(txn_infos.iter()),
+        );
+
+        // Expect 2 batches: one with len=2 (a,b,c), and one with len=1 (d)
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].len(), 2);
+        assert_eq!(batches[1].len(), 1);
     }
 }

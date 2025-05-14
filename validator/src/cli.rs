@@ -1783,6 +1783,14 @@ pub fn app<'a>(version: &'a str, default_args: &'a DefaultArgs) -> App<'a, 'a> {
                 .multiple(true)
                 .help("Specify the configuration file for a Runtime plugin.")
         )
+        .arg(
+            Arg::with_name("bam_url")
+            .long("bam-url")
+            .help(
+                "URL of BAM Node; leave empty to disable BAM"
+            )
+            .takes_value(true)
+        )
         .args(&thread_args(&default_args.thread_args))
         .args(&get_deprecated_arguments())
         .after_help("The default subcommand is run")
@@ -2795,6 +2803,12 @@ pub fn test_app<'a>(version: &'a str, default_args: &'a DefaultTestArgs) -> App<
                      argument in the genesis configuration. If the ledger \
                      already exists then this parameter is silently ignored",
                 ),
+        )
+        .arg(
+            Arg::with_name("bam_url")
+                .long("bam-url")
+                .help("URL of BAM Node; leave empty to disable BAM")
+                .takes_value(true),
         )
 }
 

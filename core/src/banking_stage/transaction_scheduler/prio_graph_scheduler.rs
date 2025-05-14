@@ -8,6 +8,7 @@ use {
     },
     crate::banking_stage::{
         consumer::TARGET_NUM_TRANSACTIONS_PER_BATCH,
+        decision_maker::BufferedPacketsDecision,
         read_write_account_set::ReadWriteAccountSet,
         scheduler_messages::{
             ConsumeWork, FinishedConsumeWork, MaxAge, TransactionBatchId, TransactionId,
@@ -327,6 +328,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for PrioGraphScheduler<Tx> {
     fn receive_completed(
         &mut self,
         container: &mut impl StateContainer<Tx>,
+        _: &BufferedPacketsDecision,
     ) -> Result<(usize, usize), SchedulerError> {
         let mut total_num_transactions: usize = 0;
         let mut total_num_retryable: usize = 0;
@@ -357,8 +359,12 @@ impl<Tx: TransactionWithMeta> PrioGraphScheduler<Tx> {
                         ids,
                         transactions,
                         max_ages,
+                        revert_on_error: _,
+                        respond_with_extra_info: _,
+                        schedulable_slot: _,
                     },
                 retryable_indexes,
+                extra_info: _,
             }) => {
                 let num_transactions = ids.len();
                 let num_retryable = retryable_indexes.len();
@@ -447,6 +453,9 @@ impl<Tx: TransactionWithMeta> PrioGraphScheduler<Tx> {
             ids,
             transactions,
             max_ages,
+            revert_on_error: false,
+            respond_with_extra_info: false,
+            schedulable_slot: None,
         };
         self.consume_work_senders[thread_index]
             .send(work)
@@ -887,9 +896,12 @@ mod tests {
             .send(FinishedConsumeWork {
                 work: thread_0_work.into_iter().next().unwrap(),
                 retryable_indexes: vec![],
+                extra_info: None,
             })
             .unwrap();
-        scheduler.receive_completed(&mut container).unwrap();
+        scheduler
+            .receive_completed(&mut container, &BufferedPacketsDecision::Hold)
+            .unwrap();
         let scheduling_summary = scheduler
             .schedule(&mut container, test_pre_graph_filter, test_pre_lock_filter)
             .unwrap();

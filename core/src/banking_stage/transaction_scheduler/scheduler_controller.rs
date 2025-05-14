@@ -30,7 +30,7 @@ use {
     solana_svm_transaction::svm_message::SVMMessage,
     std::{
         collections::HashSet,
-        sync::{Arc, RwLock},
+        sync::{atomic::AtomicBool, Arc, RwLock},
         time::{Duration, Instant},
     },
 };
@@ -65,6 +65,10 @@ where
     forwarder: Option<Forwarder<C>>,
     /// Blacklisted accounts
     blacklisted_accounts: HashSet<Pubkey>,
+    /// This is the BAM controller.
+    bam_controller: bool,
+    /// Whether BAM is enabled.
+    bam_enabled: Arc<AtomicBool>,
 }
 
 impl<C, R, S> SchedulerController<C, R, S>
@@ -81,6 +85,8 @@ where
         worker_metrics: Vec<Arc<ConsumeWorkerMetrics>>,
         forwarder: Option<Forwarder<C>>,
         blacklisted_accounts: HashSet<Pubkey>,
+        bam_controller: bool,
+        bam_enabled: Arc<AtomicBool>,
     ) -> Self {
         Self {
             decision_maker,
@@ -94,6 +100,8 @@ where
             worker_metrics,
             forwarder,
             blacklisted_accounts,
+            bam_controller,
+            bam_enabled,
         }
     }
 
@@ -122,7 +130,7 @@ where
             self.timing_metrics
                 .maybe_report_and_reset_slot(new_leader_slot);
 
-            self.receive_completed()?;
+            self.receive_completed(&decision)?;
             self.process_transactions(&decision)?;
             if self.receive_and_buffer_packets(&decision).is_err() {
                 break;
@@ -154,6 +162,10 @@ where
         let forwarding_enabled = self.forwarder.is_some();
         match decision {
             BufferedPacketsDecision::Consume(bank_start) => {
+                if !self.scheduling_enabled() {
+                    return Ok(());
+                }
+
                 let (scheduling_summary, schedule_time_us) = measure_us!(self.scheduler.schedule(
                     &mut self.container,
                     |txs, results| {
@@ -350,6 +362,10 @@ where
     /// Clears the transaction state container.
     /// This only clears pending transactions, and does **not** clear in-flight transactions.
     fn clear_container(&mut self) {
+        if self.bam_controller {
+            return;
+        }
+
         let mut num_dropped_on_clear: usize = 0;
         while let Some(id) = self.container.pop() {
             self.container.remove_by_id(id.id);
@@ -365,6 +381,10 @@ where
     /// expired, already processed, or are no longer sanitizable.
     /// This only clears pending transactions, and does **not** clear in-flight transactions.
     fn clean_queue(&mut self) {
+        if self.bam_controller {
+            return;
+        }
+
         // Clean up any transactions that have already been processed, are too old, or do not have
         // valid nonce accounts.
         const MAX_TRANSACTION_CHECKS: usize = 10_000;
@@ -429,9 +449,13 @@ where
     }
 
     /// Receives completed transactions from the workers and updates metrics.
-    fn receive_completed(&mut self) -> Result<(), SchedulerError> {
-        let ((num_transactions, num_retryable), receive_completed_time_us) =
-            measure_us!(self.scheduler.receive_completed(&mut self.container)?);
+    fn receive_completed(
+        &mut self,
+        decision: &BufferedPacketsDecision,
+    ) -> Result<(), SchedulerError> {
+        let ((num_transactions, num_retryable), receive_completed_time_us) = measure_us!(self
+            .scheduler
+            .receive_completed(&mut self.container, decision)?);
 
         self.count_metrics.update(|count_metrics| {
             saturating_add_assign!(count_metrics.num_finished, num_transactions);
@@ -464,6 +488,10 @@ where
         !tx.account_keys()
             .iter()
             .any(|a| blacklisted_accounts.contains(a))
+    }
+
+    fn scheduling_enabled(&self) -> bool {
+        self.bam_controller == self.bam_enabled.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -609,6 +637,8 @@ mod tests {
             vec![], // no actual workers with metrics to report, this can be empty
             None,
             HashSet::default(),
+            true,
+            Arc::new(AtomicBool::new(false)),
         );
 
         (test_frame, scheduler_controller)
@@ -662,7 +692,7 @@ mod tests {
             .decision_maker
             .make_consume_or_forward_decision();
         assert!(matches!(decision, BufferedPacketsDecision::Consume(_)));
-        assert!(scheduler_controller.receive_completed().is_ok());
+        assert!(scheduler_controller.receive_completed(&decision).is_ok());
 
         // Time is not a reliable way for deterministic testing.
         // Loop here until no more packets are received, this avoids parallel
@@ -695,8 +725,12 @@ mod tests {
                     ids: vec![],
                     transactions: vec![],
                     max_ages: vec![],
+                    revert_on_error: false,
+                    respond_with_extra_info: false,
+                    schedulable_slot: None,
                 },
                 retryable_indexes: vec![],
+                extra_info: None,
             })
             .unwrap();
 
@@ -1030,6 +1064,7 @@ mod tests {
             .send(FinishedConsumeWork {
                 work: consume_work,
                 retryable_indexes: vec![1],
+                extra_info: None,
             })
             .unwrap();
 

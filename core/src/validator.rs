@@ -329,6 +329,7 @@ pub struct ValidatorConfig {
     pub shred_retransmit_receiver_address: Arc<RwLock<Option<SocketAddr>>>,
     pub tip_manager_config: TipManagerConfig,
     pub preallocated_bundle_cost: u64,
+    pub bam_url: Arc<Mutex<Option<String>>>,
 }
 
 impl Default for ValidatorConfig {
@@ -408,6 +409,7 @@ impl Default for ValidatorConfig {
             shred_retransmit_receiver_address: Arc::new(RwLock::new(None)),
             tip_manager_config: TipManagerConfig::default(),
             preallocated_bundle_cost: 0,
+            bam_url: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -1642,6 +1644,7 @@ impl Validator {
             config.tip_manager_config.clone(),
             config.shred_receiver_address.clone(),
             config.preallocated_bundle_cost,
+            config.bam_url.clone(),
         );
 
         datapoint_info!(

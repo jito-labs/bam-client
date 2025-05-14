@@ -1,10 +1,15 @@
 use {
     super::{
+        committer::CommitTransactionDetails,
         consumer::{Consumer, ExecuteAndCommitTransactionsOutput, ProcessTransactionBatchOutput},
         leader_slot_timing_metrics::LeaderExecuteAndCommitTimings,
-        scheduler_messages::{ConsumeWork, FinishedConsumeWork},
+        scheduler_messages::{
+            ConsumeWork, FinishedConsumeWork, FinishedConsumeWorkExtraInfo, NotCommittedReason,
+            TransactionResult,
+        },
     },
     crossbeam_channel::{Receiver, RecvError, SendError, Sender},
+    jito_protos::proto::bam_types::TransactionCommittedResult,
     solana_measure::measure_us,
     solana_poh::leader_bank_notifier::LeaderBankNotifier,
     solana_runtime::bank::Bank,
@@ -59,6 +64,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         self.metrics.clone()
     }
 
+    #[allow(clippy::result_large_err)]
     pub fn run(self, reservation_cb: impl Fn(&Bank) -> u64) -> Result<(), ConsumeWorkerError<Tx>> {
         loop {
             let work = self.consume_receiver.recv()?;
@@ -66,6 +72,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         }
     }
 
+    #[allow(clippy::result_large_err)]
     fn consume_loop(
         &self,
         work: ConsumeWork<Tx>,
@@ -104,6 +111,13 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
                     return self.retry_drain(work);
                 }
             }
+
+            if let Some(schedulable_slot) = work.schedulable_slot {
+                if bank.slot() != schedulable_slot {
+                    return self.retry(work);
+                }
+            }
+
             self.consume(&bank, work, reservation_cb)?;
         }
 
@@ -111,6 +125,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
     }
 
     /// Consume a single batch.
+    #[allow(clippy::result_large_err)]
     fn consume(
         &self,
         bank: &Arc<Bank>,
@@ -122,18 +137,75 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
             &work.transactions,
             &work.max_ages,
             reservation_cb,
+            work.revert_on_error,
         );
 
         self.metrics.update_for_consume(&output);
         self.metrics.has_data.store(true, Ordering::Relaxed);
+
+        let extra_info = if work.respond_with_extra_info {
+            Some(Self::generate_extra_info(&output, &work, bank))
+        } else {
+            None
+        };
 
         self.consumed_sender.send(FinishedConsumeWork {
             work,
             retryable_indexes: output
                 .execute_and_commit_transactions_output
                 .retryable_transaction_indexes,
+            extra_info,
         })?;
         Ok(())
+    }
+
+    fn generate_extra_info(
+        output: &ProcessTransactionBatchOutput,
+        work: &ConsumeWork<Tx>,
+        bank: &Arc<Bank>,
+    ) -> FinishedConsumeWorkExtraInfo {
+        let Ok(commit_transactions_result) = output
+            .execute_and_commit_transactions_output
+            .commit_transactions_result
+            .as_ref()
+        else {
+            return FinishedConsumeWorkExtraInfo {
+                processed_results: vec![
+                    TransactionResult::NotCommitted(
+                        NotCommittedReason::PohTimeout,
+                    );
+                    work.transactions.len()
+                ],
+            };
+        };
+
+        let errors = &output
+            .execute_and_commit_transactions_output
+            .transaction_errors;
+        let mut processed_results = vec![];
+        for (i, commit_info) in commit_transactions_result.iter().enumerate() {
+            if let CommitTransactionDetails::Committed {
+                compute_units,
+                loaded_accounts_data_size,
+            } = commit_info
+            {
+                processed_results.push(TransactionResult::Committed(TransactionCommittedResult {
+                    cus_consumed: *compute_units as u32,
+                    feepayer_balance_lamports: bank.get_balance(work.transactions[i].fee_payer()),
+                    loaded_accounts_data_size: *loaded_accounts_data_size,
+                }));
+            } else {
+                let not_committed_reason = errors
+                    .get(i)
+                    .cloned()
+                    .flatten()
+                    .map(NotCommittedReason::Error)
+                    .unwrap_or(NotCommittedReason::BatchRevert);
+                processed_results.push(TransactionResult::NotCommitted(not_committed_reason));
+            }
+        }
+
+        FinishedConsumeWorkExtraInfo { processed_results }
     }
 
     /// Try to get a bank for consuming.
@@ -149,6 +221,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
     }
 
     /// Retry current batch and all outstanding batches.
+    #[allow(clippy::result_large_err)]
     fn retry_drain(&self, work: ConsumeWork<Tx>) -> Result<(), ConsumeWorkerError<Tx>> {
         for work in try_drain_iter(work, &self.consume_receiver) {
             self.retry(work)?;
@@ -157,6 +230,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
     }
 
     /// Send transactions back to scheduler as retryable.
+    #[allow(clippy::result_large_err)]
     fn retry(&self, work: ConsumeWork<Tx>) -> Result<(), ConsumeWorkerError<Tx>> {
         let retryable_indexes: Vec<_> = (0..work.transactions.len()).collect();
         let num_retryable = retryable_indexes.len();
@@ -169,9 +243,22 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
             .retryable_expired_bank_count
             .fetch_add(num_retryable, Ordering::Relaxed);
         self.metrics.has_data.store(true, Ordering::Relaxed);
+        let extra_info = if work.respond_with_extra_info {
+            Some(FinishedConsumeWorkExtraInfo {
+                processed_results: vec![
+                    TransactionResult::NotCommitted(
+                        NotCommittedReason::PohTimeout,
+                    );
+                    num_retryable
+                ],
+            })
+        } else {
+            None
+        };
         self.consumed_sender.send(FinishedConsumeWork {
             work,
             retryable_indexes,
+            extra_info,
         })?;
         Ok(())
     }
@@ -913,6 +1000,9 @@ mod tests {
             ids: vec![id],
             transactions,
             max_ages: vec![max_age],
+            revert_on_error: false,
+            respond_with_extra_info: false,
+            schedulable_slot: None,
         };
         consume_sender.send(work).unwrap();
         let consumed = consumed_receiver.recv().unwrap();
@@ -962,6 +1052,9 @@ mod tests {
             ids: vec![id],
             transactions,
             max_ages: vec![max_age],
+            revert_on_error: false,
+            respond_with_extra_info: false,
+            schedulable_slot: None,
         };
         consume_sender.send(work).unwrap();
         let consumed = consumed_receiver.recv().unwrap();
@@ -1013,6 +1106,9 @@ mod tests {
                 ids: vec![id1, id2],
                 transactions: txs,
                 max_ages: vec![max_age, max_age],
+                revert_on_error: false,
+                respond_with_extra_info: false,
+                schedulable_slot: None,
             })
             .unwrap();
 
@@ -1074,6 +1170,9 @@ mod tests {
                 ids: vec![id1],
                 transactions: txs1,
                 max_ages: vec![max_age],
+                revert_on_error: false,
+                respond_with_extra_info: false,
+                schedulable_slot: None,
             })
             .unwrap();
 
@@ -1083,6 +1182,9 @@ mod tests {
                 ids: vec![id2],
                 transactions: txs2,
                 max_ages: vec![max_age],
+                revert_on_error: false,
+                respond_with_extra_info: false,
+                schedulable_slot: None,
             })
             .unwrap();
         let consumed = consumed_receiver.recv().unwrap();
@@ -1221,6 +1323,9 @@ mod tests {
                         alt_invalidation_slot: bank.slot() + 1,
                     },
                 ],
+                revert_on_error: false,
+                respond_with_extra_info: false,
+                schedulable_slot: None,
             })
             .unwrap();
 

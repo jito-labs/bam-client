@@ -157,7 +157,7 @@ impl SanitizedTransactionReceiveAndBuffer {
         }
     }
 
-    fn buffer_packets(
+    pub fn buffer_packets(
         &mut self,
         container: &mut TransactionStateContainer<RuntimeTransaction<SanitizedTransaction>>,
         _timing_metrics: &mut SchedulerTimingMetrics,
@@ -192,6 +192,7 @@ impl SanitizedTransactionReceiveAndBuffer {
             chunk
                 .iter()
                 .filter_map(|packet| {
+                    // Check 1
                     packet
                         .build_sanitized_transaction(
                             vote_only,
@@ -202,6 +203,7 @@ impl SanitizedTransactionReceiveAndBuffer {
                 })
                 .inspect(|_| saturating_add_assign!(post_sanitization_count, 1))
                 .filter(|(_packet, tx, _deactivation_slot)| {
+                    // Check 2
                     validate_account_locks(
                         tx.message().account_keys(),
                         transaction_account_lock_limit,
@@ -209,6 +211,7 @@ impl SanitizedTransactionReceiveAndBuffer {
                     .is_ok()
                 })
                 .filter_map(|(packet, tx, deactivation_slot)| {
+                    // Check 3
                     tx.compute_budget_instruction_details()
                         .sanitize_and_convert_to_compute_budget_limits(&working_bank.feature_set)
                         .map(|compute_budget| {
@@ -227,6 +230,7 @@ impl SanitizedTransactionReceiveAndBuffer {
                     fee_budget_limits_vec.push(fee_budget_limits);
                 });
 
+            // Check 4
             let check_results = working_bank.check_transactions(
                 &transactions,
                 &lock_results[..transactions.len()],
@@ -247,6 +251,7 @@ impl SanitizedTransactionReceiveAndBuffer {
                     .zip(check_results)
                     .filter(|(_, check_result)| check_result.is_ok())
                     .filter(|((((_, tx), _), _), _)| {
+                        // Check 5
                         Consumer::check_fee_payer_unlocked(&working_bank, tx, &mut error_counts)
                             .is_ok()
                     })
@@ -643,7 +648,7 @@ impl TransactionViewReceiveAndBuffer {
 /// from user input. They should never be zero.
 /// Any difference in the prioritization is negligible for
 /// the current transaction costs.
-fn calculate_priority_and_cost(
+pub fn calculate_priority_and_cost(
     transaction: &impl TransactionWithMeta,
     fee_budget_limits: &FeeBudgetLimits,
     bank: &Bank,
@@ -680,7 +685,7 @@ fn calculate_priority_and_cost(
 /// slots, the value used here is the lower-bound on the deactivation
 /// period, i.e. the transaction's address lookups are valid until
 /// AT LEAST this slot.
-fn calculate_max_age(
+pub fn calculate_max_age(
     sanitized_epoch: Epoch,
     deactivation_slot: Slot,
     current_slot: Slot,

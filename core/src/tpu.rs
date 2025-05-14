@@ -10,7 +10,9 @@ pub use solana_sdk::net::DEFAULT_TPU_COALESCE;
 pub use solana_streamer::quic::DEFAULT_MAX_QUIC_CONNECTIONS_PER_PEER as MAX_QUIC_CONNECTIONS_PER_PEER;
 use {
     crate::{
-        banking_stage::BankingStage,
+        bam_dependencies::BamDependencies,
+        bam_manager::BamManager,
+        banking_stage::{consumer::TipProcessingDependencies, BankingStage},
         banking_trace::{Channels, TracerThread},
         bundle_stage::{bundle_account_locker::BundleAccountLocker, BundleStage},
         cluster_info_vote_listener::{
@@ -31,7 +33,7 @@ use {
         validator::{BlockProductionMethod, GeneratorConfig, TransactionStructure},
     },
     bytes::Bytes,
-    crossbeam_channel::{unbounded, Receiver},
+    crossbeam_channel::{bounded, unbounded, Receiver},
     solana_client::connection_cache::ConnectionCache,
     solana_gossip::cluster_info::ClusterInfo,
     solana_ledger::{
@@ -111,6 +113,7 @@ pub struct Tpu {
     block_engine_stage: BlockEngineStage,
     fetch_stage_manager: FetchStageManager,
     bundle_stage: BundleStage,
+    bam_manager: BamManager,
 }
 
 impl Tpu {
@@ -159,6 +162,7 @@ impl Tpu {
         tip_manager_config: TipManagerConfig,
         shred_receiver_address: Arc<RwLock<Option<SocketAddr>>>,
         preallocated_bundle_cost: u64,
+        bam_url: Arc<Mutex<Option<String>>>,
     ) -> (Self, Vec<Arc<dyn NotifyKeyUpdate + Sync + Send>>) {
         let TpuSockets {
             transactions: transactions_sockets,
@@ -280,6 +284,9 @@ impl Tpu {
             block_builder_commission: 0,
         }));
 
+        // Will be set to false by BAMManager if BAM cannot be connected to
+        let bam_enabled = Arc::new(AtomicBool::new(true));
+
         let (bundle_sender, bundle_receiver) = unbounded();
         let block_engine_stage = BlockEngineStage::new(
             block_engine_config,
@@ -289,6 +296,7 @@ impl Tpu {
             non_vote_sender.clone(),
             exit.clone(),
             &block_builder_fee_info,
+            bam_enabled.clone(),
         );
 
         let (heartbeat_tx, heartbeat_rx) = unbounded();
@@ -298,6 +306,7 @@ impl Tpu {
             packet_intercept_receiver,
             packet_sender.clone(),
             exit.clone(),
+            bam_enabled.clone(),
         );
 
         let relayer_stage = RelayerStage::new(
@@ -338,6 +347,19 @@ impl Tpu {
             .saturating_mul(8)
             .saturating_div(10);
 
+        let (bam_batch_sender, bam_batch_receiver) = bounded(100_000);
+        let (bam_outbound_sender, bam_outbound_receiver) = bounded(100_000);
+        let bam_dependencies = BamDependencies {
+            bam_enabled: bam_enabled.clone(),
+            batch_sender: bam_batch_sender,
+            batch_receiver: bam_batch_receiver,
+            outbound_sender: bam_outbound_sender,
+            outbound_receiver: bam_outbound_receiver,
+            cluster_info: cluster_info.clone(),
+            block_builder_fee_info: Arc::new(Mutex::new(BlockBuilderFeeInfo::default())),
+            bam_node_pubkey: Arc::new(Mutex::new(Pubkey::default())),
+        };
+
         let mut blacklisted_accounts = HashSet::new();
         blacklisted_accounts.insert(tip_manager.tip_payment_program_id());
         let banking_stage = BankingStage::new(
@@ -364,6 +386,13 @@ impl Tpu {
                     preallocated_bundle_cost,
                 )
             },
+            Some(TipProcessingDependencies {
+                tip_manager: tip_manager.clone(),
+                last_tip_updated_slot: Arc::new(Mutex::new(0)),
+                block_builder_fee_info: bam_dependencies.block_builder_fee_info.clone(),
+                cluster_info: cluster_info.clone(),
+            }),
+            Some(bam_dependencies.clone()),
         );
 
         let bundle_stage = BundleStage::new(
@@ -378,6 +407,13 @@ impl Tpu {
             bundle_account_locker,
             &block_builder_fee_info,
             prioritization_fee_cache,
+        );
+
+        let bam_manager = BamManager::new(
+            exit.clone(),
+            bam_url,
+            bam_dependencies,
+            poh_recorder.clone(),
         );
 
         let (entry_receiver, tpu_entry_notifier) =
@@ -425,6 +461,7 @@ impl Tpu {
                 relayer_stage,
                 fetch_stage_manager,
                 bundle_stage,
+                bam_manager,
             },
             vec![key_updater, forwards_key_updater, vote_streamer_key_updater],
         )
@@ -445,6 +482,7 @@ impl Tpu {
             self.relayer_stage.join(),
             self.block_engine_stage.join(),
             self.fetch_stage_manager.join(),
+            self.bam_manager.join(),
         ];
         let broadcast_result = self.broadcast_stage.join();
         for result in results {

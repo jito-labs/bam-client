@@ -13,6 +13,7 @@ use {
     },
     crate::banking_stage::{
         consumer::TARGET_NUM_TRANSACTIONS_PER_BATCH,
+        decision_maker::BufferedPacketsDecision,
         read_write_account_set::ReadWriteAccountSet,
         scheduler_messages::{ConsumeWork, FinishedConsumeWork, TransactionBatchId},
         transaction_scheduler::thread_aware_account_locks::MAX_THREADS,
@@ -216,6 +217,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for GreedyScheduler<Tx> {
     fn receive_completed(
         &mut self,
         container: &mut impl StateContainer<Tx>,
+        _: &BufferedPacketsDecision,
     ) -> Result<(usize, usize), SchedulerError> {
         let mut total_num_transactions: usize = 0;
         let mut total_num_retryable: usize = 0;
@@ -246,8 +248,12 @@ impl<Tx: TransactionWithMeta> GreedyScheduler<Tx> {
                         ids,
                         transactions,
                         max_ages,
+                        revert_on_error: _,
+                        respond_with_extra_info: _,
+                        schedulable_slot: _,
                     },
                 retryable_indexes,
+                extra_info: _,
             }) => {
                 let num_transactions = ids.len();
                 let num_retryable = retryable_indexes.len();
@@ -336,6 +342,9 @@ impl<Tx: TransactionWithMeta> GreedyScheduler<Tx> {
             ids,
             transactions,
             max_ages,
+            revert_on_error: false,
+            respond_with_extra_info: false,
+            schedulable_slot: None,
         };
         self.consume_work_senders[thread_index]
             .send(work)
