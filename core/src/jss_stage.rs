@@ -251,7 +251,9 @@ impl JssStage {
         // Drain out the old micro-blocks and retryable bundle IDs
         // One of the annoying side-effects of re-using the channel between slots
         jss_connection.drain_bundles();
-        bundle_result_receiver.try_iter().for_each(|_| ());
+        while let Ok(bundle_result) = bundle_result_receiver.try_recv() {
+            jss_connection.send_bundle_result(bundle_result);
+        }
 
         // Since this function is triggered ahead of the leader slot
         // Let's send an initial leader state (that might exclude information from a real bank
