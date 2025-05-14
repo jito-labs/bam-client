@@ -33,7 +33,7 @@ use {
         pubkey::Pubkey,
         saturating_add_assign,
         timing::timestamp,
-        transaction::{self, TransactionError},
+        transaction::{self, TransactionError, VersionedTransaction},
     },
     solana_svm::{
         account_loader::{validate_fee_payer, TransactionCheckResult},
@@ -533,7 +533,6 @@ impl Consumer {
             pre_results,
             reservation_cb
         ));
-        // TODO: revert_on_error
 
         // Only lock accounts for those transactions are selected for the block;
         // Once accounts are locked, other threads cannot encode transactions that will modify the
@@ -743,11 +742,15 @@ impl Consumer {
         let (freeze_lock, freeze_lock_us) = measure_us!(bank.freeze_lock());
         execute_and_commit_timings.freeze_lock_us = freeze_lock_us;
 
-        // TODO: create non-conflicting batches for recording
+        let batches = if revert_on_error {
+            Self::create_non_conflicing_batches(processed_transactions)
+        } else {
+            vec![processed_transactions]
+        };
 
         let (record_transactions_summary, record_us) = measure_us!(self
             .transaction_recorder
-            .record_transactions(bank.slot(), vec![processed_transactions]));
+            .record_transactions(bank.slot(), batches));
         execute_and_commit_timings.record_us = record_us;
 
         let RecordTransactionsSummary {
@@ -826,6 +829,13 @@ impl Consumer {
             min_prioritization_fees,
             max_prioritization_fees,
         }
+    }
+
+    fn create_non_conflicing_batches(
+        transactions: Vec<VersionedTransaction>,
+    ) -> Vec<Vec<VersionedTransaction>> {
+        // TODO
+        vec![]
     }
 
     pub fn check_fee_payer_unlocked(
