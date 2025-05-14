@@ -415,6 +415,22 @@ impl Consumer {
         let pre_results = vec![Ok(()); txs.len()];
         let check_results =
             bank.check_transactions(txs, &pre_results, MAX_PROCESSING_AGE, &mut error_counters);
+        if revert_on_error && check_results.iter().any(|result| result.is_err()) {
+            return ProcessTransactionBatchOutput {
+                cost_model_throttled_transactions_count: 0,
+                cost_model_us: 0,
+                execute_and_commit_transactions_output: ExecuteAndCommitTransactionsOutput {
+                    transaction_counts: LeaderProcessedTransactionCounts::default(),
+                    retryable_transaction_indexes: vec![],
+                    commit_transactions_result: Err(PohRecorderError::MaxHeightReached),
+                    execute_and_commit_timings: LeaderExecuteAndCommitTimings::default(),
+                    error_counters,
+                    min_prioritization_fees: 0,
+                    max_prioritization_fees: 0,
+                },
+            };
+        }
+
         // If checks passed, verify pre-compiles and continue processing on success.
         let move_precompile_verification_to_svm = bank
             .feature_set
@@ -433,6 +449,22 @@ impl Consumer {
                 Err(err) => Err(err),
             })
             .collect();
+        if revert_on_error && check_results.iter().any(|result| result.is_err()) {
+            return ProcessTransactionBatchOutput {
+                cost_model_throttled_transactions_count: 0,
+                cost_model_us: 0,
+                execute_and_commit_transactions_output: ExecuteAndCommitTransactionsOutput {
+                    transaction_counts: LeaderProcessedTransactionCounts::default(),
+                    retryable_transaction_indexes: vec![],
+                    commit_transactions_result: Err(PohRecorderError::MaxHeightReached),
+                    execute_and_commit_timings: LeaderExecuteAndCommitTimings::default(),
+                    error_counters,
+                    min_prioritization_fees: 0,
+                    max_prioritization_fees: 0,
+                },
+            };
+        }
+
         let mut output = self.process_and_record_transactions_with_pre_results(
             bank,
             txs,
@@ -519,6 +551,29 @@ impl Consumer {
             pre_results,
             reservation_cb
         ));
+        if revert_on_error
+            && transaction_qos_cost_results.iter().any(|result| result.is_err())
+        {
+            QosService::remove_or_update_costs(
+                transaction_qos_cost_results.iter(),
+                None,
+                bank,
+            );
+
+            return ProcessTransactionBatchOutput {
+                cost_model_throttled_transactions_count,
+                cost_model_us,
+                execute_and_commit_transactions_output: ExecuteAndCommitTransactionsOutput {
+                    transaction_counts: LeaderProcessedTransactionCounts::default(),
+                    retryable_transaction_indexes: vec![],
+                    commit_transactions_result: Err(PohRecorderError::MaxHeightReached),
+                    execute_and_commit_timings: LeaderExecuteAndCommitTimings::default(),
+                    error_counters: TransactionErrorMetrics::default(),
+                    min_prioritization_fees: 0,
+                    max_prioritization_fees: 0,
+                },
+            };
+        }
 
         // Only lock accounts for those transactions are selected for the block;
         // Once accounts are locked, other threads cannot encode transactions that will modify the
@@ -535,7 +590,21 @@ impl Consumer {
             Some(&bundle_account_locks.write_locks())
         ));
         drop(bundle_account_locks);
-        // TODO: revert_on_error
+        if revert_on_error && batch.sanitized_transactions().len() != txs.len() {
+            return ProcessTransactionBatchOutput {
+                cost_model_throttled_transactions_count,
+                cost_model_us,
+                execute_and_commit_transactions_output: ExecuteAndCommitTransactionsOutput {
+                    transaction_counts: LeaderProcessedTransactionCounts::default(),
+                    retryable_transaction_indexes: vec![],
+                    commit_transactions_result: Err(PohRecorderError::MaxHeightReached),
+                    execute_and_commit_timings: LeaderExecuteAndCommitTimings::default(),
+                    error_counters: TransactionErrorMetrics::default(),
+                    min_prioritization_fees: 0,
+                    max_prioritization_fees: 0,
+                },
+            };
+        }
 
         // retryable_txs includes AccountInUse, WouldExceedMaxBlockCostLimit
         // WouldExceedMaxAccountCostLimit, WouldExceedMaxVoteCostLimit
