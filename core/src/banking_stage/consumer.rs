@@ -548,6 +548,7 @@ impl Consumer {
             Some(&bundle_account_locks.write_locks())
         ));
         drop(bundle_account_locks);
+        // TODO: revert_on_error
 
         // retryable_txs includes AccountInUse, WouldExceedMaxBlockCostLimit
         // WouldExceedMaxAccountCostLimit, WouldExceedMaxVoteCostLimit
