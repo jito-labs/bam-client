@@ -499,31 +499,31 @@ impl JssExecutor {
         block_builder_fee_info: &BlockBuilderFeeInfo,
         bundle_account_locker: &BundleAccountLocker,
     ) -> ExecutionResult {
+        if Self::any_transaction_touched_tip_pda(&transactions, &tip_manager.get_tip_accounts()) {
+            let mut last_tip_updated_slot_guard = last_tip_updated_slot.lock().unwrap();
+            if bank_start.working_bank.slot() != *last_tip_updated_slot_guard {
+                if !Self::handle_tip_programs(
+                    &bank_start,
+                    &qos_service,
+                    &recorder,
+                    bundle_committer,
+                    tip_manager,
+                    &cluster_info.keypair(),
+                    block_builder_fee_info,
+                    bundle_account_locker,
+                ) {
+                    return ExecutionResult::default();
+                }
+                *last_tip_updated_slot_guard = bank_start.working_bank.slot();
+            }
+        }
+
         if revert_on_error {
             let bundle_id = derive_bundle_id_from_sanitized_transactions(&transactions);
             let sanitized_bundle = SanitizedBundle {
                 transactions,
                 bundle_id,
             };
-
-            if Self::bundle_touches_tip_pdas(&sanitized_bundle, &tip_manager.get_tip_accounts()) {
-                let mut last_tip_updated_slot_guard = last_tip_updated_slot.lock().unwrap();
-                if bank_start.working_bank.slot() != *last_tip_updated_slot_guard {
-                    if !Self::handle_tip_programs(
-                        &bank_start,
-                        &qos_service,
-                        &recorder,
-                        bundle_committer,
-                        tip_manager,
-                        &cluster_info.keypair(),
-                        block_builder_fee_info,
-                        bundle_account_locker,
-                    ) {
-                        return ExecutionResult::default();
-                    }
-                    *last_tip_updated_slot_guard = bank_start.working_bank.slot();
-                }
-            }
 
             Self::execute_commit_record_bundle(
                 &bank_start,
@@ -949,8 +949,8 @@ impl JssExecutor {
         };
     }
 
-    fn bundle_touches_tip_pdas(bundle: &SanitizedBundle, tip_pdas: &HashSet<Pubkey>) -> bool {
-        bundle.transactions.iter().any(|tx| {
+    fn any_transaction_touched_tip_pda(transactions: &[RuntimeTransaction<SanitizedTransaction>], tip_pdas: &HashSet<Pubkey>) -> bool {
+        transactions.iter().any(|tx| {
             tx.message()
                 .account_keys()
                 .iter()
