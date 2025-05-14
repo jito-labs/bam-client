@@ -33,7 +33,7 @@ use {
         pubkey::Pubkey,
         saturating_add_assign,
         timing::timestamp,
-        transaction::{self, TransactionError, VersionedTransaction},
+        transaction::{self, SanitizedTransaction, TransactionError, VersionedTransaction},
     },
     solana_svm::{
         account_loader::{validate_fee_payer, TransactionCheckResult},
@@ -807,8 +807,9 @@ impl Consumer {
         let (freeze_lock, freeze_lock_us) = measure_us!(bank.freeze_lock());
         execute_and_commit_timings.freeze_lock_us = freeze_lock_us;
 
-        let batches = if revert_on_error {
-            Self::create_non_conflicing_batches(processed_transactions)
+        let batches: Vec<Vec<VersionedTransaction>> = if revert_on_error {
+            Self::create_non_conflicing_batches(
+                processed_transactions.into_iter().zip(batch.sanitized_transactions().iter()))
         } else {
             vec![processed_transactions]
         };
@@ -896,11 +897,42 @@ impl Consumer {
         }
     }
 
-    fn create_non_conflicing_batches(
-        transactions: Vec<VersionedTransaction>,
+    fn create_non_conflicing_batches<'a>(
+        transactions: impl Iterator<Item = (VersionedTransaction, &'a (impl TransactionWithMeta +'a))>,
     ) -> Vec<Vec<VersionedTransaction>> {
-        // TODO
-        vec![]
+        let mut result = vec![];
+        let mut current_batch = vec![];
+        let mut current_write_locks: HashSet<Pubkey> = HashSet::default();
+        let mut current_read_locks: HashSet<Pubkey> = HashSet::default();
+
+        for (transaction, transaction_info) in transactions {
+            let account_keys = transaction_info.account_keys();
+            let write_account_locks = account_keys
+                .iter()
+                .enumerate()
+                .filter_map(|(index, key)| transaction_info.is_writable(index).then_some(key))
+                .collect_vec();
+            let read_account_locks = account_keys
+                .iter()
+                .enumerate()
+                .filter_map(|(index, key)| (!transaction_info.is_writable(index)).then_some(key))
+                .collect_vec();
+            let has_contention = write_account_locks.iter().any(|key| {
+                current_write_locks.contains(key) || current_read_locks.contains(key)
+            }) || read_account_locks.iter().any(|key| {
+                current_write_locks.contains(key)
+            });
+            if has_contention {
+                result.push(std::mem::take(&mut current_batch));
+                current_write_locks.clear();
+                current_read_locks.clear();
+            }
+            current_batch.push(transaction);
+            current_write_locks.extend(write_account_locks.iter().cloned());
+            current_read_locks.extend(read_account_locks.iter().cloned());
+        }
+
+        result
     }
 
     pub fn check_fee_payer_unlocked(
