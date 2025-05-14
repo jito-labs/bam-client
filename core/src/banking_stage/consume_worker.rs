@@ -122,6 +122,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
             &work.transactions,
             &work.max_ages,
             reservation_cb,
+            false,
         );
 
         self.metrics.update_for_consume(&output);

@@ -468,6 +468,7 @@ impl Consumer {
         txs: &[impl TransactionWithMeta],
         max_ages: &[MaxAge],
         reservation_cb: &impl Fn(&Bank) -> u64,
+        revert_on_error: bool,
     ) -> ProcessTransactionBatchOutput {
         let move_precompile_verification_to_svm = bank
             .feature_set
@@ -510,6 +511,7 @@ impl Consumer {
             0,
             pre_results,
             reservation_cb,
+            revert_on_error,
         )
     }
 
@@ -695,7 +697,23 @@ impl Consumer {
                 }
             ));
         execute_and_commit_timings.load_execute_us = load_execute_us;
-        // TODO: revert_on_error
+        let successful_count = load_and_execute_transactions_output.processed_counts.processed_with_successful_result_count as usize;
+        if revert_on_error && successful_count != batch.sanitized_transactions().len() {
+            return ExecuteAndCommitTransactionsOutput {
+                transaction_counts: LeaderProcessedTransactionCounts {
+                    attempted_processing_count: batch.sanitized_transactions().len() as u64,
+                    ..Default::default()
+                },
+                retryable_transaction_indexes,
+                commit_transactions_result: Ok((0..batch.sanitized_transactions().len())
+                    .map(|_| CommitTransactionDetails::NotCommitted)
+                    .collect()),
+                execute_and_commit_timings,
+                error_counters,
+                min_prioritization_fees,
+                max_prioritization_fees,
+            };
+        }
 
         let LoadAndExecuteTransactionsOutput {
             processing_results,
