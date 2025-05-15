@@ -944,7 +944,13 @@ impl JssExecutor {
         return ExecutionResult {
             status,
             summary,
-            cus_consumed: vec![cu],
+            cus_consumed: commit_transactions_result.iter().map(|c| match c {
+                CommitTransactionDetails::Committed {
+                    compute_units,
+                    loaded_accounts_data_size: _,
+                } => *compute_units,
+                CommitTransactionDetails::NotCommitted => 0,
+            }).take(1).collect_vec(),
             feepayer_balance_after_lamports,
         };
     }
