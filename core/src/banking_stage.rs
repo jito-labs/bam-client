@@ -920,7 +920,7 @@ pub(crate) fn update_bank_forks_and_poh_recorder_for_new_tpu_bank(
 mod tests {
     use {
         super::*,
-        crate::banking_trace::{BankingTracer, Channels},
+        crate::{banking_trace::{BankingTracer, Channels}, jss_dependencies},
         agave_banking_stage_ingress_types::BankingPacketBatch,
         crossbeam_channel::{unbounded, Receiver},
         itertools::Itertools,
