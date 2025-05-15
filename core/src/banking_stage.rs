@@ -571,6 +571,7 @@ impl BankingStage {
                     bundle_account_locker.clone(),
                     block_cost_limit_reservation_cb.clone(),
                     tip_processing_dependencies.clone(),
+                    jss_dependencies,
                 );
             }
             TransactionStructure::View => {
@@ -596,6 +597,7 @@ impl BankingStage {
                     bundle_account_locker.clone(),
                     block_cost_limit_reservation_cb.clone(),
                     tip_processing_dependencies.clone(),
+                    jss_dependencies,
                 );
             }
         }
@@ -622,6 +624,7 @@ impl BankingStage {
         bundle_account_locker: BundleAccountLocker,
         block_cost_limit_reservation_cb: impl Fn(&Bank) -> u64 + Clone + Send + 'static,
         tip_processing_dependencies: Option<TipProcessingDependencies>,
+        jss_dependencies: Option<JssDependencies>,
     ) {
         // Create channels for communication between scheduler and workers
         let num_workers = (num_threads).saturating_sub(NUM_VOTE_PROCESSING_THREADS);
