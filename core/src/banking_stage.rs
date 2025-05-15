@@ -5,6 +5,7 @@
 use consumer::TipProcessingDependencies;
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
+use transaction_scheduler::{fifo_batch_scheduler::FifoBatchScheduler, jss_receive_and_buffer::JssReceiveAndBuffer};
 use crate::jss_dependencies::JssDependencies;
 
 use {
@@ -675,24 +676,28 @@ impl BankingStage {
         });
 
         // Spawn the central scheduler thread
+        let scheduler_worker_senders = work_senders.clone();
+        let scheduler_finished_work_receiver = finished_work_receiver.clone();
+        let scheduler_decision_maker = decision_maker.clone();
+        let scheduler_blacklisted_accounts = blacklisted_accounts.clone();
         if use_greedy_scheduler {
             bank_thread_hdls.push(
                 Builder::new()
                     .name("solBnkTxSched".to_string())
                     .spawn(move || {
                         let scheduler = GreedyScheduler::new(
-                            work_senders,
-                            finished_work_receiver,
+                            scheduler_worker_senders,
+                            scheduler_finished_work_receiver,
                             GreedySchedulerConfig::default(),
                         );
                         let scheduler_controller = SchedulerController::new(
-                            decision_maker.clone(),
+                            scheduler_decision_maker,
                             receive_and_buffer,
                             bank_forks,
                             scheduler,
                             worker_metrics,
                             forwarder,
-                            blacklisted_accounts.clone(),
+                            scheduler_blacklisted_accounts,
                         );
 
                         match scheduler_controller.run() {
@@ -711,10 +716,48 @@ impl BankingStage {
                     .name("solBnkTxSched".to_string())
                     .spawn(move || {
                         let scheduler = PrioGraphScheduler::new(
-                            work_senders,
-                            finished_work_receiver,
+                            scheduler_worker_senders,
+                            scheduler_finished_work_receiver,
                             PrioGraphSchedulerConfig::default(),
                         );
+                        let scheduler_controller = SchedulerController::new(
+                            scheduler_decision_maker,
+                            receive_and_buffer,
+                            bank_forks,
+                            scheduler,
+                            worker_metrics,
+                            forwarder,
+                            scheduler_blacklisted_accounts,
+                        );
+
+                        match scheduler_controller.run() {
+                            Ok(_) => {}
+                            Err(SchedulerError::DisconnectedRecvChannel(_)) => {}
+                            Err(SchedulerError::DisconnectedSendChannel(_)) => {
+                                warn!("Unexpected worker disconnect from scheduler")
+                            }
+                        }
+                    })
+                    .unwrap(),
+            );
+        }
+
+        if let Some(jss_dependencies) = jss_dependencies {
+            // Spawn the JSS thread
+            bank_thread_hdls.push(
+                Builder::new()
+                    .name("solJssSched".to_string())
+                    .spawn(move || {
+                        let scheduler = FifoBatchScheduler::new(
+                            work_senders,
+                            finished_work_receiver,
+                        );
+                        let receive_and_buffer: JssReceiveAndBuffer = JssReceiveAndBuffer::new(
+                            jss_dependencies.jss_enabled.clone(),
+                            jss_dependencies.bundle_receiver.clone(),
+                            bank_forks.clone(),
+                        );
+
                         let scheduler_controller = SchedulerController::new(
                             decision_maker.clone(),
                             receive_and_buffer,
@@ -725,13 +768,9 @@ impl BankingStage {
                             blacklisted_accounts.clone(),
                         );
 
-                        match scheduler_controller.run() {
-                            Ok(_) => {}
-                            Err(SchedulerError::DisconnectedRecvChannel(_)) => {}
-                            Err(SchedulerError::DisconnectedSendChannel(_)) => {
-                                warn!("Unexpected worker disconnect from scheduler")
-                            }
-                        }
+                        // TODO_DG: disable forwarding
+                        // TODO_DG: fix type stuff
+
                     })
                     .unwrap(),
             );
