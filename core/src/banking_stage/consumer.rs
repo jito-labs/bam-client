@@ -341,10 +341,7 @@ impl Consumer {
 
             // Update tip account receivers if needed
             if !self.run_tip_programs_if_needed(bank, txs, &reservation_cb) {
-                error!(
-                    "Error running tip programs, skipping transactions: {:?}",
-                    txs
-                );
+                error!("Error running tip programs for transactions: {:?}", txs);
             }
 
             let process_transaction_batch_output = self.process_and_record_transactions(
