@@ -247,8 +247,10 @@ impl<Tx: TransactionWithMeta> GreedyScheduler<Tx> {
                         transactions,
                         max_ages,
                         revert_on_error: _,
+                        respond_with_extra_info: _,
                     },
                 retryable_indexes,
+                extra_info: _,
             }) => {
                 let num_transactions = ids.len();
                 let num_retryable = retryable_indexes.len();
@@ -338,6 +340,7 @@ impl<Tx: TransactionWithMeta> GreedyScheduler<Tx> {
             transactions,
             max_ages,
             revert_on_error: false,
+            respond_with_extra_info: false,
         };
         self.consume_work_senders[thread_index]
             .send(work)

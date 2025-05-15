@@ -1,6 +1,5 @@
 use {
-    solana_sdk::clock::{Epoch, Slot},
-    std::fmt::Display,
+    jito_protos::proto::jss_types::bundle_result, solana_sdk::clock::{Epoch, Slot}, std::fmt::Display
 };
 
 /// A unique identifier for a transaction batch.
@@ -42,6 +41,7 @@ pub struct ConsumeWork<Tx> {
     pub transactions: Vec<Tx>,
     pub max_ages: Vec<MaxAge>,
     pub revert_on_error: bool,
+    pub respond_with_extra_info: bool,
 }
 
 /// Message: [Worker -> Scheduler]
@@ -49,4 +49,9 @@ pub struct ConsumeWork<Tx> {
 pub struct FinishedConsumeWork<Tx> {
     pub work: ConsumeWork<Tx>,
     pub retryable_indexes: Vec<usize>,
+    pub extra_info: Option<FinishedConsumeWorkExtraInfo>,
+}
+
+pub struct FinishedConsumeWorkExtraInfo {
+    pub transactions: Vec<bundle_result::Result>,
 }
