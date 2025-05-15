@@ -695,6 +695,7 @@ mod tests {
                     ids: vec![],
                     transactions: vec![],
                     max_ages: vec![],
+                    revert_on_error: false,
                 },
                 retryable_indexes: vec![],
             })
