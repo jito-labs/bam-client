@@ -158,9 +158,9 @@ impl JssStage {
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
             if last_jss_url_check_time.elapsed().as_secs() > 1 {
                 last_jss_url_check_time = std::time::Instant::now();
-                if let Some(current_jss_url) = jss_url.lock().unwrap().clone() {
-                    if current_jss_url != current_jss_url {
-                        info!("JSS URL changed to {}", current_jss_url);
+                if let Some(new_jss_url) = jss_url.lock().unwrap().clone() {
+                    if current_jss_url != new_jss_url {
+                        info!("JSS URL changed to {}", new_jss_url);
                         break;
                     }
                 } else {
