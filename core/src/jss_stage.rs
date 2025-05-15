@@ -359,7 +359,7 @@ impl JssStage {
                     true
                 }
                 Err(err) => {
-                    info!("Failed to connect to JSS: {}", err);
+                    error!("Failed to connect to JSS: {}", err);
                     *jss_connection = None;
                     false
                 }
