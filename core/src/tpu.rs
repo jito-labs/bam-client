@@ -4,12 +4,15 @@
 use crossbeam_channel::bounded;
 pub use solana_sdk::net::DEFAULT_TPU_COALESCE;
 // allow multiple connections for NAT and any open/close overlap
+use crate::{
+    banking_stage::consumer::TipProcessingDependencies, jss_dependencies::JssDependencies,
+    jss_manager::JssManager,
+};
 #[deprecated(
     since = "2.2.0",
     note = "Use solana_streamer::quic::DEFAULT_MAX_QUIC_CONNECTIONS_PER_PEER instead"
 )]
 pub use solana_streamer::quic::DEFAULT_MAX_QUIC_CONNECTIONS_PER_PEER as MAX_QUIC_CONNECTIONS_PER_PEER;
-use crate::{banking_stage::consumer::TipProcessingDependencies, jss_dependencies::JssDependencies, jss_manager::JssManager};
 
 use {
     crate::{
@@ -349,7 +352,7 @@ impl Tpu {
 
         let (jss_bundle_sender, jss_bundle_receiver) = bounded(100_000);
         let (jss_outbound_sender, jss_outbound_receiver) = bounded(100_000);
-        let jss_dependencies = JssDependencies{
+        let jss_dependencies = JssDependencies {
             jss_enabled: jss_enabled.clone(),
             bundle_sender: jss_bundle_sender,
             bundle_receiver: jss_bundle_receiver,
@@ -385,7 +388,7 @@ impl Tpu {
                     preallocated_bundle_cost,
                 )
             },
-            Some(TipProcessingDependencies{
+            Some(TipProcessingDependencies {
                 tip_manager: tip_manager.clone(),
                 last_tip_updated_slot: Arc::new(Mutex::new(0)),
                 block_builder_fee_info: jss_dependencies.block_builder_fee_info.clone(),

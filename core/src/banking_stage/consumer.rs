@@ -10,26 +10,48 @@ use {
         scheduler_messages::MaxAge,
         unprocessed_transaction_storage::{ConsumeScannerPayload, UnprocessedTransactionStorage},
         BankingStageStats,
-    }, crate::{bundle_stage::bundle_account_locker::BundleAccountLocker, proxy::block_engine_stage::BlockBuilderFeeInfo, tip_manager::{TipManager}}, agave_feature_set as feature_set, itertools::Itertools, solana_fee::FeeFeatures, solana_gossip::cluster_info::ClusterInfo, solana_ledger::token_balances::collect_token_balances, solana_measure::{measure::Measure, measure_us}, solana_poh::poh_recorder::{
+    },
+    crate::{
+        bundle_stage::bundle_account_locker::BundleAccountLocker,
+        proxy::block_engine_stage::BlockBuilderFeeInfo, tip_manager::TipManager,
+    },
+    agave_feature_set as feature_set,
+    itertools::Itertools,
+    solana_fee::FeeFeatures,
+    solana_gossip::cluster_info::ClusterInfo,
+    solana_ledger::token_balances::collect_token_balances,
+    solana_measure::{measure::Measure, measure_us},
+    solana_poh::poh_recorder::{
         BankStart, PohRecorderError, RecordTransactionsSummary, RecordTransactionsTimings,
         TransactionRecorder,
-    }, solana_runtime::{
+    },
+    solana_runtime::{
         bank::{Bank, LoadAndExecuteTransactionsOutput},
         transaction_batch::TransactionBatch,
         verify_precompiles::verify_precompiles,
-    }, solana_runtime_transaction::transaction_with_meta::TransactionWithMeta, solana_sdk::{
-        clock::{FORWARD_TRANSACTIONS_TO_LEADER_AT_SLOT_OFFSET, MAX_PROCESSING_AGE}, fee::FeeBudgetLimits, pubkey::Pubkey, saturating_add_assign, timing::timestamp, transaction::{self, TransactionError, VersionedTransaction}
-    }, solana_svm::{
+    },
+    solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
+    solana_sdk::{
+        clock::{FORWARD_TRANSACTIONS_TO_LEADER_AT_SLOT_OFFSET, MAX_PROCESSING_AGE},
+        fee::FeeBudgetLimits,
+        pubkey::Pubkey,
+        saturating_add_assign,
+        timing::timestamp,
+        transaction::{self, TransactionError, VersionedTransaction},
+    },
+    solana_svm::{
         account_loader::{validate_fee_payer, TransactionCheckResult},
         transaction_error_metrics::TransactionErrorMetrics,
         transaction_processing_result::TransactionProcessingResultExtensions,
         transaction_processor::{ExecutionRecordingConfig, TransactionProcessingConfig},
-    }, solana_transaction_status::PreBalanceInfo, std::{
+    },
+    solana_transaction_status::PreBalanceInfo,
+    std::{
         collections::HashSet,
         num::Saturating,
         sync::{atomic::Ordering, Arc, Mutex},
         time::Instant,
-    }
+    },
 };
 
 /// Consumer will create chunks of transactions from buffer with up to this size.
@@ -76,7 +98,7 @@ pub struct TipProcessingDependencies {
     pub tip_manager: TipManager,
     pub last_tip_updated_slot: Arc<Mutex<u64>>,
     pub block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
-    pub cluster_info: Arc<ClusterInfo>
+    pub cluster_info: Arc<ClusterInfo>,
 }
 
 pub struct Consumer {
@@ -433,9 +455,9 @@ impl Consumer {
             cost_model_throttled_transactions_count: 0,
             cost_model_us: 0,
             execute_and_commit_transactions_output: ExecuteAndCommitTransactionsOutput {
-                transaction_counts: LeaderProcessedTransactionCounts{
+                transaction_counts: LeaderProcessedTransactionCounts {
                     attempted_processing_count: txn_count as u64,
-                    .. Default::default()
+                    ..Default::default()
                 },
                 retryable_transaction_indexes: vec![],
                 commit_transactions_result: (0..txn_count)
@@ -482,12 +504,16 @@ impl Consumer {
             return true;
         }
 
-        let initialize_tip_programs_bundle = 
+        let initialize_tip_programs_bundle =
             tip_manager.get_initialize_tip_programs_bundle(&bank, &keypair);
         if let Some(init_bundle) = initialize_tip_programs_bundle {
             let txs = init_bundle.transactions;
             let result = self.process_and_record_transactions(bank, &txs, 0, reservation_cb, true);
-            if result.execute_and_commit_transactions_output.commit_transactions_result.is_err() {
+            if result
+                .execute_and_commit_transactions_output
+                .commit_transactions_result
+                .is_err()
+            {
                 return false;
             }
         }
@@ -496,14 +522,16 @@ impl Consumer {
         if block_builder_fee_info.block_builder == Pubkey::default() {
             return false;
         }
-        if let Ok(Some(tip_crank_bundle)) = tip_manager.get_tip_programs_crank_bundle(
-            &bank,
-            &keypair,
-            &block_builder_fee_info,
-        ) {
+        if let Ok(Some(tip_crank_bundle)) =
+            tip_manager.get_tip_programs_crank_bundle(&bank, &keypair, &block_builder_fee_info)
+        {
             let txs = tip_crank_bundle.transactions;
             let result = self.process_and_record_transactions(bank, &txs, 0, reservation_cb, true);
-            if result.execute_and_commit_transactions_output.commit_transactions_result.is_err() {
+            if result
+                .execute_and_commit_transactions_output
+                .commit_transactions_result
+                .is_err()
+            {
                 return false;
             }
         }
@@ -636,13 +664,11 @@ impl Consumer {
             reservation_cb
         ));
         if revert_on_error
-            && transaction_qos_cost_results.iter().any(|result| result.is_err())
+            && transaction_qos_cost_results
+                .iter()
+                .any(|result| result.is_err())
         {
-            QosService::remove_or_update_costs(
-                transaction_qos_cost_results.iter(),
-                None,
-                bank,
-            );
+            QosService::remove_or_update_costs(transaction_qos_cost_results.iter(), None, bank);
 
             return ProcessTransactionBatchOutput {
                 cost_model_throttled_transactions_count,
@@ -822,7 +848,9 @@ impl Consumer {
                 }
             ));
         execute_and_commit_timings.load_execute_us = load_execute_us;
-        let successful_count = load_and_execute_transactions_output.processed_counts.processed_with_successful_result_count as usize;
+        let successful_count = load_and_execute_transactions_output
+            .processed_counts
+            .processed_with_successful_result_count as usize;
         if revert_on_error && successful_count != batch.sanitized_transactions().len() {
             return ExecuteAndCommitTransactionsOutput {
                 transaction_counts: LeaderProcessedTransactionCounts {
@@ -870,7 +898,10 @@ impl Consumer {
 
         let batches: Vec<Vec<VersionedTransaction>> = if revert_on_error {
             Self::create_non_conflicing_batches(
-                processed_transactions.into_iter().zip(batch.sanitized_transactions().iter()))
+                processed_transactions
+                    .into_iter()
+                    .zip(batch.sanitized_transactions().iter()),
+            )
         } else {
             vec![processed_transactions]
         };
@@ -963,7 +994,7 @@ impl Consumer {
     }
 
     fn create_non_conflicing_batches<'a>(
-        transactions: impl Iterator<Item = (VersionedTransaction, &'a (impl TransactionWithMeta +'a))>,
+        transactions: impl Iterator<Item = (VersionedTransaction, &'a (impl TransactionWithMeta + 'a))>,
     ) -> Vec<Vec<VersionedTransaction>> {
         let mut result = vec![];
         let mut current_batch = vec![];
@@ -982,11 +1013,12 @@ impl Consumer {
                 .enumerate()
                 .filter_map(|(index, key)| (!transaction_info.is_writable(index)).then_some(key))
                 .collect_vec();
-            let has_contention = write_account_locks.iter().any(|key| {
-                current_write_locks.contains(key) || current_read_locks.contains(key)
-            }) || read_account_locks.iter().any(|key| {
-                current_write_locks.contains(key)
-            });
+            let has_contention = write_account_locks
+                .iter()
+                .any(|key| current_write_locks.contains(key) || current_read_locks.contains(key))
+                || read_account_locks
+                    .iter()
+                    .any(|key| current_write_locks.contains(key));
             if has_contention {
                 result.push(std::mem::take(&mut current_batch));
                 current_write_locks.clear();
@@ -2302,7 +2334,8 @@ mod tests {
                 BundleAccountLocker::default(),
             );
 
-            let _ = consumer.process_and_record_transactions(&bank, &transactions, 0, &|_| 0, false);
+            let _ =
+                consumer.process_and_record_transactions(&bank, &transactions, 0, &|_| 0, false);
 
             drop(consumer); // drop/disconnect transaction_status_sender
 
@@ -2456,8 +2489,13 @@ mod tests {
                 BundleAccountLocker::default(),
             );
 
-            let _ =
-                consumer.process_and_record_transactions(&bank, &[sanitized_tx.clone()], 0, &|_| 0, false);
+            let _ = consumer.process_and_record_transactions(
+                &bank,
+                &[sanitized_tx.clone()],
+                0,
+                &|_| 0,
+                false,
+            );
 
             drop(consumer); // drop/disconnect transaction_status_sender
 
