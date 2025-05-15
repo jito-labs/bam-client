@@ -2,7 +2,7 @@ use {
     super::{
         consumer::{Consumer, ExecuteAndCommitTransactionsOutput, ProcessTransactionBatchOutput},
         leader_slot_timing_metrics::LeaderExecuteAndCommitTimings,
-        scheduler_messages::{ConsumeWork, FinishedConsumeWork},
+        scheduler_messages::{ConsumeWork, FinishedConsumeWork, FinishedConsumeWorkExtraInfo},
     },
     crossbeam_channel::{Receiver, RecvError, SendError, Sender},
     solana_measure::measure_us,
@@ -128,13 +128,20 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         self.metrics.update_for_consume(&output);
         self.metrics.has_data.store(true, Ordering::Relaxed);
 
-        // TODO_DG: send back status, cus used and fee payer balance
+        let extra_info = if work.respond_with_extra_info {
+            Some(FinishedConsumeWorkExtraInfo{
+                transactions: vec![], // TODO_DG
+            })
+        } else {
+            None
+        };
 
         self.consumed_sender.send(FinishedConsumeWork {
             work,
             retryable_indexes: output
                 .execute_and_commit_transactions_output
                 .retryable_transaction_indexes,
+            extra_info,
         })?;
         Ok(())
     }
@@ -175,6 +182,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         self.consumed_sender.send(FinishedConsumeWork {
             work,
             retryable_indexes,
+            extra_info: None, // TODO_DG
         })?;
         Ok(())
     }
@@ -917,6 +925,7 @@ mod tests {
             transactions,
             max_ages: vec![max_age],
             revert_on_error: false,
+            respond_with_extra_info: false,
         };
         consume_sender.send(work).unwrap();
         let consumed = consumed_receiver.recv().unwrap();
@@ -967,6 +976,7 @@ mod tests {
             transactions,
             max_ages: vec![max_age],
             revert_on_error: false,
+            respond_with_extra_info: false,
         };
         consume_sender.send(work).unwrap();
         let consumed = consumed_receiver.recv().unwrap();
@@ -1019,6 +1029,7 @@ mod tests {
                 transactions: txs,
                 max_ages: vec![max_age, max_age],
                 revert_on_error: false,
+                respond_with_extra_info: false,
             })
             .unwrap();
 
@@ -1081,6 +1092,7 @@ mod tests {
                 transactions: txs1,
                 max_ages: vec![max_age],
                 revert_on_error: false,
+                respond_with_extra_info: false,
             })
             .unwrap();
 
@@ -1091,6 +1103,7 @@ mod tests {
                 transactions: txs2,
                 max_ages: vec![max_age],
                 revert_on_error: false,
+                respond_with_extra_info: false,
             })
             .unwrap();
         let consumed = consumed_receiver.recv().unwrap();
@@ -1230,6 +1243,7 @@ mod tests {
                     },
                 ],
                 revert_on_error: false,
+                respond_with_extra_info: false,
             })
             .unwrap();
 

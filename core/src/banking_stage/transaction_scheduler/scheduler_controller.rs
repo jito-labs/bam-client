@@ -693,8 +693,10 @@ mod tests {
                     transactions: vec![],
                     max_ages: vec![],
                     revert_on_error: false,
+                    respond_with_extra_info: false,
                 },
                 retryable_indexes: vec![],
+                extra_info: None,
             })
             .unwrap();
 
@@ -1028,6 +1030,7 @@ mod tests {
             .send(FinishedConsumeWork {
                 work: consume_work,
                 retryable_indexes: vec![1],
+                extra_info: None,
             })
             .unwrap();
 

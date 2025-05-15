@@ -358,8 +358,10 @@ impl<Tx: TransactionWithMeta> PrioGraphScheduler<Tx> {
                         transactions,
                         max_ages,
                         revert_on_error: _,
+                        respond_with_extra_info: _,
                     },
                 retryable_indexes,
+                extra_info: _,
             }) => {
                 let num_transactions = ids.len();
                 let num_retryable = retryable_indexes.len();
@@ -449,6 +451,7 @@ impl<Tx: TransactionWithMeta> PrioGraphScheduler<Tx> {
             transactions,
             max_ages,
             revert_on_error: false,
+            respond_with_extra_info: false,
         };
         self.consume_work_senders[thread_index]
             .send(work)
@@ -889,6 +892,7 @@ mod tests {
             .send(FinishedConsumeWork {
                 work: thread_0_work.into_iter().next().unwrap(),
                 retryable_indexes: vec![],
+                extra_info: None,
             })
             .unwrap();
         scheduler.receive_completed(&mut container).unwrap();
