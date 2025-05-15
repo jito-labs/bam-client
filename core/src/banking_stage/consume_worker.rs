@@ -3,13 +3,23 @@ use {
         consumer::{Consumer, ExecuteAndCommitTransactionsOutput, ProcessTransactionBatchOutput},
         leader_slot_timing_metrics::LeaderExecuteAndCommitTimings,
         scheduler_messages::{ConsumeWork, FinishedConsumeWork, FinishedConsumeWorkExtraInfo},
-    }, crossbeam_channel::{Receiver, RecvError, SendError, Sender}, jito_protos::proto::jss_types::bundle_result, solana_measure::measure_us, solana_poh::leader_bank_notifier::LeaderBankNotifier, solana_runtime::bank::Bank, solana_runtime_transaction::transaction_with_meta::TransactionWithMeta, solana_sdk::timing::AtomicInterval, solana_svm::transaction_error_metrics::TransactionErrorMetrics, std::{
+    },
+    crossbeam_channel::{Receiver, RecvError, SendError, Sender},
+    jito_protos::proto::jss_types::bundle_result,
+    solana_measure::measure_us,
+    solana_poh::leader_bank_notifier::LeaderBankNotifier,
+    solana_runtime::bank::Bank,
+    solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
+    solana_sdk::timing::AtomicInterval,
+    solana_svm::transaction_error_metrics::TransactionErrorMetrics,
+    std::{
         sync::{
             atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
             Arc,
         },
         time::Duration,
-    }, thiserror::Error
+    },
+    thiserror::Error,
 };
 
 #[derive(Debug, Error)]
@@ -120,8 +130,8 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         self.metrics.has_data.store(true, Ordering::Relaxed);
 
         let extra_info = if work.respond_with_extra_info {
-            Some(FinishedConsumeWorkExtraInfo{
-                transactions: vec![], // TODO_DG
+            Some(FinishedConsumeWorkExtraInfo {
+                results: vec![], // TODO_DG
             })
         } else {
             None
@@ -170,8 +180,12 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
             .retryable_expired_bank_count
             .fetch_add(num_retryable, Ordering::Relaxed);
         self.metrics.has_data.store(true, Ordering::Relaxed);
-        let extra_info =Some(FinishedConsumeWorkExtraInfo{
-            transactions: (0..work.transactions.len()).map(|_| bundle_result::Result::Retryable(jito_protos::proto::jss_types::Retryable {})).collect(),
+        let extra_info = Some(FinishedConsumeWorkExtraInfo {
+            results: (0..work.transactions.len())
+                .map(|_| {
+                    bundle_result::Result::Retryable(jito_protos::proto::jss_types::Retryable {})
+                })
+                .collect(),
         });
         self.consumed_sender.send(FinishedConsumeWork {
             work,

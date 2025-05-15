@@ -1,23 +1,52 @@
 use crossbeam_channel::{Receiver, Sender};
+use jito_protos::proto::jss_api::{start_scheduler_message::Msg, StartSchedulerMessage};
+use prio_graph::{GraphNode, PrioGraph, TopLevelId};
+use solana_pubkey::Pubkey;
 use solana_runtime_transaction::transaction_with_meta::TransactionWithMeta;
 
 use crate::banking_stage::scheduler_messages::{ConsumeWork, FinishedConsumeWork};
 
-use super::{scheduler::{Scheduler, SchedulingSummary}, scheduler_error::SchedulerError, transaction_state_container::StateContainer};
+use super::{
+    scheduler::{Scheduler, SchedulingSummary},
+    scheduler_error::SchedulerError,
+    transaction_priority_id::TransactionPriorityId,
+    transaction_state_container::StateContainer,
+};
+
+type SchedulerPrioGraph = PrioGraph<
+    TransactionPriorityId,
+    Pubkey,
+    TransactionPriorityId,
+    fn(&TransactionPriorityId, &GraphNode<TransactionPriorityId>) -> TransactionPriorityId,
+>;
+
+#[inline(always)]
+fn passthrough_priority(
+    id: &TransactionPriorityId,
+    _graph_node: &GraphNode<TransactionPriorityId>,
+) -> TransactionPriorityId {
+    *id
+}
 
 pub struct FifoBatchScheduler<Tx: TransactionWithMeta> {
     consume_work_senders: Vec<Sender<ConsumeWork<Tx>>>,
     finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
+    response_sender: Sender<StartSchedulerMessage>,
+
+    prio_graph: SchedulerPrioGraph,
 }
 
 impl<Tx: TransactionWithMeta> FifoBatchScheduler<Tx> {
     pub fn new(
         consume_work_senders: Vec<Sender<ConsumeWork<Tx>>>,
         finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
+        response_sender: Sender<StartSchedulerMessage>,
     ) -> Self {
         Self {
             consume_work_senders,
             finished_consume_work_receiver,
+            response_sender,
+            prio_graph: PrioGraph::new(passthrough_priority),
         }
     }
 }
@@ -29,13 +58,44 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for FifoBatchScheduler<Tx> {
         pre_graph_filter: impl Fn(&[&Tx], &mut [bool]),
         pre_lock_filter: impl Fn(&Tx) -> bool,
     ) -> Result<SchedulingSummary, SchedulerError> {
-        todo!()
+        while let Some(next_bundle_id) = container.pop() {
+            let Some(bundle) = container.get_batch_ttl(next_bundle_id) else {
+                continue;
+            };
+        }
     }
 
+    // TODO_DG
     fn receive_completed(
         &mut self,
-        container: &mut impl StateContainer<Tx>,
+        _container: &mut impl StateContainer<Tx>,
     ) -> Result<(usize, usize), SchedulerError> {
-        todo!()
+        let mut num_transactions = 0;
+        while let Ok(result) = self.finished_consume_work_receiver.try_recv() {
+            num_transactions += result.work.ids.len();
+
+            // Remove from container
+
+            // Send the result back to the scheduler
+            if let Some(extra_info) = result.extra_info {
+                for (bundle_result, seq_id) in
+                    extra_info.results.into_iter().zip(result.work.ids.iter())
+                {
+                    let _ = self.response_sender.try_send(StartSchedulerMessage {
+                        msg: Some(Msg::BundleResult(
+                            jito_protos::proto::jss_types::BundleResult {
+                                seq_id: *seq_id as u32,
+                                result: Some(bundle_result),
+                            },
+                        )),
+                    });
+                }
+            }
+
+            // Unblock the next blocked bundle in the prio-graph
+            for i in result.work.ids {}
+        }
+
+        Ok((num_transactions, 0))
     }
 }

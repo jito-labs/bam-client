@@ -2,11 +2,13 @@
 //! to construct a software pipeline. The stage uses all available CPU cores and
 //! can do its processing in parallel with signature verification on the GPU.
 
+use crate::jss_dependencies::JssDependencies;
 use consumer::TipProcessingDependencies;
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
-use transaction_scheduler::{fifo_batch_scheduler::FifoBatchScheduler, jss_receive_and_buffer::JssReceiveAndBuffer};
-use crate::jss_dependencies::JssDependencies;
+use transaction_scheduler::{
+    fifo_batch_scheduler::FifoBatchScheduler, jss_receive_and_buffer::JssReceiveAndBuffer,
+};
 
 use {
     self::{
@@ -751,10 +753,12 @@ impl BankingStage {
                         let scheduler = FifoBatchScheduler::new(
                             work_senders,
                             finished_work_receiver,
+                            jss_dependencies.outbound_sender.clone(),
                         );
                         let receive_and_buffer: JssReceiveAndBuffer = JssReceiveAndBuffer::new(
                             jss_dependencies.jss_enabled.clone(),
                             jss_dependencies.bundle_receiver.clone(),
+                            jss_dependencies.outbound_sender.clone(),
                             bank_forks.clone(),
                         );
 
@@ -770,7 +774,6 @@ impl BankingStage {
 
                         // TODO_DG: disable forwarding
                         // TODO_DG: fix type stuff
-
                     })
                     .unwrap(),
             );
@@ -962,7 +965,10 @@ pub(crate) fn update_bank_forks_and_poh_recorder_for_new_tpu_bank(
 mod tests {
     use {
         super::*,
-        crate::{banking_trace::{BankingTracer, Channels}, jss_dependencies},
+        crate::{
+            banking_trace::{BankingTracer, Channels},
+            jss_dependencies,
+        },
         agave_banking_stage_ingress_types::BankingPacketBatch,
         crossbeam_channel::{unbounded, Receiver},
         itertools::Itertools,

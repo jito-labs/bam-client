@@ -5,7 +5,6 @@ use solana_gossip::cluster_info::ClusterInfo;
 
 use crate::proxy::block_engine_stage::BlockBuilderFeeInfo;
 
-
 #[derive(Clone)]
 pub struct JssDependencies {
     pub jss_enabled: Arc<AtomicBool>,
@@ -17,5 +16,5 @@ pub struct JssDependencies {
     pub outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessage>,
 
     pub cluster_info: Arc<ClusterInfo>,
-    pub block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>
+    pub block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
 }
