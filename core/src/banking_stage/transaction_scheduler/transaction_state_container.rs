@@ -47,6 +47,7 @@ pub(crate) struct TransactionStateContainer<Tx: TransactionWithMeta> {
     capacity: usize,
     priority_queue: MinMaxHeap<TransactionPriorityId>,
     id_to_transaction_state: Slab<TransactionState<Tx>>,
+    id_to_batch_state: Slab<TransactionState<Vec<Tx>>>,
 }
 
 pub(crate) trait StateContainer<Tx: TransactionWithMeta> {
@@ -66,6 +67,8 @@ pub(crate) trait StateContainer<Tx: TransactionWithMeta> {
     /// Get reference to `SanitizedTransactionTTL` by id.
     /// Panics if the transaction does not exist.
     fn get_transaction_ttl(&self, id: TransactionId) -> Option<&SanitizedTransactionTTL<Tx>>;
+
+    fn get_batch_ttl( &self, transaction_ids: TransactionId) -> Option<&SanitizedTransactionTTL<Vec<Tx>>>;
 
     /// Retries a transaction - inserts transaction back into map (but not packet).
     /// This transitions the transaction to `Unprocessed` state.
@@ -109,6 +112,7 @@ impl<Tx: TransactionWithMeta> StateContainer<Tx> for TransactionStateContainer<T
             capacity,
             priority_queue: MinMaxHeap::with_capacity(capacity + EXTRA_CAPACITY),
             id_to_transaction_state: Slab::with_capacity(capacity + EXTRA_CAPACITY),
+            id_to_batch_state: Slab::with_capacity(capacity + EXTRA_CAPACITY),
         }
     }
 
@@ -129,6 +133,12 @@ impl<Tx: TransactionWithMeta> StateContainer<Tx> for TransactionStateContainer<T
 
     fn get_transaction_ttl(&self, id: TransactionId) -> Option<&SanitizedTransactionTTL<Tx>> {
         self.id_to_transaction_state
+            .get(id)
+            .map(|state| state.transaction_ttl())
+    }
+
+    fn get_batch_ttl(&self, id: TransactionId) -> Option<&SanitizedTransactionTTL<Vec<Tx>>> {
+        self.id_to_batch_state
             .get(id)
             .map(|state| state.transaction_ttl())
     }
@@ -295,6 +305,14 @@ impl StateContainer<RuntimeTransactionView> for TransactionViewStateContainer {
         id: TransactionId,
     ) -> Option<&SanitizedTransactionTTL<RuntimeTransactionView>> {
         self.inner.get_transaction_ttl(id)
+    }
+
+    #[inline]
+    fn get_batch_ttl(
+        &self,
+        id: TransactionId,
+    ) -> Option<&SanitizedTransactionTTL<Vec<RuntimeTransactionView>>> {
+        self.inner.get_batch_ttl(id)
     }
 
     #[inline]
