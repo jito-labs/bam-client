@@ -71,6 +71,7 @@ pub struct LeaderProcessedTransactionCounts {
     pub(crate) processed_with_successful_result_count: u64,
 }
 
+#[derive(Clone)]
 pub struct TipProcessingDependencies {
     tip_manager: TipManager,
     last_tip_updated_slot: Arc<Mutex<u64>>,
@@ -116,7 +117,7 @@ impl Consumer {
         log_messages_bytes_limit: Option<usize>,
         blacklisted_accounts: HashSet<Pubkey>,
         bundle_account_locker: BundleAccountLocker,
-        tip_processing_dependencies: TipProcessingDependencies,
+        tip_processing_dependencies: Option<TipProcessingDependencies>,
     ) -> Self {
         Self {
             committer,
@@ -125,7 +126,7 @@ impl Consumer {
             log_messages_bytes_limit,
             blacklisted_accounts,
             bundle_account_locker,
-            tip_processing_dependencies: Some(tip_processing_dependencies),
+            tip_processing_dependencies,
         }
     }
 
