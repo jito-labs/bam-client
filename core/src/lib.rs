@@ -27,6 +27,7 @@ pub mod gen_keys;
 pub mod immutable_deserialized_bundle;
 pub mod jss_connection;
 pub mod jss_dependencies;
+pub mod jss_manager;
 pub mod next_leader;
 pub mod optimistic_confirmation_verifier;
 pub mod packet_bundle;
