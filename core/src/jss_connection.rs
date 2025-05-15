@@ -6,7 +6,6 @@ use std::sync::{
     Arc, Mutex, RwLock,
 };
 
-use crossbeam_channel::Receiver;
 use futures::{channel::mpsc, StreamExt};
 use jito_protos::proto::{
     jss_api::{
@@ -14,7 +13,7 @@ use jito_protos::proto::{
         start_scheduler_response::Resp, BuilderConfigResp, GetBuilderConfigRequest,
         StartSchedulerMessage, StartSchedulerResponse,
     },
-    jss_types::{Bundle, LeaderState, ValidatorHeartBeat},
+    jss_types::{Bundle, ValidatorHeartBeat},
 };
 use solana_gossip::cluster_info::ClusterInfo;
 use solana_poh::poh_recorder::PohRecorder;
@@ -26,11 +25,8 @@ use tokio::time::{interval, timeout};
 const TICKS_PER_SLOT: u64 = 64;
 
 pub struct JssConnection {
-    outbound_sender: mpsc::Sender<StartSchedulerMessage>,
     builder_config: Arc<Mutex<Option<BuilderConfigResp>>>,
-    bundle_receiver: Receiver<Bundle>,
     background_task: tokio::task::JoinHandle<()>,
-    metrics: Arc<JssConnectionMetrics>,
     is_healthy: Arc<AtomicBool>,
 }
 
@@ -39,16 +35,18 @@ impl JssConnection {
         url: String,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         cluster_info: Arc<ClusterInfo>,
+        builder_config: Arc<Mutex<Option<BuilderConfigResp>>>,
+        bundle_sender: crossbeam_channel::Sender<Bundle>,
+        outbound_sender: mpsc::Sender<StartSchedulerMessage>,
+        outbound_receiver: mpsc::Receiver<StartSchedulerMessage>,
     ) -> Result<Self, TryInitError> {
         let backend_endpoint = tonic::transport::Endpoint::from_shared(url)?;
         let connection_timeout = std::time::Duration::from_secs(5);
-        let builder_config = Arc::new(Mutex::new(None));
 
         let channel = timeout(connection_timeout, backend_endpoint.connect()).await??;
 
         let mut validator_client = JssNodeApiClient::new(channel);
 
-        let (outbound_sender, outbound_receiver) = mpsc::channel(100_000);
         let outbound_stream =
             tonic::Request::new(outbound_receiver.map(|req: StartSchedulerMessage| req));
         let inbound_stream = validator_client
@@ -63,7 +61,6 @@ impl JssConnection {
         let metrics = Arc::new(JssConnectionMetrics::default());
         let is_healthy = Arc::new(AtomicBool::new(false));
 
-        let (bundle_sender, bundle_receiver) = crossbeam_channel::bounded(100_000);
         let background_task = tokio::spawn(Self::background_task(
             inbound_stream,
             outbound_sender.clone(),
@@ -77,11 +74,8 @@ impl JssConnection {
         ));
 
         Ok(Self {
-            outbound_sender,
             builder_config,
             background_task,
-            bundle_receiver,
-            metrics,
             is_healthy,
         })
     }
@@ -179,30 +173,6 @@ impl JssConnection {
         let slot_signature = keypair.try_sign_message(&slot.to_le_bytes()).ok()?;
         let slot_signature = slot_signature.to_string();
         Some(slot_signature)
-    }
-
-    pub fn try_recv_bundle(&mut self) -> Option<Bundle> {
-        self.metrics.bundle_polls.fetch_add(1, Relaxed);
-        self.bundle_receiver.try_recv().ok()
-    }
-
-    pub fn drain_bundles(&mut self) {
-        while let Ok(_) = self.bundle_receiver.try_recv() {
-            self.metrics.bundle_received.fetch_add(1, Relaxed);
-        }
-    }
-
-    pub fn send_leader_state(&mut self, leader_state: LeaderState) {
-        let _ = self.outbound_sender.try_send(StartSchedulerMessage {
-            msg: Some(Msg::LeaderState(leader_state)),
-        });
-        self.metrics.leaderstate_sent.fetch_add(1, Relaxed);
-    }
-
-    pub fn send_bundle_result(&mut self, result: jito_protos::proto::jss_types::BundleResult) {
-        let _ = self.outbound_sender.try_send(StartSchedulerMessage {
-            msg: Some(Msg::BundleResult(result)),
-        });
     }
 
     pub fn is_healthy(&mut self) -> bool {
