@@ -1,6 +1,7 @@
 //! The `tpu` module implements the Transaction Processing Unit, a
 //! multi-stage transaction processing pipeline in software.
 
+use crossbeam_channel::bounded;
 pub use solana_sdk::net::DEFAULT_TPU_COALESCE;
 // allow multiple connections for NAT and any open/close overlap
 #[deprecated(
@@ -8,7 +9,7 @@ pub use solana_sdk::net::DEFAULT_TPU_COALESCE;
     note = "Use solana_streamer::quic::DEFAULT_MAX_QUIC_CONNECTIONS_PER_PEER instead"
 )]
 pub use solana_streamer::quic::DEFAULT_MAX_QUIC_CONNECTIONS_PER_PEER as MAX_QUIC_CONNECTIONS_PER_PEER;
-use crate::banking_stage::consumer::TipProcessingDependencies;
+use crate::{banking_stage::consumer::TipProcessingDependencies, jss_dependencies::JssDependencies};
 
 use {
     crate::{
@@ -341,6 +342,13 @@ impl Tpu {
             .saturating_mul(8)
             .saturating_div(10);
 
+        let (jss_bundle_sender, jss_bundle_receiver) = bounded(100_000);
+        let jss_dependencies = Some(JssDependencies{
+            bundle_sender: jss_bundle_sender,
+            bundle_receiver: jss_bundle_receiver,
+            builder_config: Arc::new(Mutex::new(None)),
+        });
+
         let mut blacklisted_accounts = HashSet::new();
         blacklisted_accounts.insert(tip_manager.tip_payment_program_id());
         let banking_stage = BankingStage::new(
@@ -373,7 +381,7 @@ impl Tpu {
                 block_builder_fee_info: block_builder_fee_info.clone(),
                 cluster_info: cluster_info.clone(),
             }),
-            None, // TODO_DG
+            jss_dependencies,
         );
 
         let bundle_stage = BundleStage::new(
