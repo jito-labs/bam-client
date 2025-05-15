@@ -372,7 +372,8 @@ impl Tpu {
                 last_tip_updated_slot: Arc::new(Mutex::new(0)),
                 block_builder_fee_info: block_builder_fee_info.clone(),
                 cluster_info: cluster_info.clone(),
-            })
+            }),
+            None, // TODO_DG
         );
 
         let bundle_stage = BundleStage::new(

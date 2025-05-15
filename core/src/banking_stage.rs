@@ -5,6 +5,8 @@
 use consumer::TipProcessingDependencies;
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
+use crate::jss_dependencies::JssDependencies;
+
 use {
     self::{
         committer::Committer,
@@ -378,6 +380,7 @@ impl BankingStage {
         // callback function for compute space reservation for BundleStage
         block_cost_limit_block_cost_limit_reservation_cb: impl Fn(&Bank) -> u64 + Clone + Send + 'static,
         tip_processing_dependencies: Option<TipProcessingDependencies>,
+        jss_dependencies: Option<JssDependencies>,
     ) -> Self {
         Self::new_num_threads(
             block_production_method,
@@ -399,6 +402,7 @@ impl BankingStage {
             bundle_account_locker,
             block_cost_limit_block_cost_limit_reservation_cb,
             tip_processing_dependencies,
+            jss_dependencies,
         )
     }
 
@@ -423,6 +427,7 @@ impl BankingStage {
         bundle_account_locker: BundleAccountLocker,
         block_cost_limit_reservation_cb: impl Fn(&Bank) -> u64 + Clone + Send + 'static,
         tip_processing_dependencies: Option<TipProcessingDependencies>,
+        jss_dependencies: Option<JssDependencies>,
     ) -> Self {
         match block_production_method {
             BlockProductionMethod::CentralScheduler
@@ -451,6 +456,7 @@ impl BankingStage {
                     bundle_account_locker,
                     block_cost_limit_reservation_cb,
                     tip_processing_dependencies,
+                    jss_dependencies,
                 )
             }
         }
@@ -477,6 +483,7 @@ impl BankingStage {
         bundle_account_locker: BundleAccountLocker,
         block_cost_limit_reservation_cb: impl Fn(&Bank) -> u64 + Clone + Send + 'static,
         tip_processing_dependencies: Option<TipProcessingDependencies>,
+        jss_dependencies: Option<JssDependencies>,
     ) -> Self {
         assert!(num_threads >= MIN_TOTAL_THREADS);
         // Single thread to generate entries from many banks.
@@ -1018,6 +1025,7 @@ mod tests {
                 BundleAccountLocker::default(),
                 |_| 0,
                 None,
+                None,
             );
             drop(non_vote_sender);
             drop(tpu_vote_sender);
@@ -1083,6 +1091,7 @@ mod tests {
                 HashSet::default(),
                 BundleAccountLocker::default(),
                 |_| 0,
+                None,
                 None,
             );
             trace!("sending bank");
@@ -1174,6 +1183,7 @@ mod tests {
                 HashSet::default(),
                 BundleAccountLocker::default(),
                 |_| 0,
+                None,
                 None,
             );
 
@@ -1353,6 +1363,7 @@ mod tests {
                     HashSet::default(),
                     BundleAccountLocker::default(),
                     |_| 0,
+                    None,
                     None,
                 );
 
@@ -1560,6 +1571,7 @@ mod tests {
                 BundleAccountLocker::default(),
                 |_| 0,
                 None,
+                None,
             );
 
             let keypairs = (0..100).map(|_| Keypair::new()).collect_vec();
@@ -1703,6 +1715,7 @@ mod tests {
                     HashSet::from_iter([blacklisted_keypair.pubkey()]),
                     BundleAccountLocker::default(),
                     |_| 0,
+                    None,
                     None,
                 );
 
