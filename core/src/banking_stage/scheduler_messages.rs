@@ -1,5 +1,7 @@
 use {
-    jito_protos::proto::jss_types::bundle_result, solana_sdk::clock::{Epoch, Slot}, std::fmt::Display
+    jito_protos::proto::jss_types::bundle_result,
+    solana_sdk::clock::{Epoch, Slot},
+    std::fmt::Display,
 };
 
 /// A unique identifier for a transaction batch.
@@ -53,5 +55,5 @@ pub struct FinishedConsumeWork<Tx> {
 }
 
 pub struct FinishedConsumeWorkExtraInfo {
-    pub transactions: Vec<bundle_result::Result>,
+    pub results: Vec<bundle_result::Result>,
 }

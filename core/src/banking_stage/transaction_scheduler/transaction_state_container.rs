@@ -68,7 +68,10 @@ pub(crate) trait StateContainer<Tx: TransactionWithMeta> {
     /// Panics if the transaction does not exist.
     fn get_transaction_ttl(&self, id: TransactionId) -> Option<&SanitizedTransactionTTL<Tx>>;
 
-    fn get_batch_ttl( &self, transaction_ids: TransactionId) -> Option<&SanitizedTransactionTTL<Vec<Tx>>>;
+    fn get_batch_ttl(
+        &self,
+        transaction_ids: TransactionId,
+    ) -> Option<&SanitizedTransactionTTL<Vec<Tx>>>;
 
     /// Retries a transaction - inserts transaction back into map (but not packet).
     /// This transitions the transaction to `Unprocessed` state.
@@ -208,9 +211,36 @@ impl<Tx: TransactionWithMeta> TransactionStateContainer<Tx> {
         self.push_ids_into_queue(std::iter::once(priority_id)) > 0
     }
 
+    pub(crate) fn insert_new_batch(
+        &mut self,
+        transaction_ttl: SanitizedTransactionTTL<Vec<Tx>>,
+        packets: Arc<Vec<ImmutableDeserializedPacket>>,
+        priority: u64,
+        cost: u64,
+    ) -> bool {
+        let priority_id = {
+            let entry = self.get_vacant_batch_map_entry();
+            let transaction_id = entry.key();
+            entry.insert(TransactionState::new(
+                transaction_ttl,
+                Some(packets), // TODO
+                priority,
+                cost,
+            ));
+            TransactionPriorityId::new(priority, transaction_id)
+        };
+
+        self.push_ids_into_queue(std::iter::once(priority_id)) > 0
+    }
+
     fn get_vacant_map_entry(&mut self) -> VacantEntry<TransactionState<Tx>> {
         assert!(self.id_to_transaction_state.len() < self.id_to_transaction_state.capacity());
         self.id_to_transaction_state.vacant_entry()
+    }
+
+    fn get_vacant_batch_map_entry(&mut self) -> VacantEntry<TransactionState<Vec<Tx>>> {
+        assert!(self.id_to_batch_state.len() < self.id_to_batch_state.capacity());
+        self.id_to_batch_state.vacant_entry()
     }
 }
 
