@@ -8,6 +8,8 @@ pub use solana_sdk::net::DEFAULT_TPU_COALESCE;
     note = "Use solana_streamer::quic::DEFAULT_MAX_QUIC_CONNECTIONS_PER_PEER instead"
 )]
 pub use solana_streamer::quic::DEFAULT_MAX_QUIC_CONNECTIONS_PER_PEER as MAX_QUIC_CONNECTIONS_PER_PEER;
+use crate::banking_stage::consumer::TipProcessingDependencies;
+
 use {
     crate::{
         banking_stage::BankingStage,
@@ -364,7 +366,12 @@ impl Tpu {
                     preallocated_bundle_cost,
                 )
             },
-            None,
+            Some(TipProcessingDependencies{
+                tip_manager: tip_manager.clone(),
+                last_tip_updated_slot: Arc::new(Mutex::new(0)),
+                block_builder_fee_info: block_builder_fee_info.clone(),
+                cluster_info: cluster_info.clone(),
+            })
         );
 
         let bundle_stage = BundleStage::new(
