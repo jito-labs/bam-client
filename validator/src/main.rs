@@ -1012,6 +1012,7 @@ pub fn main() {
         )),
         preallocated_bundle_cost: value_of(&matches, "preallocated_bundle_cost")
             .expect("preallocated_bundle_cost set as default"),
+        jss_url: Arc::new(Mutex::new(value_of(&matches, "jss_url"))),
         ..ValidatorConfig::default()
     };
 
@@ -1325,6 +1326,7 @@ pub fn main() {
             tower_storage: validator_config.tower_storage.clone(),
             staked_nodes_overrides,
             rpc_to_plugin_manager_sender,
+            jss_url: validator_config.jss_url.clone(),
         },
     );
 

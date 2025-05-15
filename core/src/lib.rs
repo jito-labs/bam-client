@@ -25,6 +25,7 @@ pub mod fetch_stage;
 pub mod forwarding_stage;
 pub mod gen_keys;
 pub mod immutable_deserialized_bundle;
+pub mod jss_connection;
 pub mod next_leader;
 pub mod optimistic_confirmation_verifier;
 pub mod packet_bundle;
