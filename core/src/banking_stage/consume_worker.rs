@@ -128,6 +128,8 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         self.metrics.update_for_consume(&output);
         self.metrics.has_data.store(true, Ordering::Relaxed);
 
+        // TODO_DG: send back status, cus used and fee payer balance
+
         self.consumed_sender.send(FinishedConsumeWork {
             work,
             retryable_indexes: output
