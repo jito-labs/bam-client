@@ -73,10 +73,10 @@ pub struct LeaderProcessedTransactionCounts {
 
 #[derive(Clone)]
 pub struct TipProcessingDependencies {
-    tip_manager: TipManager,
-    last_tip_updated_slot: Arc<Mutex<u64>>,
-    block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
-    cluster_info: Arc<ClusterInfo>
+    pub tip_manager: TipManager,
+    pub last_tip_updated_slot: Arc<Mutex<u64>>,
+    pub block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
+    pub cluster_info: Arc<ClusterInfo>
 }
 
 pub struct Consumer {
