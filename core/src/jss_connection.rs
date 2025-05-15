@@ -37,8 +37,7 @@ impl JssConnection {
         cluster_info: Arc<ClusterInfo>,
         builder_config: Arc<Mutex<Option<BuilderConfigResp>>>,
         bundle_sender: crossbeam_channel::Sender<Bundle>,
-        outbound_sender: mpsc::Sender<StartSchedulerMessage>,
-        outbound_receiver: mpsc::Receiver<StartSchedulerMessage>,
+        outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessage>,
     ) -> Result<Self, TryInitError> {
         let backend_endpoint = tonic::transport::Endpoint::from_shared(url)?;
         let connection_timeout = std::time::Duration::from_secs(5);
@@ -47,8 +46,9 @@ impl JssConnection {
 
         let mut validator_client = JssNodeApiClient::new(channel);
 
+        let (outbound_sender, outbound_receiver_internal) = mpsc::channel(100_000);
         let outbound_stream =
-            tonic::Request::new(outbound_receiver.map(|req: StartSchedulerMessage| req));
+            tonic::Request::new(outbound_receiver_internal.map(|req: StartSchedulerMessage| req));
         let inbound_stream = validator_client
             .start_scheduler_stream(outbound_stream)
             .await
@@ -71,6 +71,7 @@ impl JssConnection {
             cluster_info,
             metrics.clone(),
             is_healthy.clone(),
+            outbound_receiver.clone(),
         ));
 
         Ok(Self {
@@ -90,6 +91,7 @@ impl JssConnection {
         cluster_info: Arc<ClusterInfo>,
         metrics: Arc<JssConnectionMetrics>,
         is_healthy: Arc<AtomicBool>,
+        mut outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessage>,
     ) {
         let mut last_heartbeat = std::time::Instant::now();
         let mut heartbeat_interval = interval(std::time::Duration::from_secs(5));
@@ -97,6 +99,8 @@ impl JssConnection {
         let mut metrics_and_health_check_interval = interval(std::time::Duration::from_secs(1));
         metrics_and_health_check_interval
             .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut outbound_tick_interval = interval(std::time::Duration::from_millis(1));
+        outbound_tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Burst);
         loop {
             tokio::select! {
                 _ = heartbeat_interval.tick() => {
@@ -150,6 +154,12 @@ impl JssConnection {
                             metrics.bundle_received.fetch_add(1, Relaxed);
                         }
                         _ => {}
+                    }
+                }
+                _ = outbound_tick_interval.tick() => {
+                    while let Ok(outbound) = outbound_receiver.try_recv() {
+                        let _ = outbound_sender.try_send(outbound);
+                        metrics.bundle_polls.fetch_add(1, Relaxed);
                     }
                 }
             }
