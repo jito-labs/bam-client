@@ -2,6 +2,7 @@
 //! to construct a software pipeline. The stage uses all available CPU cores and
 //! can do its processing in parallel with signature verification on the GPU.
 
+use consumer::TipProcessingDependencies;
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
 use {
@@ -376,6 +377,7 @@ impl BankingStage {
         bundle_account_locker: BundleAccountLocker,
         // callback function for compute space reservation for BundleStage
         block_cost_limit_block_cost_limit_reservation_cb: impl Fn(&Bank) -> u64 + Clone + Send + 'static,
+        tip_processing_dependencies: Option<TipProcessingDependencies>,
     ) -> Self {
         Self::new_num_threads(
             block_production_method,
@@ -396,6 +398,7 @@ impl BankingStage {
             blacklisted_accounts,
             bundle_account_locker,
             block_cost_limit_block_cost_limit_reservation_cb,
+            tip_processing_dependencies,
         )
     }
 
@@ -419,6 +422,7 @@ impl BankingStage {
         blacklisted_accounts: HashSet<Pubkey>,
         bundle_account_locker: BundleAccountLocker,
         block_cost_limit_reservation_cb: impl Fn(&Bank) -> u64 + Clone + Send + 'static,
+        tip_processing_dependencies: Option<TipProcessingDependencies>,
     ) -> Self {
         match block_production_method {
             BlockProductionMethod::CentralScheduler
@@ -446,6 +450,7 @@ impl BankingStage {
                     blacklisted_accounts,
                     bundle_account_locker,
                     block_cost_limit_reservation_cb,
+                    tip_processing_dependencies,
                 )
             }
         }
@@ -471,6 +476,7 @@ impl BankingStage {
         blacklisted_accounts: HashSet<Pubkey>,
         bundle_account_locker: BundleAccountLocker,
         block_cost_limit_reservation_cb: impl Fn(&Bank) -> u64 + Clone + Send + 'static,
+        tip_processing_dependencies: Option<TipProcessingDependencies>,
     ) -> Self {
         assert!(num_threads >= MIN_TOTAL_THREADS);
         // Single thread to generate entries from many banks.
@@ -557,6 +563,7 @@ impl BankingStage {
                     blacklisted_accounts.clone(),
                     bundle_account_locker.clone(),
                     block_cost_limit_reservation_cb.clone(),
+                    tip_processing_dependencies.clone(),
                 );
             }
             TransactionStructure::View => {
@@ -581,6 +588,7 @@ impl BankingStage {
                     blacklisted_accounts.clone(),
                     bundle_account_locker.clone(),
                     block_cost_limit_reservation_cb.clone(),
+                    tip_processing_dependencies.clone(),
                 );
             }
         }
@@ -606,6 +614,7 @@ impl BankingStage {
         blacklisted_accounts: HashSet<Pubkey>,
         bundle_account_locker: BundleAccountLocker,
         block_cost_limit_reservation_cb: impl Fn(&Bank) -> u64 + Clone + Send + 'static,
+        tip_processing_dependencies: Option<TipProcessingDependencies>,
     ) {
         // Create channels for communication between scheduler and workers
         let num_workers = (num_threads).saturating_sub(NUM_VOTE_PROCESSING_THREADS);
@@ -620,13 +629,14 @@ impl BankingStage {
             let consume_worker = ConsumeWorker::new(
                 id,
                 work_receiver,
-                Consumer::new(
+                Consumer::new_with_tip_processing(
                     committer.clone(),
                     poh_recorder.read().unwrap().new_recorder(),
                     QosService::new(id),
                     log_messages_bytes_limit,
                     blacklisted_accounts.clone(),
                     bundle_account_locker.clone(),
+                    tip_processing_dependencies.clone(),
                 ),
                 finished_work_sender.clone(),
                 poh_recorder.read().unwrap().new_leader_bank_notifier(),
@@ -1007,6 +1017,7 @@ mod tests {
                 HashSet::default(),
                 BundleAccountLocker::default(),
                 |_| 0,
+                None,
             );
             drop(non_vote_sender);
             drop(tpu_vote_sender);
@@ -1072,6 +1083,7 @@ mod tests {
                 HashSet::default(),
                 BundleAccountLocker::default(),
                 |_| 0,
+                None,
             );
             trace!("sending bank");
             drop(non_vote_sender);
@@ -1162,6 +1174,7 @@ mod tests {
                 HashSet::default(),
                 BundleAccountLocker::default(),
                 |_| 0,
+                None,
             );
 
             // fund another account so we can send 2 good transactions in a single batch.
@@ -1340,6 +1353,7 @@ mod tests {
                     HashSet::default(),
                     BundleAccountLocker::default(),
                     |_| 0,
+                    None,
                 );
 
                 // wait for banking_stage to eat the packets
@@ -1545,6 +1559,7 @@ mod tests {
                 HashSet::default(),
                 BundleAccountLocker::default(),
                 |_| 0,
+                None,
             );
 
             let keypairs = (0..100).map(|_| Keypair::new()).collect_vec();
@@ -1688,6 +1703,7 @@ mod tests {
                     HashSet::from_iter([blacklisted_keypair.pubkey()]),
                     BundleAccountLocker::default(),
                     |_| 0,
+                    None,
                 );
 
                 // bad tx
