@@ -352,7 +352,7 @@ impl Tpu {
             outbound_sender: jss_outbound_sender,
             outbound_receiver: jss_outbound_receiver,
             cluster_info: cluster_info.clone(),
-            builder_config: Arc::new(Mutex::new(None)),
+            block_builder_fee_info: Arc::new(Mutex::new(BlockBuilderFeeInfo::default())),
         };
 
         let mut blacklisted_accounts = HashSet::new();
@@ -384,7 +384,7 @@ impl Tpu {
             Some(TipProcessingDependencies{
                 tip_manager: tip_manager.clone(),
                 last_tip_updated_slot: Arc::new(Mutex::new(0)),
-                block_builder_fee_info: block_builder_fee_info.clone(),
+                block_builder_fee_info: jss_dependencies.block_builder_fee_info.clone(),
                 cluster_info: cluster_info.clone(),
             }),
             Some(jss_dependencies.clone()),

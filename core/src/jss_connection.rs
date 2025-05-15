@@ -36,7 +36,6 @@ impl JssConnection {
         url: String,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         cluster_info: Arc<ClusterInfo>,
-        builder_config: Arc<Mutex<Option<BuilderConfigResp>>>,
         bundle_sender: crossbeam_channel::Sender<Bundle>,
         outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessage>,
     ) -> Result<Self, TryInitError> {
@@ -61,6 +60,7 @@ impl JssConnection {
 
         let metrics = Arc::new(JssConnectionMetrics::default());
         let is_healthy = Arc::new(AtomicBool::new(false));
+        let builder_config = Arc::new(Mutex::new(None));
 
         let background_task = tokio::spawn(Self::background_task(
             inbound_stream,
