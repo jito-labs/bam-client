@@ -1,11 +1,21 @@
-use std::{net::{Ipv4Addr, SocketAddr, SocketAddrV4}, str::FromStr, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, RwLock}};
+use std::{
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+    str::FromStr,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, RwLock,
+    },
+};
 
 use jito_protos::proto::{jss_api::BuilderConfigResp, jss_types::Socket};
 use solana_gossip::cluster_info::ClusterInfo;
 use solana_poh::poh_recorder::PohRecorder;
 use solana_pubkey::Pubkey;
 
-use crate::{jss_connection::JssConnection, jss_dependencies::JssDependencies, proxy::block_engine_stage::BlockBuilderFeeInfo};
+use crate::{
+    jss_connection::JssConnection, jss_dependencies::JssDependencies,
+    proxy::block_engine_stage::BlockBuilderFeeInfo,
+};
 
 pub struct JssManager {
     thread: std::thread::JoinHandle<()>,
@@ -20,12 +30,7 @@ impl JssManager {
     ) -> Self {
         Self {
             thread: std::thread::spawn(move || {
-                Self::run(
-                    exit,
-                    jss_url,
-                    dependencies,
-                    poh_recorder,
-                )
+                Self::run(exit, jss_url, dependencies, poh_recorder)
             }),
         }
     }
@@ -45,10 +50,9 @@ impl JssManager {
         let mut current_connection = None;
         while !exit.load(Ordering::Relaxed) {
             // Update if jss is enabled and sleep for a while before checking again
-            dependencies.jss_enabled.store(
-                current_connection.is_some(),
-                Ordering::Relaxed,
-            );
+            dependencies
+                .jss_enabled
+                .store(current_connection.is_some(), Ordering::Relaxed);
 
             // If no connection then try to create a new one
             if current_connection.is_none() {
@@ -59,7 +63,8 @@ impl JssManager {
                         poh_recorder.clone(),
                         dependencies.cluster_info.clone(),
                         dependencies.bundle_sender.clone(),
-                        dependencies.outbound_receiver.clone()));
+                        dependencies.outbound_receiver.clone(),
+                    ));
                     match result {
                         Ok(connection) => {
                             current_connection = Some(connection);
@@ -95,10 +100,7 @@ impl JssManager {
             // Check if block builder info has changed
             if let Some(builder_config) = connection.get_builder_config() {
                 // Update tpu if needed
-                Self::update_tpu_config(
-                    Some(&builder_config),
-                    &dependencies.cluster_info,
-                );
+                Self::update_tpu_config(Some(&builder_config), &dependencies.cluster_info);
 
                 // Update commission if needed
                 Self::update_key_and_commission(
