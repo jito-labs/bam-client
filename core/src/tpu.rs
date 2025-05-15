@@ -364,6 +364,7 @@ impl Tpu {
                     preallocated_bundle_cost,
                 )
             },
+            None,
         );
 
         let bundle_stage = BundleStage::new(
