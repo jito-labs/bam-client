@@ -343,9 +343,12 @@ impl Tpu {
             .saturating_div(10);
 
         let (jss_bundle_sender, jss_bundle_receiver) = bounded(100_000);
+        let (jss_outbound_sender, jss_outbound_receiver) = bounded(100_000);
         let jss_dependencies = Some(JssDependencies{
             bundle_sender: jss_bundle_sender,
             bundle_receiver: jss_bundle_receiver,
+            outbound_sender: jss_outbound_sender,
+            outbound_receiver: jss_outbound_receiver,
             builder_config: Arc::new(Mutex::new(None)),
         });
 
