@@ -8,7 +8,8 @@ pub struct JssDependencies {
     pub bundle_sender: crossbeam_channel::Sender<Bundle>,
     pub bundle_receiver: crossbeam_channel::Receiver<Bundle>,
 
-    // TODO: outbound sender/receiver
+    pub outbound_sender: crossbeam_channel::Sender<Bundle>,
+    pub outbound_receiver: crossbeam_channel::Receiver<Bundle>,
 
     pub builder_config: Arc<Mutex<Option<BuilderConfigResp>>>,
 }
