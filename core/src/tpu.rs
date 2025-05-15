@@ -9,7 +9,7 @@ pub use solana_sdk::net::DEFAULT_TPU_COALESCE;
     note = "Use solana_streamer::quic::DEFAULT_MAX_QUIC_CONNECTIONS_PER_PEER instead"
 )]
 pub use solana_streamer::quic::DEFAULT_MAX_QUIC_CONNECTIONS_PER_PEER as MAX_QUIC_CONNECTIONS_PER_PEER;
-use crate::{banking_stage::consumer::TipProcessingDependencies, jss_dependencies::JssDependencies};
+use crate::{banking_stage::consumer::TipProcessingDependencies, jss_dependencies::JssDependencies, jss_manager::JssManager};
 
 use {
     crate::{
@@ -114,6 +114,7 @@ pub struct Tpu {
     block_engine_stage: BlockEngineStage,
     fetch_stage_manager: FetchStageManager,
     bundle_stage: BundleStage,
+    jss_manager: JssManager,
 }
 
 impl Tpu {
@@ -162,7 +163,7 @@ impl Tpu {
         tip_manager_config: TipManagerConfig,
         shred_receiver_address: Arc<RwLock<Option<SocketAddr>>>,
         preallocated_bundle_cost: u64,
-        _jss_url: Arc<Mutex<Option<String>>>,
+        jss_url: Arc<Mutex<Option<String>>>,
     ) -> (Self, Vec<Arc<dyn NotifyKeyUpdate + Sync + Send>>) {
         let TpuSockets {
             transactions: transactions_sockets,
@@ -344,13 +345,14 @@ impl Tpu {
 
         let (jss_bundle_sender, jss_bundle_receiver) = bounded(100_000);
         let (jss_outbound_sender, jss_outbound_receiver) = bounded(100_000);
-        let jss_dependencies = Some(JssDependencies{
+        let jss_dependencies = JssDependencies{
+            jss_enabled: Arc::new(AtomicBool::new(false)),
             bundle_sender: jss_bundle_sender,
             bundle_receiver: jss_bundle_receiver,
             outbound_sender: jss_outbound_sender,
             outbound_receiver: jss_outbound_receiver,
             builder_config: Arc::new(Mutex::new(None)),
-        });
+        };
 
         let mut blacklisted_accounts = HashSet::new();
         blacklisted_accounts.insert(tip_manager.tip_payment_program_id());
@@ -384,7 +386,7 @@ impl Tpu {
                 block_builder_fee_info: block_builder_fee_info.clone(),
                 cluster_info: cluster_info.clone(),
             }),
-            jss_dependencies,
+            Some(jss_dependencies.clone()),
         );
 
         let bundle_stage = BundleStage::new(
@@ -399,6 +401,12 @@ impl Tpu {
             bundle_account_locker,
             &block_builder_fee_info,
             prioritization_fee_cache,
+        );
+
+        let jss_manager = JssManager::new(
+            exit.clone(),
+            jss_url,
+            jss_dependencies,
         );
 
         let (entry_receiver, tpu_entry_notifier) =
@@ -446,6 +454,7 @@ impl Tpu {
                 relayer_stage,
                 fetch_stage_manager,
                 bundle_stage,
+                jss_manager,
             },
             vec![key_updater, forwards_key_updater, vote_streamer_key_updater],
         )
@@ -466,6 +475,7 @@ impl Tpu {
             self.relayer_stage.join(),
             self.block_engine_stage.join(),
             self.fetch_stage_manager.join(),
+            self.jss_manager.join(),
         ];
         let broadcast_result = self.broadcast_stage.join();
         for result in results {
