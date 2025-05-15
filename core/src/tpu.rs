@@ -285,6 +285,8 @@ impl Tpu {
             block_builder_commission: 0,
         }));
 
+        let jss_enabled = Arc::new(AtomicBool::new(false));
+
         let (bundle_sender, bundle_receiver) = unbounded();
         let block_engine_stage = BlockEngineStage::new(
             block_engine_config,
@@ -294,6 +296,7 @@ impl Tpu {
             non_vote_sender.clone(),
             exit.clone(),
             &block_builder_fee_info,
+            jss_enabled.clone(),
         );
 
         let (heartbeat_tx, heartbeat_rx) = unbounded();
@@ -346,7 +349,7 @@ impl Tpu {
         let (jss_bundle_sender, jss_bundle_receiver) = bounded(100_000);
         let (jss_outbound_sender, jss_outbound_receiver) = bounded(100_000);
         let jss_dependencies = JssDependencies{
-            jss_enabled: Arc::new(AtomicBool::new(false)),
+            jss_enabled: jss_enabled.clone(),
             bundle_sender: jss_bundle_sender,
             bundle_receiver: jss_bundle_receiver,
             outbound_sender: jss_outbound_sender,
