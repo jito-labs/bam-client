@@ -28,6 +28,7 @@ pub struct JssConnection {
     builder_config: Arc<Mutex<Option<BuilderConfigResp>>>,
     background_task: tokio::task::JoinHandle<()>,
     is_healthy: Arc<AtomicBool>,
+    url: String,
 }
 
 impl JssConnection {
@@ -39,7 +40,7 @@ impl JssConnection {
         bundle_sender: crossbeam_channel::Sender<Bundle>,
         outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessage>,
     ) -> Result<Self, TryInitError> {
-        let backend_endpoint = tonic::transport::Endpoint::from_shared(url)?;
+        let backend_endpoint = tonic::transport::Endpoint::from_shared(url.clone())?;
         let connection_timeout = std::time::Duration::from_secs(5);
 
         let channel = timeout(connection_timeout, backend_endpoint.connect()).await??;
@@ -78,6 +79,7 @@ impl JssConnection {
             builder_config,
             background_task,
             is_healthy,
+            url,
         })
     }
 
@@ -91,7 +93,7 @@ impl JssConnection {
         cluster_info: Arc<ClusterInfo>,
         metrics: Arc<JssConnectionMetrics>,
         is_healthy: Arc<AtomicBool>,
-        mut outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessage>,
+        outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessage>,
     ) {
         let mut last_heartbeat = std::time::Instant::now();
         let mut heartbeat_interval = interval(std::time::Duration::from_secs(5));
@@ -191,6 +193,10 @@ impl JssConnection {
 
     pub fn get_builder_config(&self) -> Option<BuilderConfigResp> {
         self.builder_config.lock().unwrap().clone()
+    }
+
+    pub fn url(&self) -> &str {
+        &self.url
     }
 }
 

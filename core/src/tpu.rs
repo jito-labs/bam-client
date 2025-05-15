@@ -351,6 +351,7 @@ impl Tpu {
             bundle_receiver: jss_bundle_receiver,
             outbound_sender: jss_outbound_sender,
             outbound_receiver: jss_outbound_receiver,
+            cluster_info: cluster_info.clone(),
             builder_config: Arc::new(Mutex::new(None)),
         };
 
@@ -407,6 +408,7 @@ impl Tpu {
             exit.clone(),
             jss_url,
             jss_dependencies,
+            poh_recorder.clone(),
         );
 
         let (entry_receiver, tpu_entry_notifier) =
