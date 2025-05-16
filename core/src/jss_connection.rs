@@ -64,7 +64,7 @@ impl JssConnection {
 
         let background_task = tokio::spawn(Self::background_task(
             inbound_stream,
-            outbound_sender.clone(),
+            outbound_sender,
             validator_client,
             builder_config.clone(),
             bundle_sender,
@@ -72,7 +72,7 @@ impl JssConnection {
             cluster_info,
             metrics.clone(),
             is_healthy.clone(),
-            outbound_receiver.clone(),
+            outbound_receiver,
         ));
 
         Ok(Self {
@@ -160,13 +160,15 @@ impl JssConnection {
                 }
                 _ = outbound_tick_interval.tick() => {
                     while let Ok(outbound) = outbound_receiver.try_recv() {
-                        let _ = outbound_sender.try_send(outbound);
+                        let _ = outbound_sender.try_send(outbound).inspect_err(|_| {
+                            error!("Failed to send outbound message");
+                        });
                         metrics.bundle_polls.fetch_add(1, Relaxed);
                     }
                 }
             }
-            is_healthy.store(false, Relaxed);
         }
+        is_healthy.store(false, Relaxed);
     }
 
     fn create_signed_heartbeat(

@@ -1,17 +1,15 @@
 use {
     super::{
-        consumer::{Consumer, ExecuteAndCommitTransactionsOutput, ProcessTransactionBatchOutput},
-        leader_slot_timing_metrics::LeaderExecuteAndCommitTimings,
-        scheduler_messages::{ConsumeWork, FinishedConsumeWork, FinishedConsumeWorkExtraInfo},
+        committer::CommitTransactionDetails, consumer::{Consumer, ExecuteAndCommitTransactionsOutput, ProcessTransactionBatchOutput}, leader_slot_timing_metrics::LeaderExecuteAndCommitTimings, scheduler_messages::{ConsumeWork, FinishedConsumeWork, FinishedConsumeWorkExtraInfo}
     },
     crossbeam_channel::{Receiver, RecvError, SendError, Sender},
-    jito_protos::proto::jss_types::bundle_result,
+    jito_protos::proto::jss_types::{bundle_result, TransactionProcessedResult},
     solana_measure::measure_us,
     solana_poh::leader_bank_notifier::LeaderBankNotifier,
     solana_runtime::bank::Bank,
     solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
     solana_sdk::timing::AtomicInterval,
-    solana_svm::transaction_error_metrics::TransactionErrorMetrics,
+    solana_svm::{transaction_commit_result::TransactionCommitResult, transaction_error_metrics::TransactionErrorMetrics},
     std::{
         sync::{
             atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -130,8 +128,52 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         self.metrics.has_data.store(true, Ordering::Relaxed);
 
         let extra_info = if work.respond_with_extra_info {
+            let mut results = vec![];
+            for i in 0..work.ids.len() {
+                if output.execute_and_commit_transactions_output.retryable_transaction_indexes.contains(&i) {
+                    results.push(bundle_result::Result::Retryable(
+                        jito_protos::proto::jss_types::Retryable {},
+                    ));
+                } else {
+                    let Ok(commit_results) = output.execute_and_commit_transactions_output.commit_transactions_result.as_ref() else {
+                        results.push(bundle_result::Result::Invalid(
+                            jito_protos::proto::jss_types::Invalid {},
+                        ));
+                        continue;
+                    };
+                    let result = commit_results
+                        .get(i)
+                        .map(|result| {
+                            match result {
+                                CommitTransactionDetails::Committed { compute_units, .. } => {
+                                    bundle_result::Result::Processed(
+                                        jito_protos::proto::jss_types::Processed {
+                                            transaction_results: vec![
+                                                TransactionProcessedResult {
+                                                    cus_consumed: *compute_units as u32,
+                                                    feepayer_balance_after_lamports: 100_000, // TODO_DG
+                                                },
+                                            ],
+                                        },
+                                    )
+                                }
+                                CommitTransactionDetails::NotCommitted => {
+                                    bundle_result::Result::Invalid(
+                                        jito_protos::proto::jss_types::Invalid {},
+                                    )
+                                }
+                            }
+                        })
+                        .unwrap_or_else(|| {
+                            bundle_result::Result::Invalid(
+                                jito_protos::proto::jss_types::Invalid {},
+                            )
+                        });
+                    results.push(result);
+                }
+            }
             Some(FinishedConsumeWorkExtraInfo {
-                results: vec![], // TODO_DG
+                results,
             })
         } else {
             None

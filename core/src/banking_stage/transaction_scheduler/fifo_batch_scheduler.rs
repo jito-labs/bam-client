@@ -94,6 +94,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for FifoBatchScheduler<Tx> {
                 next_bundle_id.id,
                 next_bundle_id,
             );
+            info!("inserted transaction to prio-graph");
         }
 
         // Schedule any available transactions in prio-graph
@@ -137,13 +138,11 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for FifoBatchScheduler<Tx> {
     // TODO_DG
     fn receive_completed(
         &mut self,
-        _container: &mut impl StateContainer<Tx>,
+        container: &mut impl StateContainer<Tx>,
     ) -> Result<(usize, usize), SchedulerError> {
         let mut num_transactions = 0;
         while let Ok(result) = self.finished_consume_work_receiver.try_recv() {
             num_transactions += result.work.ids.len();
-
-            // Remove from container
 
             // Send the result back to the scheduler
             if let Some(extra_info) = result.extra_info {
@@ -162,10 +161,11 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for FifoBatchScheduler<Tx> {
             }
 
             // Unblock the next blocked bundle in the prio-graph
-            for i in result.work.ids {
-                let Some(priority_id) = self.priority_ids.remove(&i) else {
+            for id in result.work.ids {
+                let Some(priority_id) = self.priority_ids.remove(&id) else {
                     continue;
                 };
+                container.remove_by_id(id);
                 self.prio_graph.unblock(&priority_id);
             }
         }

@@ -123,7 +123,9 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                     if bundle.packets.len() == 0 {
                         continue;
                     }
-                    
+
+                    info!("got bundle!");
+
                     // For now: disable bundles due to storage issue
                     if bundle.packets.len() != 1 || bundle.packets[0].meta.as_ref().and_then(|m| m.flags.as_ref()).map(|f| f.revertable).unwrap_or_default() {
                         continue;
