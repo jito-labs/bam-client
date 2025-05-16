@@ -157,7 +157,7 @@ impl SanitizedTransactionReceiveAndBuffer {
         }
     }
 
-    fn buffer_packets(
+    pub fn buffer_packets(
         &mut self,
         container: &mut TransactionStateContainer<RuntimeTransaction<SanitizedTransaction>>,
         _timing_metrics: &mut SchedulerTimingMetrics,
