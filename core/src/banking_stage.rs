@@ -6,6 +6,8 @@ use crate::jss_dependencies::JssDependencies;
 use consumer::TipProcessingDependencies;
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
+use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
+use solana_sdk::transaction::SanitizedTransaction;
 use transaction_scheduler::{
     fifo_batch_scheduler::FifoBatchScheduler, jss_receive_and_buffer::JssReceiveAndBuffer,
 };
@@ -695,6 +697,8 @@ impl BankingStage {
         let scheduler_finished_work_receiver = finished_work_receiver.clone();
         let scheduler_decision_maker = decision_maker.clone();
         let scheduler_blacklisted_accounts = blacklisted_accounts.clone();
+        let scheduler_bank_forks = bank_forks.clone();
+        let scheduler_worker_metrics = worker_metrics.clone();
         if use_greedy_scheduler {
             bank_thread_hdls.push(
                 Builder::new()
@@ -708,9 +712,9 @@ impl BankingStage {
                         let scheduler_controller = SchedulerController::new(
                             scheduler_decision_maker,
                             receive_and_buffer,
-                            bank_forks,
+                            scheduler_bank_forks,
                             scheduler,
-                            worker_metrics,
+                            scheduler_worker_metrics,
                             forwarder,
                             scheduler_blacklisted_accounts,
                         );
@@ -738,9 +742,9 @@ impl BankingStage {
                         let scheduler_controller = SchedulerController::new(
                             scheduler_decision_maker,
                             receive_and_buffer,
-                            bank_forks,
+                            scheduler_bank_forks,
                             scheduler,
-                            worker_metrics,
+                            scheduler_worker_metrics,
                             forwarder,
                             scheduler_blacklisted_accounts,
                         );
@@ -758,22 +762,61 @@ impl BankingStage {
         }
 
         if let Some(jss_dependencies) = jss_dependencies {
+            // Spawn JSS workers
+            // Create channels for communication between scheduler and workers
+            let num_workers = (num_threads).saturating_sub(NUM_VOTE_PROCESSING_THREADS);
+            let (work_senders, work_receivers): (Vec<Sender<_>>, Vec<Receiver<_>>) =
+                (0..num_workers).map(|_| unbounded()).unzip();
+            let (finished_work_sender, finished_work_receiver) = unbounded();
+
+            // Spawn the worker threads
+            let mut worker_metrics = Vec::with_capacity(num_workers as usize);
+            for (index, work_receiver) in work_receivers.into_iter().enumerate() {
+                let id = (index as u32).saturating_add(NUM_VOTE_PROCESSING_THREADS);
+                let consume_worker = ConsumeWorker::new(
+                    id,
+                    work_receiver,
+                    Consumer::new_with_tip_processing(
+                        committer.clone(),
+                        poh_recorder.read().unwrap().new_recorder(),
+                        QosService::new(id),
+                        log_messages_bytes_limit,
+                        blacklisted_accounts.clone(),
+                        bundle_account_locker.clone(),
+                        tip_processing_dependencies.clone(),
+                    ),
+                    finished_work_sender.clone(),
+                    poh_recorder.read().unwrap().new_leader_bank_notifier(),
+                );
+
+                worker_metrics.push(consume_worker.metrics_handle());
+                let cb = block_cost_limit_reservation_cb.clone();
+                bank_thread_hdls.push(
+                    Builder::new()
+                        .name(format!("solCoWorker{id:02}"))
+                        .spawn(move || {
+                            let _ = consume_worker.run(cb);
+                        })
+                        .unwrap(),
+                )
+            }
+
             // Spawn the JSS thread
             bank_thread_hdls.push(
                 Builder::new()
                     .name("solJssSched".to_string())
                     .spawn(move || {
-                        let scheduler = FifoBatchScheduler::new(
+                        let scheduler = FifoBatchScheduler::<RuntimeTransaction<SanitizedTransaction>>::new(
                             work_senders,
                             finished_work_receiver,
                             jss_dependencies.outbound_sender.clone(),
                         );
-                        //let receive_and_buffer = JssReceiveAndBuffer::new(
-                        //    jss_dependencies.jss_enabled.clone(),
-                        //    jss_dependencies.bundle_receiver.clone(),
-                        //    jss_dependencies.outbound_sender.clone(),
-                        //    bank_forks.clone(),
-                        //);
+                        let receive_and_buffer = JssReceiveAndBuffer::new(
+                            jss_dependencies.jss_enabled.clone(),
+                            jss_dependencies.bundle_receiver.clone(),
+                            jss_dependencies.outbound_sender.clone(),
+                            bank_forks.clone(),
+                        );
 
                         let scheduler_controller = SchedulerController::new(
                             decision_maker.clone(),
@@ -785,8 +828,13 @@ impl BankingStage {
                             blacklisted_accounts.clone(),
                         );
 
-                        // TODO_DG: disable forwarding
-                        // TODO_DG: fix type stuff
+                        match scheduler_controller.run() {
+                            Ok(_) => {}
+                            Err(SchedulerError::DisconnectedRecvChannel(_)) => {}
+                            Err(SchedulerError::DisconnectedSendChannel(_)) => {
+                                warn!("Unexpected worker disconnect from scheduler")
+                            }
+                        }
                     })
                     .unwrap(),
             );
