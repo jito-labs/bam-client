@@ -360,6 +360,19 @@ impl LikeClusterInfo for Arc<ClusterInfo> {
     }
 }
 
+#[derive(Clone)]
+struct DummyLikeClusterInfo;
+
+impl LikeClusterInfo for DummyLikeClusterInfo {
+    fn id(&self) -> Pubkey {
+        Pubkey::default()
+    }
+
+    fn lookup_contact_info<R>(&self, _: &Pubkey, _: impl ContactInfoQuery<R>) -> Option<R> {
+        None
+    }
+}
+
 impl BankingStage {
     /// Create the stage using `bank`. Exit when `verified_receiver` is dropped.
     #[allow(clippy::too_many_arguments)]
@@ -755,12 +768,12 @@ impl BankingStage {
                             finished_work_receiver,
                             jss_dependencies.outbound_sender.clone(),
                         );
-                        let receive_and_buffer: JssReceiveAndBuffer = JssReceiveAndBuffer::new(
-                            jss_dependencies.jss_enabled.clone(),
-                            jss_dependencies.bundle_receiver.clone(),
-                            jss_dependencies.outbound_sender.clone(),
-                            bank_forks.clone(),
-                        );
+                        //let receive_and_buffer = JssReceiveAndBuffer::new(
+                        //    jss_dependencies.jss_enabled.clone(),
+                        //    jss_dependencies.bundle_receiver.clone(),
+                        //    jss_dependencies.outbound_sender.clone(),
+                        //    bank_forks.clone(),
+                        //);
 
                         let scheduler_controller = SchedulerController::new(
                             decision_maker.clone(),
@@ -768,7 +781,7 @@ impl BankingStage {
                             bank_forks,
                             scheduler,
                             worker_metrics,
-                            forwarder,
+                            Option::<Forwarder<DummyLikeClusterInfo>>::None,
                             blacklisted_accounts.clone(),
                         );
 
