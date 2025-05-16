@@ -60,15 +60,7 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
         match decision {
             BufferedPacketsDecision::Consume(bank_start) => {
                 while let Ok(bundle) = self.bundle_receiver.try_recv() {
-                    let mut transactions = Vec::new();
-                    if container.insert_new_batch(
-                        transaction_ttl,
-                        packets,
-                        bundle.seq_id as u64,
-                        0, /*TODO_DG*/
-                    ) {
-                        result += bundle.packets.len();
-                    }
+                    // TODO_DG: insert into the container
                 }
             }
             BufferedPacketsDecision::ForwardAndHold
@@ -80,7 +72,7 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                             jito_protos::proto::jss_types::BundleResult {
                                 seq_id: bundle.seq_id as u32,
                                 result: Some(bundle_result::Result::Retryable(
-                                    (jito_protos::proto::jss_types::Retryable {}),
+                                    jito_protos::proto::jss_types::Retryable {},
                                 )),
                             },
                         )),
