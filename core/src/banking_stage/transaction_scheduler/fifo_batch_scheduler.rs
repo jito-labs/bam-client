@@ -2,17 +2,15 @@ use std::time::Instant;
 
 use crossbeam_channel::{Receiver, Sender};
 use jito_protos::proto::jss_api::{start_scheduler_message::Msg, StartSchedulerMessage};
-use prio_graph::{GraphNode, PrioGraph, TopLevelId};
+use prio_graph::{AccessKind, GraphNode, PrioGraph, TopLevelId};
 use solana_pubkey::Pubkey;
 use solana_runtime_transaction::transaction_with_meta::TransactionWithMeta;
+use solana_svm_transaction::svm_message::SVMMessage;
 
-use crate::banking_stage::scheduler_messages::{ConsumeWork, FinishedConsumeWork};
+use crate::banking_stage::scheduler_messages::{ConsumeWork, FinishedConsumeWork, TransactionBatchId};
 
 use super::{
-    scheduler::{Scheduler, SchedulingSummary},
-    scheduler_error::SchedulerError,
-    transaction_priority_id::TransactionPriorityId,
-    transaction_state_container::StateContainer,
+    scheduler::{Scheduler, SchedulingSummary}, scheduler_error::SchedulerError, transaction_priority_id::TransactionPriorityId, transaction_state::SanitizedTransactionTTL, transaction_state_container::StateContainer
 };
 
 type SchedulerPrioGraph = PrioGraph<
@@ -32,10 +30,10 @@ fn passthrough_priority(
 
 pub struct FifoBatchScheduler<Tx: TransactionWithMeta> {
     consume_work_senders: Vec<Sender<ConsumeWork<Tx>>>,
-    busy_workers: Vec<bool>,
     finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
     response_sender: Sender<StartSchedulerMessage>,
 
+    next_batch_id: u64,
     prio_graph: SchedulerPrioGraph,
 }
 
@@ -45,14 +43,31 @@ impl<Tx: TransactionWithMeta> FifoBatchScheduler<Tx> {
         finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
         response_sender: Sender<StartSchedulerMessage>,
     ) -> Self {
-        let busy_workers = vec![false; consume_work_senders.len()];
         Self {
             consume_work_senders,
-            busy_workers,
             finished_consume_work_receiver,
             response_sender,
+            next_batch_id: 0,
             prio_graph: PrioGraph::new(passthrough_priority),
         }
+    }
+
+    /// Gets accessed accounts (resources) for use in `PrioGraph`.
+    fn get_transaction_account_access(
+        transaction: &SanitizedTransactionTTL<impl SVMMessage>,
+    ) -> impl Iterator<Item = (Pubkey, AccessKind)> + '_ {
+        let message = &transaction.transaction;
+        message
+            .account_keys()
+            .iter()
+            .enumerate()
+            .map(|(index, key)| {
+                if message.is_writable(index) {
+                    (*key, AccessKind::Write)
+                } else {
+                    (*key, AccessKind::Read)
+                }
+            })
     }
 }
 
@@ -64,20 +79,48 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for FifoBatchScheduler<Tx> {
         pre_lock_filter: impl Fn(&Tx) -> bool,
     ) -> Result<SchedulingSummary, SchedulerError> {
         let start_time = Instant::now();
+        let mut num_scheduled = 0;
 
         // Insert all incoming transactions into the prio-graph
         while let Some(next_bundle_id) = container.pop() {
-            let Some(bundle) = container.get_batch_ttl(next_bundle_id.id) else {
+            let Some(txn) = container.get_transaction_ttl(next_bundle_id.id) else {
                 continue;
             };
-            // TODO_DG
+            self.prio_graph.insert_transaction(next_bundle_id, Self::get_transaction_account_access(&txn));
         }
 
         // Schedule any available transactions in prio-graph
-        // TODO_DG
+        while let Some(next_id) = self.prio_graph.pop() {
+            // Get from container
+            let Some(txn) = container.get_mut_transaction_state(next_id.id) else {
+                continue;
+            };
+            let sanitized_transaction_ttl = txn.transition_to_pending();
+            
+            // TODO_DG: graph filter
+
+            // Choose a completely random worker index
+            let worker_index = rand::random::<usize>() % self.consume_work_senders.len();
+            let consume_work_sender = &self.consume_work_senders[worker_index];
+
+            let work = ConsumeWork {
+                batch_id: TransactionBatchId::new(self.next_batch_id),
+                ids: vec![next_id.id],
+                transactions: vec![sanitized_transaction_ttl.transaction],
+                max_ages: vec![sanitized_transaction_ttl.max_age],
+                revert_on_error: false,
+                respond_with_extra_info: false,
+            };
+            // Send the work to the worker
+            let _ = consume_work_sender
+                .send(work);
+
+            self.next_batch_id += 1;
+            num_scheduled += 1;
+        }
 
         Ok(SchedulingSummary {
-            num_scheduled: 0,
+            num_scheduled,
             num_unschedulable: 0,
             num_filtered_out: 0,
             filter_time_us: start_time.elapsed().as_micros() as u64,
