@@ -3,19 +3,20 @@ use std::sync::{
     Arc, RwLock,
 };
 
-use crossbeam_channel::Sender;
+use crossbeam_channel::{unbounded, Sender};
+use itertools::Itertools;
 use jito_protos::proto::{
     jss_api::{start_scheduler_message::Msg, StartSchedulerMessage},
-    jss_types::{bundle_result, Bundle},
+    jss_types::{bundle_result, Bundle, Packet},
 };
-use solana_runtime::bank_forks::BankForks;
+use solana_runtime::{bank::Bank, bank_forks::BankForks};
 use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
-use solana_sdk::transaction::SanitizedTransaction;
+use solana_sdk::{packet::{PacketFlags, PACKET_DATA_SIZE}, transaction::SanitizedTransaction};
 
-use crate::banking_stage::decision_maker::BufferedPacketsDecision;
+use crate::banking_stage::{decision_maker::BufferedPacketsDecision, immutable_deserialized_packet::ImmutableDeserializedPacket, packet_deserializer::PacketDeserializer};
 
 use super::{
-    receive_and_buffer::ReceiveAndBuffer, transaction_state_container::TransactionStateContainer,
+    receive_and_buffer::{ReceiveAndBuffer, SanitizedTransactionReceiveAndBuffer}, transaction_state_container::TransactionStateContainer,
 };
 
 pub struct JssReceiveAndBuffer {
@@ -23,6 +24,9 @@ pub struct JssReceiveAndBuffer {
     bundle_receiver: crossbeam_channel::Receiver<Bundle>,
     response_sender: Sender<StartSchedulerMessage>,
     bank_forks: Arc<RwLock<BankForks>>,
+
+    // Leveraging this for now; limits us to just single packets; put thats ok
+    internal_receive_and_buffer: SanitizedTransactionReceiveAndBuffer,
 }
 
 impl JssReceiveAndBuffer {
@@ -32,12 +36,67 @@ impl JssReceiveAndBuffer {
         response_sender: Sender<StartSchedulerMessage>,
         bank_forks: Arc<RwLock<BankForks>>,
     ) -> Self {
+        let internal_receive_and_buffer = SanitizedTransactionReceiveAndBuffer::new(
+            PacketDeserializer::new(unbounded().1),
+            bank_forks.clone(),
+            false,
+        );
         Self {
             jss_enabled,
             bundle_receiver,
             response_sender,
             bank_forks,
+            internal_receive_and_buffer,
         }
+    }
+
+    fn parse_transactions<'a>(
+        bank: &Bank,
+        packets: impl Iterator<Item = &'a Packet>,
+    ) -> Vec<ImmutableDeserializedPacket> {
+        packets
+            .filter_map(|packet| {
+                if packet.data.len() > PACKET_DATA_SIZE {
+                    return None;
+                }
+
+                let mut solana_packet = solana_sdk::packet::Packet::default();
+                solana_packet.meta_mut().size = packet.data.len() as usize;
+                solana_packet.meta_mut().set_discard(false);
+                solana_packet.buffer_mut()[0..packet.data.len()].copy_from_slice(&packet.data);
+                if let Some(meta) = &packet.meta {
+                    solana_packet.meta_mut().size = meta.size as usize;
+                    if let Some(addr) = &meta.addr.parse().ok() {
+                        solana_packet.meta_mut().addr = *addr;
+                    }
+                    solana_packet.meta_mut().port = meta.port as u16;
+                    if let Some(flags) = &meta.flags {
+                        if flags.simple_vote_tx {
+                            solana_packet
+                                .meta_mut()
+                                .flags
+                                .insert(PacketFlags::SIMPLE_VOTE_TX);
+                        }
+                        if flags.forwarded {
+                            solana_packet
+                                .meta_mut()
+                                .flags
+                                .insert(PacketFlags::FORWARDED);
+                        }
+                        if flags.repair {
+                            solana_packet.meta_mut().flags.insert(PacketFlags::REPAIR);
+                        }
+                    }
+                }
+                Some(ImmutableDeserializedPacket::new(solana_packet).ok()?)
+                //let sanitized_transaction = packet.build_sanitized_transaction(
+                //    bank.vote_only_bank(),
+                //    bank,
+                //    bank.get_reserved_account_keys(),
+                //)?;
+                //Some(sanitized_transaction.0)
+            })
+            .collect_vec()
     }
 }
 
@@ -57,10 +116,28 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
         }
 
         let mut result = 0;
+        let mut packets = Vec::new();
         match decision {
-            BufferedPacketsDecision::Consume(bank_start) => {
+            BufferedPacketsDecision::Consume(_) => {
                 while let Ok(bundle) = self.bundle_receiver.try_recv() {
-                    // TODO_DG: insert into the container
+                    if bundle.packets.len() == 0 {
+                        continue;
+                    }
+                    
+                    // For now: disable bundles due to storage issue
+                    if bundle.packets.len() != 1 || bundle.packets[0].meta.as_ref().and_then(|m| m.flags.as_ref()).map(|f| f.revertable).unwrap_or_default() {
+                        continue;
+                    }
+
+                    let Some(packet) = Self::parse_transactions(
+                        &self.bank_forks.read().unwrap().working_bank(),
+                        bundle.packets.iter(),
+                    ).into_iter().next() else {
+                        continue;
+                    };
+
+                    packets.push(packet);
+                    result += 1;
                 }
             }
             BufferedPacketsDecision::ForwardAndHold
@@ -80,6 +157,8 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                 }
             }
         }
+
+        self.internal_receive_and_buffer.buffer_packets(container, timing_metrics, count_metrics, packets);
 
         Ok(result)
     }
