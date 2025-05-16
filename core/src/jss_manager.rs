@@ -69,6 +69,8 @@ impl JssManager {
                         Ok(connection) => {
                             current_connection = Some(connection);
                             info!("JSS connection established");
+                            // Sleep to let heartbeat come in
+                            std::thread::sleep(std::time::Duration::from_secs(2));
                         }
                         Err(e) => {
                             error!("Failed to connect to JSS: {}", e);
