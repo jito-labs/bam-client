@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use crossbeam_channel::{Receiver, Sender};
 use jito_protos::proto::jss_api::{start_scheduler_message::Msg, StartSchedulerMessage};
 use prio_graph::{GraphNode, PrioGraph, TopLevelId};
@@ -30,6 +32,7 @@ fn passthrough_priority(
 
 pub struct FifoBatchScheduler<Tx: TransactionWithMeta> {
     consume_work_senders: Vec<Sender<ConsumeWork<Tx>>>,
+    busy_workers: Vec<bool>,
     finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
     response_sender: Sender<StartSchedulerMessage>,
 
@@ -42,8 +45,10 @@ impl<Tx: TransactionWithMeta> FifoBatchScheduler<Tx> {
         finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
         response_sender: Sender<StartSchedulerMessage>,
     ) -> Self {
+        let busy_workers = vec![false; consume_work_senders.len()];
         Self {
             consume_work_senders,
+            busy_workers,
             finished_consume_work_receiver,
             response_sender,
             prio_graph: PrioGraph::new(passthrough_priority),
@@ -58,11 +63,25 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for FifoBatchScheduler<Tx> {
         pre_graph_filter: impl Fn(&[&Tx], &mut [bool]),
         pre_lock_filter: impl Fn(&Tx) -> bool,
     ) -> Result<SchedulingSummary, SchedulerError> {
+        let start_time = Instant::now();
+
+        // Insert all incoming transactions into the prio-graph
         while let Some(next_bundle_id) = container.pop() {
-            let Some(bundle) = container.get_batch_ttl(next_bundle_id) else {
+            let Some(bundle) = container.get_batch_ttl(next_bundle_id.id) else {
                 continue;
             };
+            // TODO_DG
         }
+
+        // Schedule any available transactions in prio-graph
+        // TODO_DG
+
+        Ok(SchedulingSummary {
+            num_scheduled: 0,
+            num_unschedulable: 0,
+            num_filtered_out: 0,
+            filter_time_us: start_time.elapsed().as_micros() as u64,
+        })
     }
 
     // TODO_DG
