@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+use ahash::HashMap;
 use crossbeam_channel::{Receiver, Sender};
 use jito_protos::proto::jss_api::{start_scheduler_message::Msg, StartSchedulerMessage};
 use prio_graph::{AccessKind, GraphNode, PrioGraph, TopLevelId};
@@ -34,6 +35,7 @@ pub struct FifoBatchScheduler<Tx: TransactionWithMeta> {
     response_sender: Sender<StartSchedulerMessage>,
 
     next_batch_id: u64,
+    priority_ids: HashMap<usize, TransactionPriorityId>,
     prio_graph: SchedulerPrioGraph,
 }
 
@@ -48,6 +50,7 @@ impl<Tx: TransactionWithMeta> FifoBatchScheduler<Tx> {
             finished_consume_work_receiver,
             response_sender,
             next_batch_id: 0,
+            priority_ids: HashMap::default(),
             prio_graph: PrioGraph::new(passthrough_priority),
         }
     }
@@ -87,6 +90,10 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for FifoBatchScheduler<Tx> {
                 continue;
             };
             self.prio_graph.insert_transaction(next_bundle_id, Self::get_transaction_account_access(&txn));
+            self.priority_ids.insert(
+                next_bundle_id.id,
+                next_bundle_id,
+            );
         }
 
         // Schedule any available transactions in prio-graph
@@ -155,7 +162,12 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for FifoBatchScheduler<Tx> {
             }
 
             // Unblock the next blocked bundle in the prio-graph
-            for i in result.work.ids {}
+            for i in result.work.ids {
+                let Some(priority_id) = self.priority_ids.remove(&i) else {
+                    continue;
+                };
+                self.prio_graph.unblock(&priority_id);
+            }
         }
 
         Ok((num_transactions, 0))
