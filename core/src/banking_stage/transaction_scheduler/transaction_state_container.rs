@@ -221,12 +221,7 @@ impl<Tx: TransactionWithMeta> TransactionStateContainer<Tx> {
         let priority_id = {
             let entry = self.get_vacant_batch_map_entry();
             let transaction_id = entry.key();
-            entry.insert(TransactionState::new(
-                transaction_ttl,
-                Some(packets), // TODO
-                priority,
-                cost,
-            ));
+            // TODO_DG: insert into the batch state
             TransactionPriorityId::new(priority, transaction_id)
         };
 
