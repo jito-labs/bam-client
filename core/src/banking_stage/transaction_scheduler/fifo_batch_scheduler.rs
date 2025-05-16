@@ -78,7 +78,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for FifoBatchScheduler<Tx> {
     fn schedule<S: StateContainer<Tx>>(
         &mut self,
         container: &mut S,
-        pre_graph_filter: impl Fn(&[&Tx], &mut [bool]),
+        _pre_graph_filter: impl Fn(&[&Tx], &mut [bool]),
         pre_lock_filter: impl Fn(&Tx) -> bool,
     ) -> Result<SchedulingSummary, SchedulerError> {
         let start_time = Instant::now();
@@ -105,12 +105,11 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for FifoBatchScheduler<Tx> {
             };
             let sanitized_transaction_ttl = txn.transition_to_pending();
             
-            // TODO_DG: graph filter
             if !pre_lock_filter(&sanitized_transaction_ttl.transaction) {
                 continue;
             }
 
-            // Choose a completely random worker index
+            // Choose a completely random worker index (lol)
             let worker_index = rand::random::<usize>() % self.consume_work_senders.len();
             let consume_work_sender = &self.consume_work_senders[worker_index];
 
