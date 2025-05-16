@@ -106,6 +106,9 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for FifoBatchScheduler<Tx> {
             let sanitized_transaction_ttl = txn.transition_to_pending();
             
             // TODO_DG: graph filter
+            if !pre_lock_filter(&sanitized_transaction_ttl.transaction) {
+                continue;
+            }
 
             // Choose a completely random worker index
             let worker_index = rand::random::<usize>() % self.consume_work_senders.len();
@@ -135,7 +138,6 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for FifoBatchScheduler<Tx> {
         })
     }
 
-    // TODO_DG
     fn receive_completed(
         &mut self,
         container: &mut impl StateContainer<Tx>,
