@@ -531,6 +531,7 @@ mod tests {
             PacketDeserializer::new(receiver),
             bank_forks,
             false,
+            Arc::new(AtomicBool::new(false)),
         )
     }
 
@@ -541,6 +542,7 @@ mod tests {
         TransactionViewReceiveAndBuffer {
             receiver,
             bank_forks,
+            jss_enabled: Arc::new(AtomicBool::new(false)),
         }
     }
 
