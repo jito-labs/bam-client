@@ -4,7 +4,6 @@
 /// - Updates TPU config
 /// - Updates block builder fee info
 /// - Sets `jss_enabled` flag that is used everywhere
-
 use std::{
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     str::FromStr,
