@@ -2,12 +2,21 @@ use {
     super::{
         transaction_priority_id::TransactionPriorityId,
         transaction_state::{SanitizedTransactionTTL, TransactionState},
-    }, crate::banking_stage::{
+    },
+    crate::banking_stage::{
         immutable_deserialized_packet::ImmutableDeserializedPacket,
         scheduler_messages::TransactionId,
-    }, agave_transaction_view::resolved_transaction_view::ResolvedTransactionView, ahash::{HashMap, HashMapExt}, itertools::{izip, MinMaxResult}, min_max_heap::MinMaxHeap, slab::{Slab, VacantEntry}, solana_runtime_transaction::{
+    },
+    agave_transaction_view::resolved_transaction_view::ResolvedTransactionView,
+    ahash::{HashMap, HashMapExt},
+    itertools::{izip, MinMaxResult},
+    min_max_heap::MinMaxHeap,
+    slab::{Slab, VacantEntry},
+    solana_runtime_transaction::{
         runtime_transaction::RuntimeTransaction, transaction_with_meta::TransactionWithMeta,
-    }, solana_sdk::packet::PACKET_DATA_SIZE, std::sync::Arc
+    },
+    solana_sdk::packet::PACKET_DATA_SIZE,
+    std::sync::Arc,
 };
 
 /// This structure will hold `TransactionState` for the entirety of a
@@ -132,7 +141,7 @@ impl<Tx: TransactionWithMeta> StateContainer<Tx> for TransactionStateContainer<T
         id: TransactionId,
     ) -> Option<&mut TransactionState<Tx>> {
         match self.id_to_transaction_state.get_mut(id) {
-            Some(BatchIdOrTransactionState::Batch{..}) => None,
+            Some(BatchIdOrTransactionState::Batch { .. }) => None,
             Some(BatchIdOrTransactionState::TransactionState(state)) => Some(state),
             None => None,
         }
@@ -142,13 +151,15 @@ impl<Tx: TransactionWithMeta> StateContainer<Tx> for TransactionStateContainer<T
         self.id_to_transaction_state
             .get(id)
             .and_then(|state| match state {
-                BatchIdOrTransactionState::Batch{..} => None,
+                BatchIdOrTransactionState::Batch { .. } => None,
                 BatchIdOrTransactionState::TransactionState(state) => Some(state.transaction_ttl()),
             })
     }
 
     fn get_batch(&self, id: TransactionId) -> Option<(Vec<TransactionId>, bool)> {
-        let Some(BatchIdOrTransactionState::Batch(batch_info)) = self.id_to_transaction_state.get(id) else {
+        let Some(BatchIdOrTransactionState::Batch(batch_info)) =
+            self.id_to_transaction_state.get(id)
+        else {
             return None;
         };
 
@@ -186,7 +197,19 @@ impl<Tx: TransactionWithMeta> StateContainer<Tx> for TransactionStateContainer<T
     }
 
     fn remove_by_id(&mut self, id: TransactionId) {
-        self.id_to_transaction_state.remove(id);
+        let BatchIdOrTransactionState::Batch(batch_info) = self.id_to_transaction_state.remove(id)
+        else {
+            return;
+        };
+        let Some(batch) = self
+            .batch_id_to_transaction_ids
+            .remove(&batch_info.batch_id)
+        else {
+            return;
+        };
+        for transaction_id in batch {
+            self.id_to_transaction_state.remove(transaction_id);
+        }
     }
 
     fn get_min_max_priority(&self) -> MinMaxResult<u64> {
@@ -211,14 +234,11 @@ impl<Tx: TransactionWithMeta> TransactionStateContainer<Tx> {
         cost: u64,
     ) -> bool {
         let priority_id = {
-            let entry = self.get_vacant_map_entry();
+            let entry: VacantEntry<'_, BatchIdOrTransactionState<Tx>> = self.get_vacant_map_entry();
             let transaction_id = entry.key();
-            entry.insert(BatchIdOrTransactionState::TransactionState(TransactionState::new(
-                transaction_ttl,
-                Some(packet),
-                priority,
-                cost,
-            )));
+            entry.insert(BatchIdOrTransactionState::TransactionState(
+                TransactionState::new(transaction_ttl, Some(packet), priority, cost),
+            ));
             TransactionPriorityId::new(priority, transaction_id)
         };
 
@@ -236,8 +256,7 @@ impl<Tx: TransactionWithMeta> TransactionStateContainer<Tx> {
         let batch_id = self.batch_id_to_transaction_ids.len() as u64;
         let mut transaction_ids = Vec::with_capacity(transaction_ttls.len());
 
-        for (transaction_ttl, packet) in izip!(transaction_ttls, packets)
-        {
+        for (transaction_ttl, packet) in izip!(transaction_ttls, packets) {
             let transaction_id = {
                 let entry = self.get_vacant_map_entry();
                 let transaction_id: usize = entry.key();
@@ -249,7 +268,8 @@ impl<Tx: TransactionWithMeta> TransactionStateContainer<Tx> {
             transaction_ids.push(transaction_id);
         }
 
-        self.batch_id_to_transaction_ids.insert(batch_id, transaction_ids);
+        self.batch_id_to_transaction_ids
+            .insert(batch_id, transaction_ids);
 
         let entry = self.get_vacant_map_entry();
         let batch_id_entry = entry.key();
@@ -258,10 +278,8 @@ impl<Tx: TransactionWithMeta> TransactionStateContainer<Tx> {
             revert_on_error,
         }));
 
-        self.priority_queue.push(TransactionPriorityId::new(
-            priority,
-            batch_id_entry,
-        ));
+        self.priority_queue
+            .push(TransactionPriorityId::new(priority, batch_id_entry));
 
         Some(batch_id)
     }
@@ -372,9 +390,9 @@ impl StateContainer<RuntimeTransactionView> for TransactionViewStateContainer {
     ) -> usize {
         self.inner.push_ids_into_queue(priority_ids)
     }
-    
+
     #[inline]
-    fn get_batch(&self, id: TransactionId) -> Option<(Vec<TransactionId>, bool)> {
+    fn get_batch(&self, _: TransactionId) -> Option<(Vec<TransactionId>, bool)> {
         unimplemented!("get_batch not implemented for TransactionViewStateContainer");
     }
 

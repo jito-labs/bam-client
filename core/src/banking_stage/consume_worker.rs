@@ -1,6 +1,9 @@
 use {
     super::{
-        committer::CommitTransactionDetails, consumer::{Consumer, ExecuteAndCommitTransactionsOutput, ProcessTransactionBatchOutput}, leader_slot_timing_metrics::LeaderExecuteAndCommitTimings, scheduler_messages::{ConsumeWork, FinishedConsumeWork, FinishedConsumeWorkExtraInfo}
+        committer::CommitTransactionDetails,
+        consumer::{Consumer, ExecuteAndCommitTransactionsOutput, ProcessTransactionBatchOutput},
+        leader_slot_timing_metrics::LeaderExecuteAndCommitTimings,
+        scheduler_messages::{ConsumeWork, FinishedConsumeWork, FinishedConsumeWorkExtraInfo},
     },
     crossbeam_channel::{Receiver, RecvError, SendError, Sender},
     jito_protos::proto::jss_types::{bundle_result, TransactionProcessedResult},
@@ -130,38 +133,45 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         let extra_info = if work.respond_with_extra_info {
             let mut results = vec![];
             for i in 0..work.ids.len() {
-                if output.execute_and_commit_transactions_output.retryable_transaction_indexes.contains(&i) {
+                if output
+                    .execute_and_commit_transactions_output
+                    .retryable_transaction_indexes
+                    .contains(&i)
+                {
                     results.push(bundle_result::Result::Retryable(
                         jito_protos::proto::jss_types::Retryable {},
                     ));
                 } else {
-                    let Ok(commit_results) = output.execute_and_commit_transactions_output.commit_transactions_result.as_ref() else {
+                    let Ok(commit_results) = output
+                        .execute_and_commit_transactions_output
+                        .commit_transactions_result
+                        .as_ref()
+                    else {
                         results.push(bundle_result::Result::Invalid(
                             jito_protos::proto::jss_types::Invalid {},
                         ));
                         continue;
                     };
+                    let feepayer_balance_after_lamports =
+                        bank.get_balance(&work.transactions[i].fee_payer()); // Not locked (So can't be assumed to be strict)
+
                     let result = commit_results
                         .get(i)
-                        .map(|result| {
-                            match result {
-                                CommitTransactionDetails::Committed { compute_units, .. } => {
-                                    bundle_result::Result::Processed(
-                                        jito_protos::proto::jss_types::Processed {
-                                            transaction_results: vec![
-                                                TransactionProcessedResult {
-                                                    cus_consumed: *compute_units as u32,
-                                                    feepayer_balance_after_lamports: 100_000, // TODO_DG
-                                                },
-                                            ],
-                                        },
-                                    )
-                                }
-                                CommitTransactionDetails::NotCommitted => {
-                                    bundle_result::Result::Invalid(
-                                        jito_protos::proto::jss_types::Invalid {},
-                                    )
-                                }
+                        .map(|result| match result {
+                            CommitTransactionDetails::Committed { compute_units, .. } => {
+                                bundle_result::Result::Processed(
+                                    jito_protos::proto::jss_types::Processed {
+                                        transaction_results: vec![TransactionProcessedResult {
+                                            cus_consumed: *compute_units as u32,
+                                            feepayer_balance_after_lamports,
+                                        }],
+                                    },
+                                )
+                            }
+                            CommitTransactionDetails::NotCommitted => {
+                                bundle_result::Result::Invalid(
+                                    jito_protos::proto::jss_types::Invalid {},
+                                )
                             }
                         })
                         .unwrap_or_else(|| {
@@ -172,9 +182,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
                     results.push(result);
                 }
             }
-            Some(FinishedConsumeWorkExtraInfo {
-                results,
-            })
+            Some(FinishedConsumeWorkExtraInfo { results })
         } else {
             None
         };

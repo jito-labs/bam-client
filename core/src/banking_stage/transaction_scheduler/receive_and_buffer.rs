@@ -42,7 +42,10 @@ use {
     solana_svm::transaction_error_metrics::TransactionErrorMetrics,
     solana_svm_transaction::svm_message::SVMMessage,
     std::{
-        sync::{atomic::{AtomicBool, Ordering}, Arc, RwLock},
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc, RwLock,
+        },
         time::Instant,
     },
 };
