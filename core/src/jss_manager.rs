@@ -7,10 +7,11 @@ use std::{
     },
 };
 
-use jito_protos::proto::{jss_api::BuilderConfigResp, jss_types::Socket};
+use jito_protos::proto::{jss_api::{start_scheduler_message::Msg, BuilderConfigResp, StartSchedulerMessage}, jss_types::{LeaderState, Socket}};
 use solana_gossip::cluster_info::ClusterInfo;
 use solana_poh::poh_recorder::PohRecorder;
 use solana_pubkey::Pubkey;
+use solana_runtime::bank::Bank;
 
 use crate::{
     jss_connection::JssConnection, jss_dependencies::JssDependencies,
@@ -111,7 +112,28 @@ impl JssManager {
                 );
             }
 
-            std::thread::sleep(std::time::Duration::from_secs(1));
+            // Send leader state if we are in a leader slot
+            if let Some(bank_start) = poh_recorder.read().unwrap().bank_start() {
+                if bank_start.should_working_bank_still_be_processing_txs() {
+                    let leader_state = Self::generate_leader_state(&bank_start.working_bank);
+                    let _ = dependencies.outbound_sender.try_send(StartSchedulerMessage {
+                        msg: Some(Msg::LeaderState(leader_state))
+                    });
+                }
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    fn generate_leader_state(bank: &Bank) -> LeaderState {
+        let max_block_cu = bank.read_cost_tracker().unwrap().block_cost_limit();
+        let consumed_block_cu = bank.read_cost_tracker().unwrap().block_cost();
+        let slot_cu_budget = max_block_cu.saturating_sub(consumed_block_cu) as u32;
+        LeaderState {
+            slot: bank.slot(),
+            tick: (bank.tick_height() % bank.ticks_per_slot()) as u32,
+            slot_cu_budget,
         }
     }
 

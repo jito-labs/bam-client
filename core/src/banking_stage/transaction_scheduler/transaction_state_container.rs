@@ -595,4 +595,33 @@ mod tests {
         );
         assert!(container.pop().is_none());
     }
+
+    #[test]
+    fn test_batch() {
+        let mut container = TransactionStateContainer::with_capacity(5);
+        let mut packets = Vec::with_capacity(5);
+        let mut transaction_ttls = Vec::with_capacity(5);
+        for priority in 0..5 {
+            let (transaction_ttl, packet, _, _) = test_transaction(priority);
+            packets.push(packet);
+            transaction_ttls.push(transaction_ttl);
+        }
+
+        // Insert a batch of transactions.
+        let batch_id = container.insert_new_batch(
+            transaction_ttls,
+            packets,
+            10,
+            100,
+            true,
+        );
+        assert!(batch_id.is_some());
+        assert_eq!(container.priority_queue.len(), 1);
+        assert_eq!(container.id_to_transaction_state.len(), 6);
+
+        // Remove a batch of transactions.
+        let batch_id = container.pop().unwrap();
+        container.remove_by_id(batch_id.id);
+        assert_eq!(container.priority_queue.len(), 0);
+    }
 }
