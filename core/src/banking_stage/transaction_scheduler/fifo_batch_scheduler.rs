@@ -1,3 +1,7 @@
+/// A Scheduled implementation that pulls batches off the container, and then
+/// schedules them to workers in a FIFO, account-aware manner. This is facilitated by the
+/// `PrioGraph` data structure, which is a directed graph that tracks the dependencies.
+/// Currently a very simple implementation that probably under pipelines the workers.
 use std::time::Instant;
 
 use ahash::HashMap;

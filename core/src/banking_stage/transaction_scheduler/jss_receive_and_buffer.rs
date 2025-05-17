@@ -1,3 +1,7 @@
+/// An implementation of the `ReceiveAndBuffer` trait that receives messages from JSS
+/// and buffers from into the the `TransactionStateContainer`. Key thing to note:
+/// this implementation only functions during the `Consume/Hold` phase; otherwise it will send them back
+/// to JSS with a `Retryable` result.
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, RwLock,

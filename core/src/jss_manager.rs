@@ -1,3 +1,10 @@
+/// Facilitates the JSS sub-system in the validator:
+/// - Tries to connect to JSS
+/// - Sends leader state to JSS
+/// - Updates TPU config
+/// - Updates block builder fee info
+/// - Sets `jss_enabled` flag that is used everywhere
+
 use std::{
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     str::FromStr,
@@ -7,7 +14,10 @@ use std::{
     },
 };
 
-use jito_protos::proto::{jss_api::{start_scheduler_message::Msg, BuilderConfigResp, StartSchedulerMessage}, jss_types::{LeaderState, Socket}};
+use jito_protos::proto::{
+    jss_api::{start_scheduler_message::Msg, BuilderConfigResp, StartSchedulerMessage},
+    jss_types::{LeaderState, Socket},
+};
 use solana_gossip::cluster_info::ClusterInfo;
 use solana_poh::poh_recorder::PohRecorder;
 use solana_pubkey::Pubkey;
@@ -116,9 +126,11 @@ impl JssManager {
             if let Some(bank_start) = poh_recorder.read().unwrap().bank_start() {
                 if bank_start.should_working_bank_still_be_processing_txs() {
                     let leader_state = Self::generate_leader_state(&bank_start.working_bank);
-                    let _ = dependencies.outbound_sender.try_send(StartSchedulerMessage {
-                        msg: Some(Msg::LeaderState(leader_state))
-                    });
+                    let _ = dependencies
+                        .outbound_sender
+                        .try_send(StartSchedulerMessage {
+                            msg: Some(Msg::LeaderState(leader_state)),
+                        });
                 }
             }
 
