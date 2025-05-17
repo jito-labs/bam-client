@@ -47,7 +47,6 @@ pub(crate) struct TransactionStateContainer<Tx: TransactionWithMeta> {
     capacity: usize,
     priority_queue: MinMaxHeap<TransactionPriorityId>,
     id_to_transaction_state: Slab<TransactionState<Tx>>,
-    id_to_batch_state: Slab<TransactionState<Vec<Tx>>>,
 }
 
 pub(crate) trait StateContainer<Tx: TransactionWithMeta> {
