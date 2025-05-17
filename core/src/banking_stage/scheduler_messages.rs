@@ -6,7 +6,7 @@ use {
 
 /// A unique identifier for a transaction batch.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-pub struct TransactionBatchId(u64);
+pub struct TransactionBatchId(pub u64);
 
 impl TransactionBatchId {
     pub fn new(index: u64) -> Self {
