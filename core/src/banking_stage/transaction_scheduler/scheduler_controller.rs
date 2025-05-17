@@ -65,6 +65,8 @@ where
     forwarder: Option<Forwarder<C>>,
     /// Blacklisted accounts
     blacklisted_accounts: HashSet<Pubkey>,
+    /// Never hold packets, drop them instead.
+    hold_enabled: bool,
 }
 
 impl<C, R, S> SchedulerController<C, R, S>
@@ -81,6 +83,7 @@ where
         worker_metrics: Vec<Arc<ConsumeWorkerMetrics>>,
         forwarder: Option<Forwarder<C>>,
         blacklisted_accounts: HashSet<Pubkey>,
+        hold_enabled: bool,
     ) -> Self {
         Self {
             decision_maker,
@@ -94,6 +97,7 @@ where
             worker_metrics,
             forwarder,
             blacklisted_accounts,
+            hold_enabled,
         }
     }
 
@@ -204,7 +208,12 @@ where
                 }
             }
             BufferedPacketsDecision::ForwardAndHold => {
-                if forwarding_enabled {
+                if !self.hold_enabled {
+                    let (_, clear_time_us) = measure_us!(self.clear_container());
+                    self.timing_metrics.update(|timing_metrics| {
+                        saturating_add_assign!(timing_metrics.clear_time_us, clear_time_us);
+                    });
+                } else if forwarding_enabled {
                     let (_, forward_time_us) = measure_us!(self.forward_packets(true));
                     self.timing_metrics.update(|timing_metrics| {
                         saturating_add_assign!(timing_metrics.forward_time_us, forward_time_us);
@@ -216,7 +225,14 @@ where
                     });
                 }
             }
-            BufferedPacketsDecision::Hold => {}
+            BufferedPacketsDecision::Hold => {
+                if !self.hold_enabled {
+                    let (_, clear_time_us) = measure_us!(self.clear_container());
+                    self.timing_metrics.update(|timing_metrics| {
+                        saturating_add_assign!(timing_metrics.clear_time_us, clear_time_us);
+                    });
+                }
+            }
         }
 
         Ok(())
@@ -610,6 +626,7 @@ mod tests {
             vec![], // no actual workers with metrics to report, this can be empty
             None,
             HashSet::default(),
+            true,
         );
 
         (test_frame, scheduler_controller)
