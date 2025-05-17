@@ -607,13 +607,7 @@ mod tests {
         }
 
         // Insert a batch of transactions.
-        let batch_id = container.insert_new_batch(
-            transaction_ttls,
-            packets,
-            10,
-            100,
-            true,
-        );
+        let batch_id = container.insert_new_batch(transaction_ttls, packets, 10, 100, true);
         assert!(batch_id.is_some());
         assert_eq!(container.priority_queue.len(), 1);
         assert_eq!(container.id_to_transaction_state.len(), 6);
