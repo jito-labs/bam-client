@@ -1120,12 +1120,23 @@ impl Consumer {
 #[cfg(test)]
 mod tests {
     use {
-        super::*, crate::{banking_stage::{
-            immutable_deserialized_packet::DeserializedPacketError,
-            tests::{create_slow_genesis_config, sanitize_transactions, simulate_poh},
-            unprocessed_packet_batches::{DeserializedPacket, UnprocessedPacketBatches},
-            unprocessed_transaction_storage::ThreadType,
-        }, tip_manager::{TipDistributionAccountConfig, TipManagerConfig}}, agave_reserved_account_keys::ReservedAccountKeys, crossbeam_channel::{unbounded, Receiver}, solana_cost_model::{cost_model::CostModel, transaction_cost::TransactionCost}, solana_entry::entry::{next_entry, next_versioned_entry}, solana_gossip::{cluster_info::Node, contact_info::ContactInfo}, solana_ledger::{
+        super::*,
+        crate::{
+            banking_stage::{
+                immutable_deserialized_packet::DeserializedPacketError,
+                tests::{create_slow_genesis_config, sanitize_transactions, simulate_poh},
+                unprocessed_packet_batches::{DeserializedPacket, UnprocessedPacketBatches},
+                unprocessed_transaction_storage::ThreadType,
+            },
+            tip_manager::{TipDistributionAccountConfig, TipManagerConfig},
+        },
+        agave_reserved_account_keys::ReservedAccountKeys,
+        crossbeam_channel::{unbounded, Receiver},
+        jito_tip_distribution::sdk::derive_tip_distribution_account_address,
+        solana_cost_model::{cost_model::CostModel, transaction_cost::TransactionCost},
+        solana_entry::entry::{next_entry, next_versioned_entry},
+        solana_gossip::{cluster_info::Node, contact_info::ContactInfo},
+        solana_ledger::{
             blockstore::{entries_to_test_shreds, Blockstore},
             blockstore_processor::TransactionStatusSender,
             genesis_utils::{
@@ -1134,7 +1145,13 @@ mod tests {
             },
             get_tmp_ledger_path_auto_delete,
             leader_schedule_cache::LeaderScheduleCache,
-        }, solana_perf::packet::Packet, solana_poh::poh_recorder::{PohRecorder, Record, WorkingBankEntry}, solana_rpc::transaction_status_service::TransactionStatusService, solana_runtime::{bank_forks::BankForks, prioritization_fee_cache::PrioritizationFeeCache}, solana_runtime_transaction::runtime_transaction::RuntimeTransaction, solana_sdk::{
+        },
+        solana_perf::packet::Packet,
+        solana_poh::poh_recorder::{PohRecorder, Record, WorkingBankEntry},
+        solana_rpc::transaction_status_service::TransactionStatusService,
+        solana_runtime::{bank_forks::BankForks, prioritization_fee_cache::PrioritizationFeeCache},
+        solana_runtime_transaction::runtime_transaction::RuntimeTransaction,
+        solana_sdk::{
             account::AccountSharedData,
             account_utils::StateMut,
             address_lookup_table::{
@@ -1157,12 +1174,24 @@ mod tests {
             signer::Signer,
             system_instruction, system_program, system_transaction,
             transaction::{Transaction, VersionedTransaction},
-        }, solana_streamer::socket::SocketAddrSpace, solana_svm::account_loader::CheckedTransactionDetails, solana_timings::{ExecuteTimings, ProgramTiming}, solana_transaction_status::{TransactionStatusMeta, VersionedTransactionWithStatusMeta}, std::{
-            borrow::Cow, num::Saturating, path::Path, str::FromStr, sync::{
+        },
+        solana_streamer::socket::SocketAddrSpace,
+        solana_svm::account_loader::CheckedTransactionDetails,
+        solana_timings::{ExecuteTimings, ProgramTiming},
+        solana_transaction_status::{TransactionStatusMeta, VersionedTransactionWithStatusMeta},
+        std::{
+            borrow::Cow,
+            num::Saturating,
+            path::Path,
+            str::FromStr,
+            sync::{
                 atomic::{AtomicBool, AtomicU64},
                 RwLock,
-            }, thread::{Builder, JoinHandle}, time::Duration
-        }, transaction::MessageHash
+            },
+            thread::{Builder, JoinHandle},
+            time::Duration,
+        },
+        transaction::MessageHash,
     };
 
     fn execute_transactions_with_dummy_poh_service(
@@ -1211,14 +1240,26 @@ mod tests {
             BundleAccountLocker::default(),
             tip_processing_dependencies,
         );
-        let process_transactions_summary =
-            consumer.process_transactions(&bank, &Instant::now(), &transactions, &|_| 0, revert_on_error);
+        let process_transactions_summary = consumer.process_transactions(
+            &bank,
+            &Instant::now(),
+            &transactions,
+            &|_| 0,
+            revert_on_error,
+        );
 
-        let recorded: Vec<VersionedTransaction> = entry_receiver.try_iter().map(|entry| {
-                entry.entries_ticks.iter().map(|(entry, _)| {
-                    entry.transactions.clone()
-                }).flatten().collect::<Vec<_>>()
-            }).flatten().collect::<Vec<_>>();
+        let recorded: Vec<VersionedTransaction> = entry_receiver
+            .try_iter()
+            .map(|entry| {
+                entry
+                    .entries_ticks
+                    .iter()
+                    .map(|(entry, _)| entry.transactions.clone())
+                    .flatten()
+                    .collect::<Vec<_>>()
+            })
+            .flatten()
+            .collect::<Vec<_>>();
 
         poh_recorder
             .read()
@@ -1226,7 +1267,6 @@ mod tests {
             .is_exited
             .store(true, Ordering::Relaxed);
         let _ = poh_simulator.join();
-
 
         (process_transactions_summary, recorded)
     }
@@ -2049,12 +2089,15 @@ mod tests {
         ));
 
         let transactions_len = transactions.len();
-        let (ProcessTransactionsSummary {
-            reached_max_poh_height,
-            transaction_counts,
-            retryable_transaction_indexes,
-            ..
-        }, _) = execute_transactions_with_dummy_poh_service(bank, transactions, false, None);
+        let (
+            ProcessTransactionsSummary {
+                reached_max_poh_height,
+                transaction_counts,
+                retryable_transaction_indexes,
+                ..
+            },
+            _,
+        ) = execute_transactions_with_dummy_poh_service(bank, transactions, false, None);
 
         // All the transactions should have been replayed, but only 1 committed
         assert!(!reached_max_poh_height);
@@ -2110,12 +2153,15 @@ mod tests {
         ));
 
         let transactions_len = transactions.len();
-        let (ProcessTransactionsSummary {
-            reached_max_poh_height,
-            transaction_counts,
-            retryable_transaction_indexes,
-            ..
-        }, _) = execute_transactions_with_dummy_poh_service(bank, transactions, false, None);
+        let (
+            ProcessTransactionsSummary {
+                reached_max_poh_height,
+                transaction_counts,
+                retryable_transaction_indexes,
+                ..
+            },
+            _,
+        ) = execute_transactions_with_dummy_poh_service(bank, transactions, false, None);
 
         // All the transactions should have been replayed, but only 2 committed (first and last)
         assert!(!reached_max_poh_height);
@@ -3014,12 +3060,15 @@ mod tests {
         ));
 
         let transactions_len = transactions.len();
-        let (ProcessTransactionsSummary {
-            reached_max_poh_height,
-            transaction_counts,
-            retryable_transaction_indexes,
-            ..
-        }, _) = execute_transactions_with_dummy_poh_service(bank, transactions, true, None);
+        let (
+            ProcessTransactionsSummary {
+                reached_max_poh_height,
+                transaction_counts,
+                retryable_transaction_indexes,
+                ..
+            },
+            _,
+        ) = execute_transactions_with_dummy_poh_service(bank, transactions, true, None);
 
         // All the transactions should have been replayed and 0 commited
         assert!(!reached_max_poh_height);
@@ -3078,12 +3127,15 @@ mod tests {
         ));
 
         let transactions_len = transactions.len();
-        let (ProcessTransactionsSummary {
-            reached_max_poh_height,
-            transaction_counts,
-            retryable_transaction_indexes,
-            ..
-        }, _) = execute_transactions_with_dummy_poh_service(bank, transactions, true, None);
+        let (
+            ProcessTransactionsSummary {
+                reached_max_poh_height,
+                transaction_counts,
+                retryable_transaction_indexes,
+                ..
+            },
+            _,
+        ) = execute_transactions_with_dummy_poh_service(bank, transactions, true, None);
 
         assert!(!reached_max_poh_height);
         assert_eq!(
@@ -3104,15 +3156,13 @@ mod tests {
 
     #[test]
     fn test_tip() {
-        //WIP
-        return;
         solana_logger::setup();
         let lamports = 10_000;
         let GenesisConfigInfo {
             genesis_config,
             mint_keypair,
             voting_keypair,
-            ..
+            validator_pubkey,
         } = create_slow_genesis_config(lamports);
         let (bank, _bank_forks) = Bank::new_no_wallclock_throttle_for_tests(&genesis_config);
         bank.write_cost_tracker()
@@ -3140,19 +3190,27 @@ mod tests {
         let tip_processing_dependecies = TipProcessingDependencies {
             tip_manager: tip_manager.clone(),
             last_tip_updated_slot: Arc::new(Mutex::new(0)),
-            block_builder_fee_info: Arc::new(Mutex::new(BlockBuilderFeeInfo{
+            block_builder_fee_info: Arc::new(Mutex::new(BlockBuilderFeeInfo {
                 block_builder: block_builder_pubkey,
                 block_builder_commission: 5,
             })),
             cluster_info: Arc::new(cluster_info),
         };
 
-        let (ProcessTransactionsSummary {
-            reached_max_poh_height,
-            transaction_counts,
-            retryable_transaction_indexes,
-            ..
-        }, recorded) = execute_transactions_with_dummy_poh_service(bank.clone(), transactions, true, Some(tip_processing_dependecies));
+        let (
+            ProcessTransactionsSummary {
+                reached_max_poh_height,
+                transaction_counts,
+                retryable_transaction_indexes,
+                ..
+            },
+            recorded,
+        ) = execute_transactions_with_dummy_poh_service(
+            bank.clone(),
+            transactions,
+            true,
+            Some(tip_processing_dependecies),
+        );
 
         assert_eq!(transaction_counts.attempted_processing_count, 1);
         assert_eq!(transaction_counts.committed_transactions_count, 1);
@@ -3177,6 +3235,28 @@ mod tests {
                 .initialize_tip_distribution_account_tx(&bank, &keypair)
                 .to_versioned_transaction()
         );
+
+        assert_eq!(
+            recorded[3],
+            tip_manager
+                .build_change_tip_receiver_and_block_builder_tx(
+                    &keypair.pubkey(),
+                    &derive_tip_distribution_account_address(
+                        &tip_manager.tip_distribution_program_id(),
+                        &validator_pubkey,
+                        bank.epoch()
+                    )
+                    .0,
+                    &bank,
+                    &keypair,
+                    &keypair.pubkey(),
+                    &block_builder_pubkey,
+                    5
+                )
+                .to_versioned_transaction()
+        );
+
+        assert_eq!(recorded.len(), 5);
     }
 
     fn get_tip_manager(vote_account: &Pubkey) -> TipManager {
