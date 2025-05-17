@@ -136,7 +136,8 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
 
         let mut result = 0;
         match decision {
-            BufferedPacketsDecision::Consume(_) => {
+            BufferedPacketsDecision::Consume(_) |
+            BufferedPacketsDecision::Hold => {
                 while let Ok(bundle) = self.bundle_receiver.try_recv() {
                     if bundle.packets.len() == 0 {
                         continue;
@@ -169,12 +170,38 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                     let mut tmp_container = Self::Container::with_capacity(bundle.packets.len());
                     self.internal_receive_and_buffer.buffer_packets(&mut tmp_container, timing_metrics, count_metrics, packets);
 
+                    let mut packets = vec![];
+                    let mut transaction_ttls = vec![];
+                    for _ in 0..bundle.packets.len() {
+                        let Some(id) = tmp_container.pop() else {
+                            self.send_invalid_bundle_result(bundle.seq_id);
+                            continue;
+                        };
+                        let Some(entry) = tmp_container.get_mut_transaction_state(id.id) else {
+                            self.send_invalid_bundle_result(bundle.seq_id);
+                            continue;
+                        };
+                        let Some(packet) = entry.packet().cloned() else {
+                            self.send_invalid_bundle_result(bundle.seq_id);
+                            continue;
+                        };
+                        transaction_ttls.push(entry.transition_to_pending());
+                        packets.push(packet);
+                    }
+
+                    container.insert_new_batch(
+                        transaction_ttls,
+                        packets,
+                        u64::MAX.saturating_sub(bundle.seq_id as u64),
+                        1, // TODO_DG?
+                        revert_on_error,
+                    );
+
                     result += 1;
                 }
             }
             BufferedPacketsDecision::ForwardAndHold
-            | BufferedPacketsDecision::Forward
-            | BufferedPacketsDecision::Hold => {
+            | BufferedPacketsDecision::Forward => {
                 while let Ok(bundle) = self.bundle_receiver.try_recv() {
                     let _ = self.response_sender.try_send(StartSchedulerMessage {
                         msg: Some(Msg::BundleResult(

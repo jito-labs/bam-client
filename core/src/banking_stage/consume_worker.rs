@@ -9,7 +9,7 @@ use {
     solana_runtime::bank::Bank,
     solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
     solana_sdk::timing::AtomicInterval,
-    solana_svm::{transaction_commit_result::TransactionCommitResult, transaction_error_metrics::TransactionErrorMetrics},
+    solana_svm::transaction_error_metrics::TransactionErrorMetrics,
     std::{
         sync::{
             atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
