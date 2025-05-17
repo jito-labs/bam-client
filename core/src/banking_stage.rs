@@ -566,9 +566,10 @@ impl BankingStage {
                 transaction_struct
             };
 
-        let jss_enabled = jss_dependencies.as_ref().map(|jss| jss.jss_enabled.clone()).unwrap_or(
-            Arc::new(AtomicBool::new(false)),
-        );
+        let jss_enabled = jss_dependencies
+            .as_ref()
+            .map(|jss| jss.jss_enabled.clone())
+            .unwrap_or(Arc::new(AtomicBool::new(false)));
         match transaction_struct {
             TransactionStructure::Sdk => {
                 let receive_and_buffer = SanitizedTransactionReceiveAndBuffer::new(
@@ -779,7 +780,9 @@ impl BankingStage {
             // Spawn the worker threads
             let mut worker_metrics = Vec::with_capacity(num_workers as usize);
             for (index, work_receiver) in work_receivers.into_iter().enumerate() {
-                let id = (index as u32).saturating_add(NUM_VOTE_PROCESSING_THREADS);
+                let id = (index as u32)
+                    .saturating_add(NUM_VOTE_PROCESSING_THREADS)
+                    .saturating_add(num_workers);
                 let consume_worker = ConsumeWorker::new(
                     id,
                     work_receiver,
@@ -808,16 +811,17 @@ impl BankingStage {
                 )
             }
 
-            // Spawn the JSS thread
+            // Spawn the JSS scheduler thread
             bank_thread_hdls.push(
                 Builder::new()
                     .name("solJssSched".to_string())
                     .spawn(move || {
-                        let scheduler = FifoBatchScheduler::<RuntimeTransaction<SanitizedTransaction>>::new(
-                            work_senders,
-                            finished_work_receiver,
-                            jss_dependencies.outbound_sender.clone(),
-                        );
+                        let scheduler =
+                            FifoBatchScheduler::<RuntimeTransaction<SanitizedTransaction>>::new(
+                                work_senders,
+                                finished_work_receiver,
+                                jss_dependencies.outbound_sender.clone(),
+                            );
                         let receive_and_buffer = JssReceiveAndBuffer::new(
                             jss_dependencies.jss_enabled.clone(),
                             jss_dependencies.bundle_receiver.clone(),
