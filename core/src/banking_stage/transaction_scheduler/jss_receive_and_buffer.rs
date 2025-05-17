@@ -19,6 +19,8 @@ use super::{
     receive_and_buffer::{ReceiveAndBuffer, SanitizedTransactionReceiveAndBuffer}, transaction_state_container::TransactionStateContainer,
 };
 
+use crate::banking_stage::transaction_scheduler::transaction_state_container::StateContainer;
+
 pub struct JssReceiveAndBuffer {
     jss_enabled: Arc<AtomicBool>,
     bundle_receiver: crossbeam_channel::Receiver<Bundle>,
@@ -40,6 +42,7 @@ impl JssReceiveAndBuffer {
             PacketDeserializer::new(unbounded().1),
             bank_forks.clone(),
             false,
+            Arc::new(AtomicBool::new(false)), // This internal receive and buffer is not JSS enabled (We want it to process packets for us)
         );
         Self {
             jss_enabled,
@@ -51,7 +54,7 @@ impl JssReceiveAndBuffer {
     }
 
     fn parse_transactions<'a>(
-        bank: &Bank,
+        _bank: &Bank,
         packets: impl Iterator<Item = &'a Packet>,
     ) -> Vec<ImmutableDeserializedPacket> {
         packets
@@ -98,6 +101,22 @@ impl JssReceiveAndBuffer {
             })
             .collect_vec()
     }
+
+    fn send_invalid_bundle_result(
+        &self,
+        seq_id: u32,
+    ) {
+        let _ = self.response_sender.try_send(StartSchedulerMessage {
+            msg: Some(Msg::BundleResult(
+                jito_protos::proto::jss_types::BundleResult {
+                    seq_id: seq_id,
+                    result: Some(bundle_result::Result::Invalid(
+                        jito_protos::proto::jss_types::Invalid {},
+                    )),
+                },
+            )),
+        });
+    }
 }
 
 impl ReceiveAndBuffer for JssReceiveAndBuffer {
@@ -116,7 +135,6 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
         }
 
         let mut result = 0;
-        let mut packets = Vec::new();
         match decision {
             BufferedPacketsDecision::Consume(_) => {
                 while let Ok(bundle) = self.bundle_receiver.try_recv() {
@@ -124,21 +142,33 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                         continue;
                     }
 
-                    info!("got bundle!");
-
-                    // For now: disable bundles due to storage issue
-                    if bundle.packets.len() != 1 || bundle.packets[0].meta.as_ref().and_then(|m| m.flags.as_ref()).map(|f| f.revertable).unwrap_or_default() {
+                    let packets = Self::parse_transactions(
+                        &self.bank_forks.read().unwrap().working_bank(),
+                        bundle.packets.iter(),
+                    );
+                    if packets.len() != bundle.packets.len() {
+                        self.send_invalid_bundle_result(bundle.seq_id);
                         continue;
                     }
 
-                    let Some(packet) = Self::parse_transactions(
-                        &self.bank_forks.read().unwrap().working_bank(),
-                        bundle.packets.iter(),
-                    ).into_iter().next() else {
+                    let Ok(revert_on_error) = bundle
+                        .packets
+                        .iter()
+                        .map(|p| {
+                            p.meta
+                                .as_ref()
+                                .and_then(|meta| meta.flags.as_ref())
+                                .map_or(false, |flags| flags.revertable)
+                        })
+                        .all_equal_value()
+                    else {
+                        self.send_invalid_bundle_result(bundle.seq_id);
                         continue;
                     };
 
-                    packets.push(packet);
+                    let mut tmp_container = Self::Container::with_capacity(bundle.packets.len());
+                    self.internal_receive_and_buffer.buffer_packets(&mut tmp_container, timing_metrics, count_metrics, packets);
+
                     result += 1;
                 }
             }
@@ -159,8 +189,6 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                 }
             }
         }
-
-        self.internal_receive_and_buffer.buffer_packets(container, timing_metrics, count_metrics, packets);
 
         Ok(result)
     }
