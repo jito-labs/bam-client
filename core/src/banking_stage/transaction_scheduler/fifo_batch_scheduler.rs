@@ -35,13 +35,21 @@ fn passthrough_priority(
     *id
 }
 
+const MAX_SCHEDULED_PER_WORKER: usize = 2;
+
 pub struct FifoBatchScheduler<Tx: TransactionWithMeta> {
+    workers_scheduled_count: Vec<usize>,
     consume_work_senders: Vec<Sender<ConsumeWork<Tx>>>,
     finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
     response_sender: Sender<StartSchedulerMessage>,
 
-    priority_ids: HashMap<TransactionBatchId, TransactionPriorityId>,
+    inflight_batch_info: HashMap<TransactionBatchId, InflightBatchInfo>,
     prio_graph: SchedulerPrioGraph,
+}
+
+struct InflightBatchInfo {
+    pub priority_id: TransactionPriorityId,
+    pub worker_index: usize,
 }
 
 impl<Tx: TransactionWithMeta> FifoBatchScheduler<Tx> {
@@ -51,10 +59,11 @@ impl<Tx: TransactionWithMeta> FifoBatchScheduler<Tx> {
         response_sender: Sender<StartSchedulerMessage>,
     ) -> Self {
         Self {
+            workers_scheduled_count: vec![0; consume_work_senders.len()],
             consume_work_senders,
             finished_consume_work_receiver,
             response_sender,
-            priority_ids: HashMap::default(),
+            inflight_batch_info: HashMap::default(),
             prio_graph: PrioGraph::new(passthrough_priority),
         }
     }
@@ -103,13 +112,27 @@ impl<Tx: TransactionWithMeta> FifoBatchScheduler<Tx> {
         }
     }
 
+    fn get_available_worker(&mut self) -> Option<usize> {
+        // Find a worker that has less than the max scheduled transactions
+        for (worker_index, count) in self.workers_scheduled_count.iter_mut().enumerate() {
+            if *count < MAX_SCHEDULED_PER_WORKER {
+                return Some(worker_index);
+            }
+        }
+        None
+    }
+
     fn send_to_workers(
         &mut self,
         container: &mut impl StateContainer<Tx>,
         num_scheduled: &mut usize,
     ) {
         // Schedule any available transactions in prio-graph
-        while let Some(next_batch_id) = self.prio_graph.pop() {
+        while let Some(worker_index) = self.get_available_worker() {
+            let Some(next_batch_id) = self.prio_graph.pop() else {
+                break;
+            };
+
             let Some((batch_ids, revert_on_error)) = container.get_batch(next_batch_id.id) else {
                 error!("Batch {} not found in container", next_batch_id.id);
                 continue;
@@ -134,10 +157,6 @@ impl<Tx: TransactionWithMeta> FifoBatchScheduler<Tx> {
                 .map(|txn| txn.transaction)
                 .collect::<Vec<_>>();
 
-            // Choose a completely random worker index (lol)
-            let worker_index = rand::random::<usize>() % self.consume_work_senders.len();
-            let consume_work_sender = &self.consume_work_senders[worker_index];
-
             let work = ConsumeWork {
                 batch_id: TransactionBatchId::new(next_batch_id.id as u64),
                 ids: batch_ids,
@@ -147,11 +166,16 @@ impl<Tx: TransactionWithMeta> FifoBatchScheduler<Tx> {
                 respond_with_extra_info: true,
             };
             // Send the work to the worker
+            let consume_work_sender = &self.consume_work_senders[worker_index];
             let _ = consume_work_sender.send(work);
-            self.priority_ids.insert(
+            self.inflight_batch_info.insert(
                 TransactionBatchId::new(next_batch_id.id as u64),
-                next_batch_id,
+                InflightBatchInfo {
+                    priority_id: next_batch_id,
+                    worker_index,
+                },
             );
+            self.workers_scheduled_count[worker_index] += 1;
 
             *num_scheduled += 1;
         }
@@ -202,12 +226,13 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for FifoBatchScheduler<Tx> {
             }
 
             let batch_id = result.work.batch_id;
-            let Some(priority_id) = self.priority_ids.remove(&batch_id) else {
+            let Some(inflight_batch_info) = self.inflight_batch_info.remove(&batch_id) else {
                 error!("Batch {} not found in priority ids", batch_id);
                 continue;
             };
-            self.prio_graph.unblock(&priority_id);
-            container.remove_by_id(priority_id.id);
+            self.prio_graph.unblock(&inflight_batch_info.priority_id);
+            container.remove_by_id(inflight_batch_info.priority_id.id);
+            self.workers_scheduled_count[inflight_batch_info.worker_index] -= 1;
         }
 
         Ok((num_transactions, 0))
