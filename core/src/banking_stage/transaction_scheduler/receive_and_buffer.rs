@@ -42,7 +42,7 @@ use {
     solana_svm::transaction_error_metrics::TransactionErrorMetrics,
     solana_svm_transaction::svm_message::SVMMessage,
     std::{
-        sync::{Arc, RwLock},
+        sync::{atomic::{AtomicBool, Ordering}, Arc, RwLock},
         time::Instant,
     },
 };
@@ -68,6 +68,7 @@ pub(crate) struct SanitizedTransactionReceiveAndBuffer {
     bank_forks: Arc<RwLock<BankForks>>,
 
     forwarding_enabled: bool,
+    jss_enabled: Arc<AtomicBool>,
 }
 
 impl ReceiveAndBuffer for SanitizedTransactionReceiveAndBuffer {
@@ -107,6 +108,11 @@ impl ReceiveAndBuffer for SanitizedTransactionReceiveAndBuffer {
         timing_metrics.update(|timing_metrics| {
             saturating_add_assign!(timing_metrics.receive_time_us, receive_time_us);
         });
+
+        // If jss enabled; we will throw away all packets.
+        if self.jss_enabled.load(Ordering::Relaxed) {
+            return Ok(0);
+        }
 
         let num_received = match received_packet_results {
             Ok(receive_packet_results) => {
@@ -149,11 +155,13 @@ impl SanitizedTransactionReceiveAndBuffer {
         packet_receiver: PacketDeserializer,
         bank_forks: Arc<RwLock<BankForks>>,
         forwarding_enabled: bool,
+        jss_enabled: Arc<AtomicBool>,
     ) -> Self {
         Self {
             packet_receiver,
             bank_forks,
             forwarding_enabled,
+            jss_enabled,
         }
     }
 
@@ -299,6 +307,7 @@ impl SanitizedTransactionReceiveAndBuffer {
 pub(crate) struct TransactionViewReceiveAndBuffer {
     pub receiver: BankingPacketReceiver,
     pub bank_forks: Arc<RwLock<BankForks>>,
+    pub jss_enabled: Arc<AtomicBool>,
 }
 
 impl ReceiveAndBuffer for TransactionViewReceiveAndBuffer {
@@ -395,6 +404,11 @@ impl TransactionViewReceiveAndBuffer {
         working_bank: &Bank,
         packet_batch_message: BankingPacketBatch,
     ) -> usize {
+        // If jss enabled; we will throw away all packets.
+        if self.jss_enabled.load(Ordering::Relaxed) {
+            return 0;
+        }
+
         // Do not support forwarding - only add support for this if we really need it.
         if matches!(decision, BufferedPacketsDecision::Forward) {
             return 0;
@@ -738,6 +752,7 @@ mod tests {
             packet_receiver: PacketDeserializer::new(receiver),
             bank_forks,
             forwarding_enabled: false,
+            jss_enabled: Arc::new(AtomicBool::new(false)),
         };
         let container = TransactionStateContainer::with_capacity(TEST_CONTAINER_CAPACITY);
         (receive_and_buffer, container)
@@ -753,6 +768,7 @@ mod tests {
         let receive_and_buffer = TransactionViewReceiveAndBuffer {
             receiver,
             bank_forks,
+            jss_enabled: Arc::new(AtomicBool::new(false)),
         };
         let container = TransactionViewStateContainer::with_capacity(TEST_CONTAINER_CAPACITY);
         (receive_and_buffer, container)
