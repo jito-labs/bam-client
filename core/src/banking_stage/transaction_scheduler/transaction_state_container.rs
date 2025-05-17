@@ -48,11 +48,11 @@ pub(crate) struct TransactionStateContainer<Tx: TransactionWithMeta> {
     capacity: usize,
     priority_queue: MinMaxHeap<TransactionPriorityId>,
     id_to_transaction_state: Slab<BatchIdOrTransactionState<Tx>>,
-    batch_id_to_transaction_ids: HashMap<u64, Vec<TransactionId>>,
+    batch_id_to_transaction_ids: HashMap<usize, Vec<TransactionId>>,
 }
 
 struct BatchInfo {
-    batch_id: u64,
+    batch_id: usize,
     revert_on_error: bool,
 }
 
@@ -252,8 +252,14 @@ impl<Tx: TransactionWithMeta> TransactionStateContainer<Tx> {
         priority: u64,
         cost: u64,
         revert_on_error: bool,
-    ) -> Option<u64> {
-        let batch_id = self.batch_id_to_transaction_ids.len() as u64;
+    ) -> Option<usize> {
+        let entry = self.get_vacant_map_entry();
+        let batch_id = entry.key();
+        entry.insert(BatchIdOrTransactionState::Batch(BatchInfo {
+            batch_id: batch_id,
+            revert_on_error,
+        }));
+
         let mut transaction_ids = Vec::with_capacity(transaction_ttls.len());
 
         for (transaction_ttl, packet) in izip!(transaction_ttls, packets) {
@@ -271,15 +277,8 @@ impl<Tx: TransactionWithMeta> TransactionStateContainer<Tx> {
         self.batch_id_to_transaction_ids
             .insert(batch_id, transaction_ids);
 
-        let entry = self.get_vacant_map_entry();
-        let batch_id_entry = entry.key();
-        entry.insert(BatchIdOrTransactionState::Batch(BatchInfo {
-            batch_id,
-            revert_on_error,
-        }));
-
         self.priority_queue
-            .push(TransactionPriorityId::new(priority, batch_id_entry));
+            .push(TransactionPriorityId::new(priority, batch_id));
 
         Some(batch_id)
     }
@@ -618,10 +617,19 @@ mod tests {
         assert!(batch_id.is_some());
         assert_eq!(container.priority_queue.len(), 1);
         assert_eq!(container.id_to_transaction_state.len(), 6);
+        assert_eq!(container.batch_id_to_transaction_ids.len(), 1);
+
+        // Get the batch id and revert_on_error flag.
+        let batch_id = batch_id.unwrap();
+        let (batch, revert_on_error) = container.get_batch(batch_id as usize).unwrap();
+        assert_eq!(batch.len(), 5);
+        assert_eq!(revert_on_error, true);
 
         // Remove a batch of transactions.
         let batch_id = container.pop().unwrap();
         container.remove_by_id(batch_id.id);
         assert_eq!(container.priority_queue.len(), 0);
+        assert_eq!(container.id_to_transaction_state.len(), 0);
+        assert!(container.batch_id_to_transaction_ids.is_empty());
     }
 }
