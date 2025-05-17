@@ -379,6 +379,8 @@ where
 
         let bank = self.bank_forks.read().unwrap().working_bank();
 
+        // TOOO_DG: Add cleaning of the batches
+
         const CHUNK_SIZE: usize = 128;
         let mut error_counters = TransactionErrorMetrics::default();
         let mut num_dropped_on_age_and_status: usize = 0;

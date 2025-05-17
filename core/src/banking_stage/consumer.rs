@@ -1183,6 +1183,7 @@ mod tests {
     fn execute_transactions_with_dummy_poh_service(
         bank: Arc<Bank>,
         transactions: Vec<Transaction>,
+        revert_on_error: bool,
     ) -> ProcessTransactionsSummary {
         let transactions = sanitize_transactions(transactions);
         let ledger_path = get_tmp_ledger_path_auto_delete!();
@@ -1224,7 +1225,7 @@ mod tests {
             BundleAccountLocker::default(),
         );
         let process_transactions_summary =
-            consumer.process_transactions(&bank, &Instant::now(), &transactions, &|_| 0);
+            consumer.process_transactions(&bank, &Instant::now(), &transactions, &|_| 0, revert_on_error);
 
         poh_recorder
             .read()
@@ -2059,7 +2060,7 @@ mod tests {
             transaction_counts,
             retryable_transaction_indexes,
             ..
-        } = execute_transactions_with_dummy_poh_service(bank, transactions);
+        } = execute_transactions_with_dummy_poh_service(bank, transactions, false);
 
         // All the transactions should have been replayed, but only 1 committed
         assert!(!reached_max_poh_height);
@@ -2120,7 +2121,7 @@ mod tests {
             transaction_counts,
             retryable_transaction_indexes,
             ..
-        } = execute_transactions_with_dummy_poh_service(bank, transactions);
+        } = execute_transactions_with_dummy_poh_service(bank, transactions, false);
 
         // All the transactions should have been replayed, but only 2 committed (first and last)
         assert!(!reached_max_poh_height);
@@ -2981,6 +2982,129 @@ mod tests {
                 Ok(CheckedTransactionDetails::default()),
             ]),
             [0, 3, 4, 5]
+        );
+    }
+
+    #[test]
+    fn test_process_transactions_account_in_use_revert_on_error() {
+        solana_logger::setup();
+        let GenesisConfigInfo {
+            genesis_config,
+            mint_keypair,
+            ..
+        } = create_slow_genesis_config(10_000);
+        let (bank, _bank_forks) = Bank::new_no_wallclock_throttle_for_tests(&genesis_config);
+        // set cost tracker limits to MAX so it will not filter out TXs
+        bank.write_cost_tracker()
+            .unwrap()
+            .set_limits(u64::MAX, u64::MAX, u64::MAX);
+
+        // Make all repetitive transactions that conflict on the `mint_keypair`, so only 1 should be executed
+        let mut transactions = vec![
+            system_transaction::transfer(
+                &mint_keypair,
+                &Pubkey::new_unique(),
+                1,
+                genesis_config.hash()
+            );
+            TARGET_NUM_TRANSACTIONS_PER_BATCH
+        ];
+
+        // Make one more in separate batch that also conflicts, but because it's in a separate batch, it
+        // should be executed
+        transactions.push(system_transaction::transfer(
+            &mint_keypair,
+            &Pubkey::new_unique(),
+            1,
+            genesis_config.hash(),
+        ));
+
+        let transactions_len = transactions.len();
+        let ProcessTransactionsSummary {
+            reached_max_poh_height,
+            transaction_counts,
+            retryable_transaction_indexes,
+            ..
+        } = execute_transactions_with_dummy_poh_service(bank, transactions, true);
+
+        // All the transactions should have been replayed and 0 commited
+        assert!(!reached_max_poh_height);
+        assert_eq!(
+            transaction_counts,
+            CommittedTransactionsCounts {
+                attempted_processing_count: transactions_len as u64,
+                committed_transactions_count: 0,
+                committed_transactions_with_successful_result_count: 0,
+                processed_but_failed_commit: 0,
+            }
+        );
+
+        // Everything except first and last index of the transactions failed and are last retryable
+        assert_eq!(
+            retryable_transaction_indexes,
+            (1..transactions_len - 1).collect::<Vec<usize>>()
+        );
+    }
+
+    #[test]
+    fn test_process_transactions_instruction_error_revert_on_error() {
+        solana_logger::setup();
+        let lamports = 10_000;
+        let GenesisConfigInfo {
+            genesis_config,
+            mint_keypair,
+            ..
+        } = create_slow_genesis_config(lamports);
+        let (bank, _bank_forks) = Bank::new_no_wallclock_throttle_for_tests(&genesis_config);
+        // set cost tracker limits to MAX so it will not filter out TXs
+        bank.write_cost_tracker()
+            .unwrap()
+            .set_limits(u64::MAX, u64::MAX, u64::MAX);
+
+        // Transfer more than the balance of the mint keypair, should cause a
+        // InstructionError::InsufficientFunds that is then committed. Needs to be
+        // MAX_NUM_TRANSACTIONS_PER_BATCH at least so it doesn't conflict on account locks
+        // with the below transaction
+        let mut transactions = vec![
+            system_transaction::transfer(
+                &mint_keypair,
+                &Pubkey::new_unique(),
+                lamports + 1,
+                genesis_config.hash(),
+            );
+            TARGET_NUM_TRANSACTIONS_PER_BATCH
+        ];
+
+        // Make one transaction that will succeed.
+        transactions.push(system_transaction::transfer(
+            &mint_keypair,
+            &Pubkey::new_unique(),
+            1,
+            genesis_config.hash(),
+        ));
+
+        let transactions_len = transactions.len();
+        let ProcessTransactionsSummary {
+            reached_max_poh_height,
+            transaction_counts,
+            retryable_transaction_indexes,
+            ..
+        } = execute_transactions_with_dummy_poh_service(bank, transactions, true);
+
+        assert!(!reached_max_poh_height);
+        assert_eq!(
+            transaction_counts,
+            CommittedTransactionsCounts {
+                attempted_processing_count: transactions_len as u64,
+                // None commited; because the first transaction was an error
+                committed_transactions_count: 0,
+                committed_transactions_with_successful_result_count: 0,
+                processed_but_failed_commit: 0,
+            }
+        );
+        assert_eq!(
+            retryable_transaction_indexes,
+            (1..transactions_len).collect::<Vec<usize>>()
         );
     }
 }
