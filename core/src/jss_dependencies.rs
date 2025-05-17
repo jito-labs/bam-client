@@ -1,6 +1,5 @@
 /// Dependencies that are needed for the JSS (Jito Scheduler Service) to function.
 /// All-in-one for convenience.
-
 use std::sync::{atomic::AtomicBool, Arc, Mutex};
 
 use jito_protos::proto::{jss_api::StartSchedulerMessage, jss_types::Bundle};
