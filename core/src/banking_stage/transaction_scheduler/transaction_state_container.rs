@@ -109,7 +109,6 @@ impl<Tx: TransactionWithMeta> StateContainer<Tx> for TransactionStateContainer<T
             capacity,
             priority_queue: MinMaxHeap::with_capacity(capacity + EXTRA_CAPACITY),
             id_to_transaction_state: Slab::with_capacity(capacity + EXTRA_CAPACITY),
-            id_to_batch_state: Slab::with_capacity(capacity + EXTRA_CAPACITY),
         }
     }
 
