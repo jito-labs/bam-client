@@ -381,6 +381,14 @@ impl Consumer {
                 revert_on_error,
             );
 
+            info!(
+                "process_and_record_transactions: bank: {} txs: {} chunk_start: {} chunk_end: {}",
+                bank.slot(),
+                transactions.len(),
+                chunk_start,
+                chunk_end,
+            );
+
             let ProcessTransactionBatchOutput {
                 cost_model_throttled_transactions_count: new_cost_model_throttled_transactions_count,
                 cost_model_us: new_cost_model_us,
@@ -457,7 +465,7 @@ impl Consumer {
         }
     }
 
-    fn early_bailout_batch_output(txn_count: usize) -> ProcessTransactionBatchOutput {
+    fn early_bailout_batch_output(txn_count: usize, retryable: bool) -> ProcessTransactionBatchOutput {
         ProcessTransactionBatchOutput {
             cost_model_throttled_transactions_count: 0,
             cost_model_us: 0,
@@ -466,7 +474,11 @@ impl Consumer {
                     attempted_processing_count: txn_count as u64,
                     ..Default::default()
                 },
-                retryable_transaction_indexes: vec![],
+                retryable_transaction_indexes: if retryable {
+                    (0..txn_count).collect()
+                } else {
+                    vec![]
+                },
                 commit_transactions_result: (0..txn_count)
                     .map(|_| Ok(CommitTransactionDetails::NotCommitted))
                     .collect(),
@@ -517,9 +529,7 @@ impl Consumer {
             let txs = init_bundle.transactions;
             let result = self.process_and_record_transactions(bank, &txs, 0, reservation_cb, true);
             if result
-                .execute_and_commit_transactions_output
-                .commit_transactions_result
-                .is_err()
+                .execute_and_commit_transactions_output.commit_transactions_result.is_err()
             {
                 return false;
             }
@@ -535,9 +545,7 @@ impl Consumer {
             let txs = tip_crank_bundle.transactions;
             let result = self.process_and_record_transactions(bank, &txs, 0, reservation_cb, true);
             if result
-                .execute_and_commit_transactions_output
-                .commit_transactions_result
-                .is_err()
+                .execute_and_commit_transactions_output.commit_transactions_result.is_err()
             {
                 return false;
             }
@@ -560,7 +568,7 @@ impl Consumer {
         let check_results =
             bank.check_transactions(txs, &pre_results, MAX_PROCESSING_AGE, &mut error_counters);
         if revert_on_error && check_results.iter().any(|result| result.is_err()) {
-            return Self::early_bailout_batch_output(txs.len());
+            return Self::early_bailout_batch_output(txs.len(), false);
         }
 
         // If checks passed, verify pre-compiles and continue processing on success.
@@ -582,7 +590,7 @@ impl Consumer {
             })
             .collect();
         if revert_on_error && check_results.iter().any(|result| result.is_err()) {
-            return Self::early_bailout_batch_output(txs.len());
+            return Self::early_bailout_batch_output(txs.len(), false);
         }
 
         let mut output = self.process_and_record_transactions_with_pre_results(
@@ -707,11 +715,12 @@ impl Consumer {
                 Err(err) => Err(err.clone()),
             }),
             Some(&bundle_account_locks.read_locks()),
-            Some(&bundle_account_locks.write_locks())
+            Some(&bundle_account_locks.write_locks()),
+            revert_on_error,
         ));
         drop(bundle_account_locks);
-        if revert_on_error && batch.sanitized_transactions().len() != txs.len() {
-            return Self::early_bailout_batch_output(txs.len());
+        if revert_on_error && batch.lock_results().iter().any(|result| result.is_err()) {
+            return Self::early_bailout_batch_output(txs.len(), true);
         }
 
         // retryable_txs includes AccountInUse, WouldExceedMaxBlockCostLimit
@@ -1120,8 +1129,7 @@ impl Consumer {
 #[cfg(test)]
 mod tests {
     use {
-        super::*,
-        crate::{
+        super::*, crate::{
             banking_stage::{
                 immutable_deserialized_packet::DeserializedPacketError,
                 tests::{create_slow_genesis_config, sanitize_transactions, simulate_poh},
@@ -1129,14 +1137,7 @@ mod tests {
                 unprocessed_transaction_storage::ThreadType,
             },
             tip_manager::{TipDistributionAccountConfig, TipManagerConfig},
-        },
-        agave_reserved_account_keys::ReservedAccountKeys,
-        crossbeam_channel::{unbounded, Receiver},
-        jito_tip_distribution::sdk::derive_tip_distribution_account_address,
-        solana_cost_model::{cost_model::CostModel, transaction_cost::TransactionCost},
-        solana_entry::entry::{next_entry, next_versioned_entry},
-        solana_gossip::{cluster_info::Node, contact_info::ContactInfo},
-        solana_ledger::{
+        }, agave_reserved_account_keys::ReservedAccountKeys, crossbeam_channel::{unbounded, Receiver}, jito_tip_distribution::sdk::derive_tip_distribution_account_address, solana_cost_model::{cost_model::CostModel, transaction_cost::TransactionCost}, solana_entry::entry::{next_entry, next_versioned_entry}, solana_gossip::cluster_info::Node, solana_ledger::{
             blockstore::{entries_to_test_shreds, Blockstore},
             blockstore_processor::TransactionStatusSender,
             genesis_utils::{
@@ -1145,41 +1146,15 @@ mod tests {
             },
             get_tmp_ledger_path_auto_delete,
             leader_schedule_cache::LeaderScheduleCache,
-        },
-        solana_perf::packet::Packet,
-        solana_poh::poh_recorder::{PohRecorder, Record, WorkingBankEntry},
-        solana_rpc::transaction_status_service::TransactionStatusService,
-        solana_runtime::{bank_forks::BankForks, prioritization_fee_cache::PrioritizationFeeCache},
-        solana_runtime_transaction::runtime_transaction::RuntimeTransaction,
-        solana_sdk::{
-            account::AccountSharedData,
-            account_utils::StateMut,
-            address_lookup_table::{
+        }, solana_perf::packet::Packet, solana_poh::poh_recorder::{PohRecorder, Record, WorkingBankEntry}, solana_program_test::programs::spl_programs, solana_rpc::transaction_status_service::TransactionStatusService, solana_runtime::{bank_forks::BankForks, genesis_utils::create_genesis_config_with_leader_ex, installed_scheduler_pool::BankWithScheduler, prioritization_fee_cache::PrioritizationFeeCache}, solana_runtime_transaction::runtime_transaction::RuntimeTransaction, solana_sdk::{
+            account::AccountSharedData, account_utils::StateMut, address_lookup_table::{
                 self,
                 state::{AddressLookupTable, LookupTableMeta},
-            },
-            compute_budget,
-            fee_calculator::FeeCalculator,
-            hash::Hash,
-            instruction::InstructionError,
-            message::{
+            }, compute_budget, fee_calculator::{FeeCalculator, FeeRateGovernor, DEFAULT_TARGET_LAMPORTS_PER_SIGNATURE}, genesis_config::ClusterType, hash::Hash, instruction::InstructionError, message::{
                 v0::{self, MessageAddressTableLookup},
                 Message, MessageHeader, VersionedMessage,
-            },
-            nonce::{self, state::DurableNonce},
-            nonce_account::verify_nonce_account,
-            poh_config::PohConfig,
-            pubkey::Pubkey,
-            signature::Keypair,
-            signer::Signer,
-            system_instruction, system_program, system_transaction,
-            transaction::{Transaction, VersionedTransaction},
-        },
-        solana_streamer::socket::SocketAddrSpace,
-        solana_svm::account_loader::CheckedTransactionDetails,
-        solana_timings::{ExecuteTimings, ProgramTiming},
-        solana_transaction_status::{TransactionStatusMeta, VersionedTransactionWithStatusMeta},
-        std::{
+            }, native_token::sol_to_lamports, nonce::{self, state::DurableNonce}, nonce_account::verify_nonce_account, poh_config::PohConfig, pubkey::Pubkey, rent::Rent, signature::Keypair, signer::Signer, system_instruction, system_program, system_transaction, transaction::{Transaction, VersionedTransaction}
+        }, solana_streamer::socket::SocketAddrSpace, solana_svm::account_loader::CheckedTransactionDetails, solana_timings::{ExecuteTimings, ProgramTiming}, solana_transaction_status::{TransactionStatusMeta, VersionedTransactionWithStatusMeta}, solana_vote_program::vote_state::VoteState, std::{
             borrow::Cow,
             num::Saturating,
             path::Path,
@@ -1190,8 +1165,7 @@ mod tests {
             },
             thread::{Builder, JoinHandle},
             time::Duration,
-        },
-        transaction::MessageHash,
+        }, transaction::MessageHash
     };
 
     fn execute_transactions_with_dummy_poh_service(
@@ -3026,70 +3000,6 @@ mod tests {
     }
 
     #[test]
-    fn test_process_transactions_account_in_use_revert_on_error() {
-        solana_logger::setup();
-        let GenesisConfigInfo {
-            genesis_config,
-            mint_keypair,
-            ..
-        } = create_slow_genesis_config(10_000);
-        let (bank, _bank_forks) = Bank::new_no_wallclock_throttle_for_tests(&genesis_config);
-        // set cost tracker limits to MAX so it will not filter out TXs
-        bank.write_cost_tracker()
-            .unwrap()
-            .set_limits(u64::MAX, u64::MAX, u64::MAX);
-
-        // Make all repetitive transactions that conflict on the `mint_keypair`, so only 1 should be executed
-        let mut transactions = vec![
-            system_transaction::transfer(
-                &mint_keypair,
-                &Pubkey::new_unique(),
-                1,
-                genesis_config.hash()
-            );
-            TARGET_NUM_TRANSACTIONS_PER_BATCH
-        ];
-
-        // Make one more in separate batch that also conflicts, but because it's in a separate batch, it
-        // should be executed
-        transactions.push(system_transaction::transfer(
-            &mint_keypair,
-            &Pubkey::new_unique(),
-            1,
-            genesis_config.hash(),
-        ));
-
-        let transactions_len = transactions.len();
-        let (
-            ProcessTransactionsSummary {
-                reached_max_poh_height,
-                transaction_counts,
-                retryable_transaction_indexes,
-                ..
-            },
-            _,
-        ) = execute_transactions_with_dummy_poh_service(bank, transactions, true, None);
-
-        // All the transactions should have been replayed and 0 commited
-        assert!(!reached_max_poh_height);
-        assert_eq!(
-            transaction_counts,
-            CommittedTransactionsCounts {
-                attempted_processing_count: transactions_len as u64,
-                committed_transactions_count: 0,
-                committed_transactions_with_successful_result_count: 0,
-                processed_but_failed_commit: 0,
-            }
-        );
-
-        // Everything except first and last index of the transactions failed and are last retryable
-        assert_eq!(
-            retryable_transaction_indexes,
-            (1..transactions_len - 1).collect::<Vec<usize>>()
-        );
-    }
-
-    #[test]
     fn test_process_transactions_instruction_error_revert_on_error() {
         solana_logger::setup();
         let lamports = 10_000;
@@ -3132,6 +3042,7 @@ mod tests {
                 reached_max_poh_height,
                 transaction_counts,
                 retryable_transaction_indexes,
+                error_counters,
                 ..
             },
             _,
@@ -3150,113 +3061,141 @@ mod tests {
         );
         assert_eq!(
             retryable_transaction_indexes,
-            (1..transactions_len).collect::<Vec<usize>>()
+            Vec::<usize>::new(),
         );
     }
 
-    #[test]
-    fn test_tip() {
-        solana_logger::setup();
-        let lamports = 10_000;
-        let GenesisConfigInfo {
-            genesis_config,
-            mint_keypair,
-            voting_keypair,
-            validator_pubkey,
-        } = create_slow_genesis_config(lamports);
-        let (bank, _bank_forks) = Bank::new_no_wallclock_throttle_for_tests(&genesis_config);
-        bank.write_cost_tracker()
-            .unwrap()
-            .set_limits(u64::MAX, u64::MAX, u64::MAX);
-
-        let tip_manager = get_tip_manager(&voting_keypair.pubkey());
-        let tip_accounts = tip_manager.get_tip_accounts();
-        let tip_account = tip_accounts.iter().collect::<Vec<_>>()[0];
-        let transactions = vec![system_transaction::transfer(
-            &mint_keypair,
-            &tip_account,
-            lamports,
-            genesis_config.hash(),
-        )];
-
-        let block_builder_pubkey = Pubkey::new_unique();
-
-        let keypair = Arc::new(mint_keypair);
-        let cluster_info = {
-            let node = Node::new_localhost_with_pubkey(&keypair.pubkey());
-            ClusterInfo::new(node.info, keypair.clone(), SocketAddrSpace::Unspecified)
+    pub fn create_test_recorder(
+        bank: &Arc<Bank>,
+        blockstore: Arc<Blockstore>,
+        poh_config: Option<PohConfig>,
+        leader_schedule_cache: Option<Arc<LeaderScheduleCache>>,
+    ) -> (
+        Arc<AtomicBool>,
+        Arc<RwLock<PohRecorder>>,
+        JoinHandle<()>,
+        Receiver<WorkingBankEntry>,
+    ) {
+        let leader_schedule_cache = match leader_schedule_cache {
+            Some(provided_cache) => provided_cache,
+            None => Arc::new(LeaderScheduleCache::new_from_bank(bank)),
         };
+        let exit = Arc::new(AtomicBool::new(false));
+        let poh_config = poh_config.unwrap_or_default();
 
-        let tip_processing_dependecies = TipProcessingDependencies {
-            tip_manager: tip_manager.clone(),
-            last_tip_updated_slot: Arc::new(Mutex::new(0)),
-            block_builder_fee_info: Arc::new(Mutex::new(BlockBuilderFeeInfo {
-                block_builder: block_builder_pubkey,
-                block_builder_commission: 5,
-            })),
-            cluster_info: Arc::new(cluster_info),
-        };
-
-        let (
-            ProcessTransactionsSummary {
-                reached_max_poh_height,
-                transaction_counts,
-                retryable_transaction_indexes,
-                ..
-            },
-            recorded,
-        ) = execute_transactions_with_dummy_poh_service(
+        let (mut poh_recorder, entry_receiver, record_receiver) = PohRecorder::new(
+            bank.tick_height(),
+            bank.last_blockhash(),
             bank.clone(),
-            transactions,
-            true,
-            Some(tip_processing_dependecies),
+            Some((4, 4)),
+            bank.ticks_per_slot(),
+            blockstore,
+            &leader_schedule_cache,
+            &poh_config,
+            exit.clone(),
+        );
+        poh_recorder.set_bank(
+            BankWithScheduler::new_without_scheduler(bank.clone()),
+            false,
         );
 
-        assert_eq!(transaction_counts.attempted_processing_count, 1);
-        assert_eq!(transaction_counts.committed_transactions_count, 1);
+        let poh_recorder = Arc::new(RwLock::new(poh_recorder));
+        let poh_simulator = simulate_poh(record_receiver, &poh_recorder);
 
-        // expect to see initialize tip payment program, tip distribution program,
-        // initialize tip distribution account, change tip receiver + change block builder
-        assert_eq!(
-            recorded[0],
-            tip_manager
-                .initialize_tip_payment_program_tx(&bank, &keypair)
-                .to_versioned_transaction()
+        (exit, poh_recorder, poh_simulator, entry_receiver)
+    }
+
+    struct TestFixture {
+        genesis_config_info: GenesisConfigInfo,
+        leader_keypair: Keypair,
+        bank: Arc<Bank>,
+        exit: Arc<AtomicBool>,
+        poh_recorder: Arc<RwLock<PohRecorder>>,
+        poh_simulator: JoinHandle<()>,
+        entry_receiver: Receiver<WorkingBankEntry>,
+        bank_forks: Arc<RwLock<BankForks>>,
+    }
+
+    fn create_test_fixture(mint_sol: u64) -> TestFixture {
+        let mint_keypair = Keypair::new();
+        let leader_keypair = Keypair::new();
+        let voting_keypair = Keypair::new();
+
+        let rent = Rent::default();
+
+        let mut genesis_config = create_genesis_config_with_leader_ex(
+            sol_to_lamports(mint_sol as f64),
+            &mint_keypair.pubkey(),
+            &leader_keypair.pubkey(),
+            &voting_keypair.pubkey(),
+            &solana_sdk::pubkey::new_rand(),
+            rent.minimum_balance(VoteState::size_of()) + sol_to_lamports(1_000_000.0),
+            sol_to_lamports(1_000_000.0),
+            FeeRateGovernor {
+                // Initialize with a non-zero fee
+                lamports_per_signature: DEFAULT_TARGET_LAMPORTS_PER_SIGNATURE / 2,
+                ..FeeRateGovernor::default()
+            },
+            rent.clone(), // most tests don't expect rent
+            ClusterType::Development,
+            spl_programs(&rent),
         );
-        assert_eq!(
-            recorded[1],
-            tip_manager
-                .initialize_tip_distribution_config_tx(&bank, &keypair)
-                .to_versioned_transaction()
-        );
-        assert_eq!(
-            recorded[2],
-            tip_manager
-                .initialize_tip_distribution_account_tx(&bank, &keypair)
-                .to_versioned_transaction()
+        genesis_config.ticks_per_slot *= 8;
+
+        // workaround for https://github.com/solana-labs/solana/issues/30085
+        // the test can deploy and use spl_programs in the genensis slot without waiting for the next one
+        let (bank, bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
+
+        let bank = Arc::new(Bank::new_from_parent(bank, &Pubkey::default(), 1));
+
+        let ledger_path = get_tmp_ledger_path_auto_delete!();
+        let blockstore = Arc::new(
+            Blockstore::open(ledger_path.path())
+                .expect("Expected to be able to open database ledger"),
         );
 
-        assert_eq!(
-            recorded[3],
-            tip_manager
-                .build_change_tip_receiver_and_block_builder_tx(
-                    &keypair.pubkey(),
-                    &derive_tip_distribution_account_address(
-                        &tip_manager.tip_distribution_program_id(),
-                        &validator_pubkey,
-                        bank.epoch()
-                    )
-                    .0,
-                    &bank,
-                    &keypair,
-                    &keypair.pubkey(),
-                    &block_builder_pubkey,
-                    5
-                )
-                .to_versioned_transaction()
-        );
+        let (exit, poh_recorder, poh_simulator, entry_receiver) =
+            create_test_recorder(&bank, blockstore, Some(PohConfig::default()), None);
 
-        assert_eq!(recorded.len(), 5);
+        let validator_pubkey = voting_keypair.pubkey();
+        TestFixture {
+            genesis_config_info: GenesisConfigInfo {
+                genesis_config,
+                mint_keypair,
+                voting_keypair,
+                validator_pubkey,
+            },
+            leader_keypair,
+            bank,
+            bank_forks,
+            exit,
+            poh_recorder,
+            poh_simulator,
+            entry_receiver,
+        }
+    }
+
+    pub fn get_executed_txns(
+        entry_receiver: &Receiver<WorkingBankEntry>,
+        wait: Duration,
+    ) -> Vec<VersionedTransaction> {
+        let mut transactions = Vec::new();
+        let start = std::time::Instant::now();
+        while start.elapsed() < wait {
+            let Ok(WorkingBankEntry {
+                bank: _wbe_bank,
+                entries_ticks,
+            }) = entry_receiver.try_recv()
+            else {
+                continue;
+            };
+            for (entry, _) in entries_ticks {
+                if !entry.transactions.is_empty() {
+                    transactions.extend(entry.transactions);
+                }
+            }
+        }
+        transactions
     }
 
     fn get_tip_manager(vote_account: &Pubkey) -> TipManager {
@@ -3273,5 +3212,130 @@ mod tests {
                 commission_bps: 10,
             },
         })
+    }
+
+    #[test]
+    fn test_handle_tip_programs() {
+        let TestFixture {
+            genesis_config_info,
+            leader_keypair,
+            bank,
+            exit,
+            poh_recorder,
+            poh_simulator,
+            entry_receiver,
+            bank_forks: _bank_forks,
+        } = create_test_fixture(1);
+
+        let (replay_vote_sender, _) = crossbeam_channel::unbounded();
+        let keypair = Arc::new(leader_keypair);
+        let cluster_info = {
+            let node = Node::new_localhost_with_pubkey(&keypair.pubkey());
+            ClusterInfo::new(node.info, keypair.clone(), SocketAddrSpace::Unspecified)
+        };
+        let cluster_info = Arc::new(cluster_info);
+        let block_builder_pubkey = Pubkey::new_unique();
+
+        let tip_manager = get_tip_manager(&genesis_config_info.voting_keypair.pubkey());
+
+        let tip_accounts = tip_manager.get_tip_accounts();
+        let tip_account = tip_accounts.iter().collect::<Vec<_>>()[0];
+        let txns = sanitize_transactions(vec![system_transaction::transfer(
+            &genesis_config_info.mint_keypair,
+            &tip_account,
+            1000,
+            genesis_config_info.genesis_config.hash(),
+        )]);
+
+        let tip_processing_dependencies = TipProcessingDependencies {
+            tip_manager: tip_manager.clone(),
+            last_tip_updated_slot: Arc::new(Mutex::new(0)),
+            block_builder_fee_info: Arc::new(Mutex::new(BlockBuilderFeeInfo {
+                block_builder: block_builder_pubkey,
+                block_builder_commission: 5,
+            })),
+            cluster_info: cluster_info,
+        };
+
+        let committer = Committer::new(
+            None,
+            replay_vote_sender,
+            Arc::new(PrioritizationFeeCache::new(0u64)),
+        );
+        let recorder = poh_recorder.read().unwrap().new_recorder();
+        let consumer = Consumer::new_with_tip_processing(
+            committer,
+            recorder,
+            QosService::new(1),
+            None,
+            HashSet::default(),
+            BundleAccountLocker::default(),
+            Some(tip_processing_dependencies),
+        );
+
+        let transactions = std::thread::spawn(move || get_executed_txns(&entry_receiver, Duration::from_secs(5)));
+
+        let result = consumer.process_transactions(
+            &bank,
+            &Instant::now(),
+            &txns,
+            &|_| 0,
+            false,
+        );
+
+        let transactions = transactions.join().unwrap();
+
+        assert_eq!(transactions.len(), 5);
+
+        // expect to see initialize tip payment program, tip distribution program,
+        // initialize tip distribution account, change tip receiver + change block builder
+        assert_eq!(
+            transactions[0],
+            tip_manager
+                .initialize_tip_payment_program_tx(&bank, &keypair)
+                .to_versioned_transaction()
+        );
+        assert_eq!(
+            transactions[1],
+            tip_manager
+                .initialize_tip_distribution_config_tx(&bank, &keypair)
+                .to_versioned_transaction()
+        );
+        assert_eq!(
+            transactions[2],
+            tip_manager
+                .initialize_tip_distribution_account_tx(&bank, &keypair)
+                .to_versioned_transaction()
+        );
+        // the first tip receiver + block builder are the initializer (keypair.pubkey()) as set by the
+        // TipPayment program during initialization
+        let bank_start = poh_recorder.read().unwrap().bank_start().unwrap();
+        assert_eq!(
+            transactions[3],
+            tip_manager
+                .build_change_tip_receiver_and_block_builder_tx(
+                    &keypair.pubkey(),
+                    &derive_tip_distribution_account_address(
+                        &tip_manager.tip_distribution_program_id(),
+                        &genesis_config_info.validator_pubkey,
+                        bank_start.working_bank.epoch()
+                    )
+                    .0,
+                    &bank_start.working_bank,
+                    &keypair,
+                    &keypair.pubkey(),
+                    &block_builder_pubkey,
+                    5
+                )
+                .to_versioned_transaction()
+        );
+
+        poh_recorder
+            .write()
+            .unwrap()
+            .is_exited
+            .store(true, Ordering::Relaxed);
+        exit.store(true, Ordering::Relaxed);
+        poh_simulator.join().unwrap();
     }
 }
