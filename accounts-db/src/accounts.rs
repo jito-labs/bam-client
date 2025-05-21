@@ -570,7 +570,7 @@ impl Accounts {
                     .map(|_| TransactionAccountLocksIterator::new(tx))
             })
             .collect();
-        self.lock_accounts_inner(tx_account_locks_results, None, None)
+        self.lock_accounts_inner(tx_account_locks_results, None, None, false)
     }
 
     #[must_use]
@@ -581,6 +581,7 @@ impl Accounts {
         tx_account_lock_limit: usize,
         additional_read_locks: Option<&HashSet<Pubkey>>,
         additional_write_locks: Option<&HashSet<Pubkey>>,
+        batched: bool,
     ) -> Vec<Result<()>> {
         // Validate the account locks, then get iterator if successful validation.
         let tx_account_locks_results: Vec<Result<_>> = txs
@@ -595,6 +596,7 @@ impl Accounts {
             tx_account_locks_results,
             additional_read_locks,
             additional_write_locks,
+            batched,
         )
     }
 
@@ -604,16 +606,38 @@ impl Accounts {
         tx_account_locks_results: Vec<Result<TransactionAccountLocksIterator<impl SVMMessage>>>,
         additional_read_locks: Option<&HashSet<Pubkey>>,
         additional_write_locks: Option<&HashSet<Pubkey>>,
+        batched: bool,
     ) -> Vec<Result<()>> {
         let account_locks = &mut self.account_locks.lock().unwrap();
+        let mut batch_read_locked_accounts = HashSet::new();
+        let mut batch_write_locked_accounts = HashSet::new();
         tx_account_locks_results
             .into_iter()
             .map(|tx_account_locks_result| match tx_account_locks_result {
-                Ok(tx_account_locks) => account_locks.try_lock_accounts(
-                    tx_account_locks.accounts_with_is_writable(),
-                    additional_read_locks,
-                    additional_write_locks,
-                ),
+                Ok(tx_account_locks) => {
+                    let keys = tx_account_locks.accounts_with_is_writable().filter(|(pubkey, writable)| {
+                        !if *writable {
+                            batch_read_locked_accounts.contains(*pubkey) || batch_write_locked_accounts.contains(*pubkey)
+                        } else {
+                            batch_read_locked_accounts.contains(*pubkey)
+                        }
+                    });
+                    let result = account_locks.try_lock_accounts(
+                        keys,
+                        additional_read_locks,
+                        additional_write_locks,
+                    );
+                    if batched && result.is_ok() {
+                        for (pubkey, writable) in tx_account_locks.accounts_with_is_writable() {
+                            if writable {
+                                batch_write_locked_accounts.insert(*pubkey);
+                            } else {
+                                batch_read_locked_accounts.insert(*pubkey);
+                            }
+                        }
+                    }
+                    result
+                },
                 Err(err) => Err(err),
             })
             .collect()
@@ -1321,6 +1345,7 @@ mod tests {
             MAX_TX_ACCOUNT_LOCKS,
             None,
             None,
+            false,
         );
 
         assert_eq!(
