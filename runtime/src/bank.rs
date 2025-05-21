@@ -3191,6 +3191,7 @@ impl Bank {
         transaction_results: impl Iterator<Item = Result<()>>,
         additional_read_locks: Option<&HashSet<Pubkey>>,
         additional_write_locks: Option<&HashSet<Pubkey>>,
+        batched_locking: bool,
     ) -> TransactionBatch<'a, 'b, Tx> {
         // this lock_results could be: Ok, AccountInUse, WouldExceedBlockMaxLimit or WouldExceedAccountMaxLimit
         let tx_account_lock_limit = self.get_transaction_account_lock_limit();
@@ -3200,6 +3201,7 @@ impl Bank {
             tx_account_lock_limit,
             additional_read_locks,
             additional_write_locks,
+            batched_locking,
         );
         TransactionBatch::new(lock_results, self, OwnedOrBorrowed::Borrowed(transactions))
     }
