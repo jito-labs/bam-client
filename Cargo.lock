@@ -3158,7 +3158,7 @@ dependencies = [
  "httpdate",
  "itoa",
  "pin-project-lite",
- "socket2 0.5.8",
+ "socket2 0.4.9",
  "tokio",
  "tower-service",
  "tracing",
@@ -3786,9 +3786,9 @@ checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
 
 [[package]]
 name = "libc"
-version = "0.2.169"
+version = "0.2.172"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5aba8db14291edd000dfcc4d620c7ebfb122c613afb886ca8803fa4e128a20a"
+checksum = "d750af042f7ef4f724306de029d18836c26c1765a54a6a3f094cbd23a7267ffa"
 
 [[package]]
 name = "libloading"
@@ -5013,7 +5013,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.0.0",
  "rustls 0.23.20",
- "socket2 0.5.8",
+ "socket2 0.5.9",
  "thiserror 2.0.9",
  "tokio",
  "tracing",
@@ -5048,7 +5048,7 @@ checksum = "4fe68c2e9e1a1234e218683dbdf9f9dfcb094113c5ac2b938dfcb9bab4c4140b"
 dependencies = [
  "libc",
  "once_cell",
- "socket2 0.5.8",
+ "socket2 0.5.9",
  "tracing",
  "windows-sys 0.59.0",
 ]
@@ -6129,9 +6129,9 @@ dependencies = [
 
 [[package]]
 name = "socket2"
-version = "0.5.8"
+version = "0.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c970269d99b64e60ec3bd6ad27270092a5394c4e309314b18ae3fe575695fbe8"
+checksum = "4f5fd57c80058a56cf5c777ab8a126398ece8e442983605d280a44ce79d0edef"
 dependencies = [
  "libc",
  "windows-sys 0.52.0",
@@ -8230,7 +8230,7 @@ dependencies = [
  "rand 0.8.5",
  "serde",
  "serde_derive",
- "socket2 0.5.8",
+ "socket2 0.5.9",
  "solana-logger",
  "solana-serde",
  "solana-version",
@@ -9710,7 +9710,7 @@ dependencies = [
  "rand 0.8.5",
  "rustls 0.23.20",
  "smallvec",
- "socket2 0.5.8",
+ "socket2 0.5.9",
  "solana-keypair",
  "solana-logger",
  "solana-measure",
@@ -10529,7 +10529,7 @@ dependencies = [
  "rand 0.8.5",
  "rustls 0.23.20",
  "smallvec",
- "socket2 0.5.8",
+ "socket2 0.5.9",
  "solana-clap-utils",
  "solana-logger",
  "solana-measure",
