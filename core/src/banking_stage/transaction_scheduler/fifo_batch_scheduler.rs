@@ -75,7 +75,7 @@ impl<Tx: TransactionWithMeta> FifoBatchScheduler<Tx> {
     /// Gets accessed accounts (resources) for use in `PrioGraph`.
     fn get_transactions_account_access<'a>(
         transactions: impl Iterator<Item = &'a SanitizedTransactionTTL<impl SVMMessage + 'a>> + 'a,
-    ) -> impl Iterator<Item = (Pubkey, AccessKind)> + 'a {
+    ) -> impl Iterator<Item = (&'a Pubkey, AccessKind)> + 'a {
         transactions.flat_map(|transaction| {
             let message = &transaction.transaction;
             message
@@ -84,9 +84,9 @@ impl<Tx: TransactionWithMeta> FifoBatchScheduler<Tx> {
                 .enumerate()
                 .map(|(index, key)| {
                     if message.is_writable(index) {
-                        (*key, AccessKind::Write)
+                        (key, AccessKind::Write)
                     } else {
-                        (*key, AccessKind::Read)
+                        (key, AccessKind::Read)
                     }
                 })
         })
@@ -97,7 +97,6 @@ impl<Tx: TransactionWithMeta> FifoBatchScheduler<Tx> {
         while let Some(next_batch_id) = container.pop() {
             let Some((batch_ids, _)) = container.get_batch(next_batch_id.id) else {
                 panic!("Batch {} not found in container", next_batch_id.id);
-                continue;
             };
 
             let txns = batch_ids
@@ -139,7 +138,6 @@ impl<Tx: TransactionWithMeta> FifoBatchScheduler<Tx> {
 
             let Some((batch_ids, revert_on_error)) = container.get_batch(next_batch_id.id) else {
                 panic!("Batch {} not found in container", next_batch_id.id);
-                continue;
             };
 
             let transactions = batch_ids
@@ -231,8 +229,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for FifoBatchScheduler<Tx> {
 
             let batch_id = result.work.batch_id;
             let Some(inflight_batch_info) = self.inflight_batch_info.remove(&batch_id) else {
-                error!("Batch {} not found in priority ids", batch_id);
-                continue;
+                panic!("Batch {} not found in priority ids", batch_id);
             };
             self.prio_graph.unblock(&inflight_batch_info.priority_id);
             container.remove_by_id(inflight_batch_info.priority_id.id);
