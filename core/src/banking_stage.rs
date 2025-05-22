@@ -806,7 +806,7 @@ impl BankingStage {
                     Builder::new()
                         .name(format!("solCoWorker{id:02}"))
                         .spawn(move || {
-                            let _ = consume_worker.run(|| 0);
+                            let _ = consume_worker.run(|_| 0);
                         })
                         .unwrap(),
                 )
