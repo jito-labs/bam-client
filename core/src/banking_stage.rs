@@ -802,12 +802,11 @@ impl BankingStage {
                 );
 
                 worker_metrics.push(consume_worker.metrics_handle());
-                let cb = block_cost_limit_reservation_cb.clone();
                 bank_thread_hdls.push(
                     Builder::new()
                         .name(format!("solCoWorker{id:02}"))
                         .spawn(move || {
-                            let _ = consume_worker.run(cb);
+                            let _ = consume_worker.run(|| 0);
                         })
                         .unwrap(),
                 )

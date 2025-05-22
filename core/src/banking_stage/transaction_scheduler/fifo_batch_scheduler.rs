@@ -96,7 +96,7 @@ impl<Tx: TransactionWithMeta> FifoBatchScheduler<Tx> {
         // Insert all incoming transactions into the prio-graph
         while let Some(next_batch_id) = container.pop() {
             let Some((batch_ids, _)) = container.get_batch(next_batch_id.id) else {
-                error!("Batch {} not found in container", next_batch_id.id);
+                panic!("Batch {} not found in container", next_batch_id.id);
                 continue;
             };
 
@@ -138,7 +138,7 @@ impl<Tx: TransactionWithMeta> FifoBatchScheduler<Tx> {
             };
 
             let Some((batch_ids, revert_on_error)) = container.get_batch(next_batch_id.id) else {
-                error!("Batch {} not found in container", next_batch_id.id);
+                panic!("Batch {} not found in container", next_batch_id.id);
                 continue;
             };
 
