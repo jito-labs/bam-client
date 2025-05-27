@@ -165,7 +165,7 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                             p.meta
                                 .as_ref()
                                 .and_then(|meta| meta.flags.as_ref())
-                                .map_or(false, |flags| flags.revertable)
+                                .map_or(false, |flags| flags.revert_on_error)
                         })
                         .all_equal_value()
                     else {
