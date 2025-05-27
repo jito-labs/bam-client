@@ -108,11 +108,20 @@ impl AccountLocks {
             if *count == 0 {
                 occupied_entry.remove_entry();
             }
+        } else {
+            debug_assert!(
+                false,
+                "Attempted to remove a read-lock for a key that wasn't read-locked"
+            );
         }
     }
 
     fn unlock_write(&mut self, key: &Pubkey) {
-        self.write_locks.remove(key);
+        let removed = self.write_locks.remove(key);
+        debug_assert!(
+            removed,
+            "Attempted to remove a write-lock for a key that wasn't write-locked"
+        );
     }
 }
 
