@@ -152,7 +152,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
                         ));
                         continue;
                     };
-                    let feepayer_balance_after_lamports =
+                    let feepayer_balance_lamports =
                         bank.get_balance(&work.transactions[i].fee_payer()); // Not locked (So can't be assumed to be strict)
 
                     let result = commit_results
@@ -163,7 +163,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
                                     jito_protos::proto::jss_types::Processed {
                                         transaction_results: vec![TransactionProcessedResult {
                                             cus_consumed: *compute_units as u32,
-                                            feepayer_balance_after_lamports,
+                                            feepayer_balance_lamports,
                                         }],
                                     },
                                 )
