@@ -692,9 +692,14 @@ impl Consumer {
                 cost_model_throttled_transactions_count,
                 cost_model_us,
                 execute_and_commit_transactions_output: ExecuteAndCommitTransactionsOutput {
-                    transaction_counts: LeaderProcessedTransactionCounts::default(),
-                    retryable_transaction_indexes: vec![],
-                    commit_transactions_result: Err(PohRecorderError::MaxHeightReached),
+                    transaction_counts: LeaderProcessedTransactionCounts {
+                        attempted_processing_count: txs.len() as u64,
+                        .. Default::default()
+                    },
+                    retryable_transaction_indexes: (0..txs.len()).collect(),
+                    commit_transactions_result: Ok(vec![
+                        CommitTransactionDetails::NotCommitted; txs.len()
+                    ]),
                     execute_and_commit_timings: LeaderExecuteAndCommitTimings::default(),
                     error_counters: TransactionErrorMetrics::default(),
                     min_prioritization_fees: 0,
