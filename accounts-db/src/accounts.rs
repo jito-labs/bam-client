@@ -615,13 +615,16 @@ impl Accounts {
             .into_iter()
             .map(|tx_account_locks_result| match tx_account_locks_result {
                 Ok(tx_account_locks) => {
-                    let keys = tx_account_locks.accounts_with_is_writable().filter(|(pubkey, writable)| {
-                        !if *writable {
-                            batch_read_locked_accounts.contains(*pubkey) || batch_write_locked_accounts.contains(*pubkey)
-                        } else {
-                            batch_read_locked_accounts.contains(*pubkey)
-                        }
-                    });
+                    let keys = tx_account_locks.accounts_with_is_writable().filter(
+                        |(pubkey, writable)| {
+                            !if *writable {
+                                batch_read_locked_accounts.contains(*pubkey)
+                                    || batch_write_locked_accounts.contains(*pubkey)
+                            } else {
+                                batch_read_locked_accounts.contains(*pubkey)
+                            }
+                        },
+                    );
                     let result = account_locks.try_lock_accounts(
                         keys,
                         additional_read_locks,
@@ -637,7 +640,7 @@ impl Accounts {
                         }
                     }
                     result
-                },
+                }
                 Err(err) => Err(err),
             })
             .collect()

@@ -458,7 +458,10 @@ impl Consumer {
         }
     }
 
-    fn early_bailout_batch_output(txn_count: usize, retryable: bool) -> ProcessTransactionBatchOutput {
+    fn early_bailout_batch_output(
+        txn_count: usize,
+        retryable: bool,
+    ) -> ProcessTransactionBatchOutput {
         ProcessTransactionBatchOutput {
             cost_model_throttled_transactions_count: 0,
             cost_model_us: 0,
@@ -522,7 +525,9 @@ impl Consumer {
             let txs = init_bundle.transactions;
             let result = self.process_and_record_transactions(bank, &txs, 0, reservation_cb, true);
             if result
-                .execute_and_commit_transactions_output.commit_transactions_result.is_err()
+                .execute_and_commit_transactions_output
+                .commit_transactions_result
+                .is_err()
             {
                 return false;
             }
@@ -538,7 +543,9 @@ impl Consumer {
             let txs = tip_crank_bundle.transactions;
             let result = self.process_and_record_transactions(bank, &txs, 0, reservation_cb, true);
             if result
-                .execute_and_commit_transactions_output.commit_transactions_result.is_err()
+                .execute_and_commit_transactions_output
+                .commit_transactions_result
+                .is_err()
             {
                 return false;
             }
@@ -598,6 +605,7 @@ impl Consumer {
             .execute_and_commit_transactions_output
             .error_counters
             .accumulate(&error_counters);
+
         output
     }
 
@@ -1038,6 +1046,10 @@ impl Consumer {
             current_read_locks.extend(read_account_locks.iter().cloned());
         }
 
+        if !current_batch.is_empty() {
+            result.push(current_batch);
+        }
+
         result
     }
 
@@ -1122,7 +1134,8 @@ impl Consumer {
 #[cfg(test)]
 mod tests {
     use {
-        super::*, crate::{
+        super::*,
+        crate::{
             banking_stage::{
                 immutable_deserialized_packet::DeserializedPacketError,
                 tests::{create_slow_genesis_config, sanitize_transactions, simulate_poh},
@@ -1130,7 +1143,14 @@ mod tests {
                 unprocessed_transaction_storage::ThreadType,
             },
             tip_manager::{TipDistributionAccountConfig, TipManagerConfig},
-        }, agave_reserved_account_keys::ReservedAccountKeys, crossbeam_channel::{unbounded, Receiver}, jito_tip_distribution::sdk::derive_tip_distribution_account_address, solana_cost_model::{cost_model::CostModel, transaction_cost::TransactionCost}, solana_entry::entry::{next_entry, next_versioned_entry}, solana_gossip::cluster_info::Node, solana_ledger::{
+        },
+        agave_reserved_account_keys::ReservedAccountKeys,
+        crossbeam_channel::{unbounded, Receiver},
+        jito_tip_distribution::sdk::derive_tip_distribution_account_address,
+        solana_cost_model::{cost_model::CostModel, transaction_cost::TransactionCost},
+        solana_entry::entry::{next_entry, next_versioned_entry},
+        solana_gossip::cluster_info::Node,
+        solana_ledger::{
             blockstore::{entries_to_test_shreds, Blockstore},
             blockstore_processor::TransactionStatusSender,
             genesis_utils::{
@@ -1139,15 +1159,52 @@ mod tests {
             },
             get_tmp_ledger_path_auto_delete,
             leader_schedule_cache::LeaderScheduleCache,
-        }, solana_perf::packet::Packet, solana_poh::poh_recorder::{PohRecorder, Record, WorkingBankEntry}, solana_program_test::programs::spl_programs, solana_rpc::transaction_status_service::TransactionStatusService, solana_runtime::{bank_forks::BankForks, genesis_utils::create_genesis_config_with_leader_ex, installed_scheduler_pool::BankWithScheduler, prioritization_fee_cache::PrioritizationFeeCache}, solana_runtime_transaction::runtime_transaction::RuntimeTransaction, solana_sdk::{
-            account::AccountSharedData, account_utils::StateMut, address_lookup_table::{
+        },
+        solana_perf::packet::Packet,
+        solana_poh::poh_recorder::{PohRecorder, Record, WorkingBankEntry},
+        solana_program_test::programs::spl_programs,
+        solana_rpc::transaction_status_service::TransactionStatusService,
+        solana_runtime::{
+            bank_forks::BankForks, genesis_utils::create_genesis_config_with_leader_ex,
+            installed_scheduler_pool::BankWithScheduler,
+            prioritization_fee_cache::PrioritizationFeeCache,
+        },
+        solana_runtime_transaction::runtime_transaction::RuntimeTransaction,
+        solana_sdk::{
+            account::AccountSharedData,
+            account_utils::StateMut,
+            address_lookup_table::{
                 self,
                 state::{AddressLookupTable, LookupTableMeta},
-            }, compute_budget, fee_calculator::{FeeCalculator, FeeRateGovernor, DEFAULT_TARGET_LAMPORTS_PER_SIGNATURE}, genesis_config::ClusterType, hash::Hash, instruction::InstructionError, message::{
+            },
+            compute_budget,
+            fee_calculator::{
+                FeeCalculator, FeeRateGovernor, DEFAULT_TARGET_LAMPORTS_PER_SIGNATURE,
+            },
+            genesis_config::ClusterType,
+            hash::Hash,
+            instruction::InstructionError,
+            message::{
                 v0::{self, MessageAddressTableLookup},
                 Message, MessageHeader, VersionedMessage,
-            }, native_token::sol_to_lamports, nonce::{self, state::DurableNonce}, nonce_account::verify_nonce_account, poh_config::PohConfig, pubkey::Pubkey, rent::Rent, signature::Keypair, signer::Signer, system_instruction, system_program, system_transaction, transaction::{Transaction, VersionedTransaction}
-        }, solana_streamer::socket::SocketAddrSpace, solana_svm::account_loader::CheckedTransactionDetails, solana_timings::{ExecuteTimings, ProgramTiming}, solana_transaction_status::{TransactionStatusMeta, VersionedTransactionWithStatusMeta}, solana_vote_program::vote_state::VoteState, std::{
+            },
+            native_token::sol_to_lamports,
+            nonce::{self, state::DurableNonce},
+            nonce_account::verify_nonce_account,
+            poh_config::PohConfig,
+            pubkey::Pubkey,
+            rent::Rent,
+            signature::Keypair,
+            signer::Signer,
+            system_instruction, system_program, system_transaction,
+            transaction::{Transaction, VersionedTransaction},
+        },
+        solana_streamer::socket::SocketAddrSpace,
+        solana_svm::account_loader::CheckedTransactionDetails,
+        solana_timings::{ExecuteTimings, ProgramTiming},
+        solana_transaction_status::{TransactionStatusMeta, VersionedTransactionWithStatusMeta},
+        solana_vote_program::vote_state::VoteState,
+        std::{
             borrow::Cow,
             num::Saturating,
             path::Path,
@@ -1158,7 +1215,8 @@ mod tests {
             },
             thread::{Builder, JoinHandle},
             time::Duration,
-        }, transaction::MessageHash
+        },
+        transaction::MessageHash,
     };
 
     fn execute_transactions_with_dummy_poh_service(
@@ -3035,7 +3093,6 @@ mod tests {
                 reached_max_poh_height,
                 transaction_counts,
                 retryable_transaction_indexes,
-                error_counters,
                 ..
             },
             _,
@@ -3052,10 +3109,7 @@ mod tests {
                 processed_but_failed_commit: 0,
             }
         );
-        assert_eq!(
-            retryable_transaction_indexes,
-            Vec::<usize>::new(),
-        );
+        assert_eq!(retryable_transaction_indexes, Vec::<usize>::new(),);
     }
 
     pub fn create_test_recorder(
@@ -3266,15 +3320,10 @@ mod tests {
             Some(tip_processing_dependencies),
         );
 
-        let transactions = std::thread::spawn(move || get_executed_txns(&entry_receiver, Duration::from_secs(5)));
+        let transactions =
+            std::thread::spawn(move || get_executed_txns(&entry_receiver, Duration::from_secs(5)));
 
-        let result = consumer.process_transactions(
-            &bank,
-            &Instant::now(),
-            &txns,
-            &|_| 0,
-            false,
-        );
+        let _ = consumer.process_transactions(&bank, &Instant::now(), &txns, &|_| 0, false);
 
         let transactions = transactions.join().unwrap();
 
