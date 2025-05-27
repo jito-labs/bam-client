@@ -75,7 +75,7 @@ impl<Tx: TransactionWithMeta> FifoBatchScheduler<Tx> {
     /// Gets accessed accounts (resources) for use in `PrioGraph`.
     fn get_transactions_account_access<'a>(
         transactions: impl Iterator<Item = &'a SanitizedTransactionTTL<impl SVMMessage + 'a>> + 'a,
-    ) -> impl Iterator<Item = (&'a Pubkey, AccessKind)> + 'a {
+    ) -> impl Iterator<Item = (Pubkey, AccessKind)> + 'a {
         transactions.flat_map(|transaction| {
             let message = &transaction.transaction;
             message
@@ -84,9 +84,9 @@ impl<Tx: TransactionWithMeta> FifoBatchScheduler<Tx> {
                 .enumerate()
                 .map(|(index, key)| {
                     if message.is_writable(index) {
-                        (key, AccessKind::Write)
+                        (*key, AccessKind::Write)
                     } else {
-                        (key, AccessKind::Read)
+                        (*key, AccessKind::Read)
                     }
                 })
         })
