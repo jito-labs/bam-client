@@ -63,7 +63,7 @@ impl JssManager {
             // Update if jss is enabled and sleep for a while before checking again
             dependencies
                 .jss_enabled
-                .store(current_connection.is_some(), Ordering::Relaxed);
+                .store(current_connection.is_some() && cached_builder_config.is_some(), Ordering::Relaxed);
 
             // If no connection then try to create a new one
             if current_connection.is_none() {
@@ -106,6 +106,7 @@ impl JssManager {
             let url = jss_url.lock().unwrap().clone();
             if Some(connection.url().to_string()) != url {
                 current_connection = None;
+                cached_builder_config = None;
                 info!("JSS URL changed");
                 continue;
             }
