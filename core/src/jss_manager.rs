@@ -58,6 +58,7 @@ impl JssManager {
             .unwrap();
 
         let mut current_connection = None;
+        let mut cached_builder_config = None;
         while !exit.load(Ordering::Relaxed) {
             // Update if jss is enabled and sleep for a while before checking again
             dependencies
@@ -111,14 +112,14 @@ impl JssManager {
 
             // Check if block builder info has changed
             if let Some(builder_config) = connection.get_builder_config() {
-                // Update tpu if needed
-                Self::update_tpu_config(Some(&builder_config), &dependencies.cluster_info);
-
-                // Update commission if needed
-                Self::update_key_and_commission(
-                    Some(&builder_config),
-                    &dependencies.block_builder_fee_info,
-                );
+                if Some(&builder_config) != cached_builder_config.as_ref() {
+                    Self::update_tpu_config(Some(&builder_config), &dependencies.cluster_info);
+                    Self::update_key_and_commission(
+                        Some(&builder_config),
+                        &dependencies.block_builder_fee_info,
+                    );
+                    cached_builder_config = Some(builder_config);
+                }
             }
 
             // Send leader state if we are in a leader slot
