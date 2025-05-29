@@ -218,8 +218,16 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                 }
             }
             BufferedPacketsDecision::ForwardAndHold | BufferedPacketsDecision::Forward => {
+                // Send back any bundles that were received while in Forward/Hold state
                 while let Ok(bundle) = self.bundle_receiver.try_recv() {
                     self.send_retryable_bundle_result(bundle.seq_id);
+                }
+
+                // Send back all packets in container
+                while let Some(id) = container.pop() {
+                    let seq_id = id.priority;
+                    self.send_retryable_bundle_result(seq_id as u32);
+                    container.remove_by_id(id.id);
                 }
             }
         }

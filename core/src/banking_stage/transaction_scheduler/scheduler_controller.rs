@@ -65,8 +65,8 @@ where
     forwarder: Option<Forwarder<C>>,
     /// Blacklisted accounts
     blacklisted_accounts: HashSet<Pubkey>,
-    /// Never hold packets, drop them instead.
-    hold_enabled: bool,
+    /// Don't clean the container/queue if true.
+    disable_container_cleaning: bool,
 }
 
 impl<C, R, S> SchedulerController<C, R, S>
@@ -83,7 +83,7 @@ where
         worker_metrics: Vec<Arc<ConsumeWorkerMetrics>>,
         forwarder: Option<Forwarder<C>>,
         blacklisted_accounts: HashSet<Pubkey>,
-        hold_enabled: bool,
+        disable_container_cleaning: bool,
     ) -> Self {
         Self {
             decision_maker,
@@ -97,7 +97,7 @@ where
             worker_metrics,
             forwarder,
             blacklisted_accounts,
-            hold_enabled,
+            disable_container_cleaning,
         }
     }
 
@@ -208,12 +208,7 @@ where
                 }
             }
             BufferedPacketsDecision::ForwardAndHold => {
-                if !self.hold_enabled {
-                    let (_, clear_time_us) = measure_us!(self.clear_container());
-                    self.timing_metrics.update(|timing_metrics| {
-                        saturating_add_assign!(timing_metrics.clear_time_us, clear_time_us);
-                    });
-                } else if forwarding_enabled {
+                if forwarding_enabled {
                     let (_, forward_time_us) = measure_us!(self.forward_packets(true));
                     self.timing_metrics.update(|timing_metrics| {
                         saturating_add_assign!(timing_metrics.forward_time_us, forward_time_us);
@@ -225,14 +220,7 @@ where
                     });
                 }
             }
-            BufferedPacketsDecision::Hold => {
-                if !self.hold_enabled {
-                    let (_, clear_time_us) = measure_us!(self.clear_container());
-                    self.timing_metrics.update(|timing_metrics| {
-                        saturating_add_assign!(timing_metrics.clear_time_us, clear_time_us);
-                    });
-                }
-            }
+            BufferedPacketsDecision::Hold => {}
         }
 
         Ok(())
@@ -366,6 +354,10 @@ where
     /// Clears the transaction state container.
     /// This only clears pending transactions, and does **not** clear in-flight transactions.
     fn clear_container(&mut self) {
+        if self.disable_container_cleaning {
+            return;
+        }
+
         let mut num_dropped_on_clear: usize = 0;
         while let Some(id) = self.container.pop() {
             self.container.remove_by_id(id.id);
@@ -381,6 +373,10 @@ where
     /// expired, already processed, or are no longer sanitizable.
     /// This only clears pending transactions, and does **not** clear in-flight transactions.
     fn clean_queue(&mut self) {
+        if self.disable_container_cleaning {
+            return;
+        }
+
         // Clean up any transactions that have already been processed, are too old, or do not have
         // valid nonce accounts.
         const MAX_TRANSACTION_CHECKS: usize = 10_000;
