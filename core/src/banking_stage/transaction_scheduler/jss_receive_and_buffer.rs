@@ -2,10 +2,10 @@
 /// and buffers from into the the `TransactionStateContainer`. Key thing to note:
 /// this implementation only functions during the `Consume/Hold` phase; otherwise it will send them back
 /// to JSS with a `Retryable` result.
-use std::sync::{
+use std::{sync::{
     atomic::{AtomicBool, Ordering},
     Arc, RwLock,
-};
+}, time::{Duration, Instant}};
 
 use crossbeam_channel::{unbounded, Sender};
 use itertools::Itertools;
@@ -146,9 +146,10 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
         }
 
         let mut result = 0;
+        let deadline = Instant::now() + Duration::from_millis(5);
         match decision {
             BufferedPacketsDecision::Consume(_) | BufferedPacketsDecision::Hold => {
-                while let Ok(bundle) = self.bundle_receiver.try_recv() {
+                while let Ok(bundle) = self.bundle_receiver.recv_deadline(deadline) {
                     if bundle.packets.len() == 0 {
                         continue;
                     }
@@ -229,7 +230,7 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
             }
             BufferedPacketsDecision::ForwardAndHold | BufferedPacketsDecision::Forward => {
                 // Send back any bundles that were received while in Forward/Hold state
-                while let Ok(bundle) = self.bundle_receiver.try_recv() {
+                while let Ok(bundle) = self.bundle_receiver.recv_deadline(deadline) {
                     self.send_retryable_bundle_result(bundle.seq_id);
                 }
 
