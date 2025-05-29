@@ -114,7 +114,6 @@ impl ReceiveAndBuffer for SanitizedTransactionReceiveAndBuffer {
 
         // If jss enabled; we will throw away all packets.
         if self.jss_enabled.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(10));
             return Ok(0);
         }
 
@@ -410,7 +409,6 @@ impl TransactionViewReceiveAndBuffer {
     ) -> usize {
         // If jss enabled; we will throw away all packets.
         if self.jss_enabled.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(10));
             return 0;
         }
 
