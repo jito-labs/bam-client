@@ -27,8 +27,7 @@ use crate::banking_stage::{
 };
 
 use super::{
-    receive_and_buffer::{ReceiveAndBuffer, SanitizedTransactionReceiveAndBuffer},
-    transaction_state_container::TransactionStateContainer,
+    receive_and_buffer::{ReceiveAndBuffer, SanitizedTransactionReceiveAndBuffer}, transaction_priority_id::TransactionPriorityId, transaction_state_container::TransactionStateContainer
 };
 
 use crate::banking_stage::transaction_scheduler::transaction_state_container::StateContainer;
@@ -38,6 +37,7 @@ pub struct JssReceiveAndBuffer {
     bundle_receiver: crossbeam_channel::Receiver<Bundle>,
     response_sender: Sender<StartSchedulerMessage>,
     internal_receive_and_buffer: SanitizedTransactionReceiveAndBuffer,
+    received_ids: Vec<TransactionPriorityId>,
 }
 
 impl JssReceiveAndBuffer {
@@ -58,6 +58,7 @@ impl JssReceiveAndBuffer {
             bundle_receiver,
             response_sender,
             internal_receive_and_buffer,
+            received_ids: vec![],
         }
     }
 
@@ -206,13 +207,22 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                         continue;
                     }
 
-                    container.insert_new_batch(
+                    let priority = u64::MAX.saturating_sub(bundle.seq_id as u64);
+                    let Some(batch_id) = container.insert_new_batch(
                         transaction_ttls,
                         packets,
-                        u64::MAX.saturating_sub(bundle.seq_id as u64),
+                        priority,
                         cost,
                         revert_on_error,
-                    );
+                    ) else {
+                        self.send_retryable_bundle_result(bundle.seq_id);
+                        continue;
+                    };
+
+                    self.received_ids.push(TransactionPriorityId::new(
+                        priority,
+                        batch_id,
+                    ));
 
                     result += 1;
                 }
@@ -223,12 +233,20 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                     self.send_retryable_bundle_result(bundle.seq_id);
                 }
 
-                // Send back all packets in container
+                // Send back all packets in queue
                 while let Some(id) = container.pop() {
                     let seq_id = id.priority;
                     self.send_retryable_bundle_result(seq_id as u32);
                     container.remove_by_id(id.id);
                 }
+
+                // Send back all bundle seq_ids that were already received
+                let mut received_ids = std::mem::take(&mut self.received_ids);
+                for TransactionPriorityId{ priority, id } in received_ids.drain(..) {
+                    self.send_retryable_bundle_result(priority as u32);
+                    container.remove_by_id(id);
+                }
+                std::mem::swap(&mut self.received_ids, &mut received_ids);
             }
         }
 
