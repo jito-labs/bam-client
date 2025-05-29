@@ -229,13 +229,6 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                 while let Ok(bundle) = self.bundle_receiver.recv_deadline(deadline) {
                     self.send_retryable_bundle_result(bundle.seq_id);
                 }
-
-                // Send back all packets in queue
-                while let Some(id) = container.pop() {
-                    let seq_id = id.priority;
-                    self.send_retryable_bundle_result(seq_id as u32);
-                    container.remove_by_id(id.id);
-                }
             }
         }
 
