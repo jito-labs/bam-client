@@ -230,13 +230,17 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
             .retryable_expired_bank_count
             .fetch_add(num_retryable, Ordering::Relaxed);
         self.metrics.has_data.store(true, Ordering::Relaxed);
-        let extra_info = Some(FinishedConsumeWorkExtraInfo {
-            results: (0..work.transactions.len())
-                .map(|_| {
-                    bundle_result::Result::Retryable(jito_protos::proto::jss_types::Retryable {})
-                })
-                .collect(),
-        });
+        let extra_info =  if work.respond_with_extra_info {
+            Some(FinishedConsumeWorkExtraInfo {
+                results: (0..work.transactions.len())
+                    .map(|_| {
+                        bundle_result::Result::Retryable(jito_protos::proto::jss_types::Retryable {})
+                    })
+                    .collect(),
+            })
+        } else {
+            None
+        };
         self.consumed_sender.send(FinishedConsumeWork {
             work,
             retryable_indexes,
