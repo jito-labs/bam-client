@@ -725,7 +725,7 @@ impl BankingStage {
                             scheduler_worker_metrics,
                             forwarder,
                             scheduler_blacklisted_accounts,
-                            true,
+                            false,
                         );
 
                         match scheduler_controller.run() {
@@ -756,7 +756,7 @@ impl BankingStage {
                             scheduler_worker_metrics,
                             forwarder,
                             scheduler_blacklisted_accounts,
-                            true,
+                            false,
                         );
 
                         match scheduler_controller.run() {
@@ -838,7 +838,7 @@ impl BankingStage {
                             worker_metrics,
                             Option::<Forwarder<DummyLikeClusterInfo>>::None,
                             blacklisted_accounts.clone(),
-                            false,
+                            true,
                         );
 
                         match scheduler_controller.run() {
