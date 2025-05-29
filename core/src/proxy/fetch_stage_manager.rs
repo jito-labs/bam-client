@@ -76,7 +76,6 @@ impl FetchStageManager {
             let mut fetch_connected = true;
             let mut heartbeat_received = false;
             let mut pending_disconnect = false;
-            let mut jss_enabled_prev = false;
 
             let mut pending_disconnect_ts = Instant::now();
 
@@ -84,22 +83,8 @@ impl FetchStageManager {
             let metrics_tick = tick(METRICS_CADENCE);
             let mut packets_forwarded = 0;
             let mut heartbeats_received = 0;
-            loop {
-                if exit.load(Ordering::Relaxed) {
-                    break;
-                }
-
-                let jss_enabled = jss_enabled.load(Ordering::Relaxed);
-                if jss_enabled != jss_enabled_prev {
-                    if jss_enabled {
-                        info!("jss enabled, pausing fetch stage");
-                    } else {
-                        info!("jss disabled, resuming fetch stage");
-                    }
-                    jss_enabled_prev = jss_enabled;
-                }
-                
-                if jss_enabled_prev {
+            while !exit.load(Ordering::Relaxed) {
+                if jss_enabled.load(Ordering::Relaxed) {
                     fetch_connected = false;
                     heartbeat_received = false;
                     pending_disconnect = false;
