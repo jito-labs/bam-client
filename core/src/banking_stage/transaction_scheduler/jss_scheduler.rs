@@ -255,9 +255,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
 
             // Send the result back to the scheduler
             if let Some(extra_info) = result.extra_info {
-                for bundle_result in extra_info.results.into_iter() {
-                    self.send_back_result(seq_id, bundle_result);
-                }
+                self.send_back_result(seq_id, extra_info.result);
             }
 
             // A new era started while you were gone
