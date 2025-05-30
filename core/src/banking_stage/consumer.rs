@@ -575,7 +575,10 @@ impl Consumer {
         let check_results =
             bank.check_transactions(txs, &pre_results, MAX_PROCESSING_AGE, &mut error_counters);
         if revert_on_error && check_results.iter().any(|result| result.is_err()) {
-            info!("process_and_record_transactions revert_on_error check_results= {:?}", check_results);
+            info!(
+                "process_and_record_transactions revert_on_error check_results= {:?}",
+                check_results
+            );
             return Self::early_bailout_batch_output(txs.len(), false);
         }
 
@@ -598,7 +601,10 @@ impl Consumer {
             })
             .collect();
         if revert_on_error && check_results.iter().any(|result| result.is_err()) {
-            info!("process_and_record_transactions revert_on_error check_results= {:?}", check_results);
+            info!(
+                "process_and_record_transactions revert_on_error check_results= {:?}",
+                check_results
+            );
             return Self::early_bailout_batch_output(txs.len(), false);
         }
 
@@ -704,11 +710,12 @@ impl Consumer {
                 execute_and_commit_transactions_output: ExecuteAndCommitTransactionsOutput {
                     transaction_counts: LeaderProcessedTransactionCounts {
                         attempted_processing_count: txs.len() as u64,
-                        .. Default::default()
+                        ..Default::default()
                     },
                     retryable_transaction_indexes: (0..txs.len()).collect(),
                     commit_transactions_result: Ok(vec![
-                        CommitTransactionDetails::NotCommitted; txs.len()
+                        CommitTransactionDetails::NotCommitted;
+                        txs.len()
                     ]),
                     execute_and_commit_timings: LeaderExecuteAndCommitTimings::default(),
                     error_counters: TransactionErrorMetrics::default(),
