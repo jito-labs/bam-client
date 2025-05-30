@@ -287,7 +287,8 @@ impl Consumer {
                 bank,
                 bank_creation_time,
                 sanitized_transactions,
-                reservation_cb
+                reservation_cb,
+                revert_on_error,
             ));
         slot_metrics_tracker.increment_process_transactions_us(process_transactions_us);
         banking_stage_stats
