@@ -25,6 +25,7 @@ pub struct TransactionBatch<'a, 'b, Tx: SVMMessage> {
     bank: &'a Bank,
     sanitized_txs: OwnedOrBorrowed<'b, Tx>,
     needs_unlock: bool,
+    batched_locking: bool,
 }
 
 impl<'a, 'b, Tx: SVMMessage> TransactionBatch<'a, 'b, Tx> {
@@ -39,6 +40,22 @@ impl<'a, 'b, Tx: SVMMessage> TransactionBatch<'a, 'b, Tx> {
             bank,
             sanitized_txs,
             needs_unlock: true,
+            batched_locking: false,
+        }
+    }
+
+    pub fn new_batched(
+        lock_results: Vec<Result<()>>,
+        bank: &'a Bank,
+        sanitized_txs: OwnedOrBorrowed<'b, Tx>,
+    ) -> Self {
+        assert_eq!(lock_results.len(), sanitized_txs.len());
+        Self {
+            lock_results,
+            bank,
+            sanitized_txs,
+            needs_unlock: true,
+            batched_locking: true,
         }
     }
 
@@ -87,7 +104,8 @@ impl<'a, 'b, Tx: SVMMessage> TransactionBatch<'a, 'b, Tx> {
 
         // Unlock the accounts for all transactions which will be updated to an
         // lock error below.
-        self.bank.unlock_accounts(txs_and_results);
+        self.bank
+            .unlock_accounts(txs_and_results, self.batched_locking);
 
         // Record all new errors by overwriting lock results. Note that it's
         // not valid to update from err -> ok and the assertion above enforces
@@ -105,6 +123,7 @@ impl<Tx: SVMMessage> Drop for TransactionBatch<'_, '_, Tx> {
                 self.sanitized_transactions()
                     .iter()
                     .zip(self.lock_results()),
+                self.batched_locking,
             )
         }
     }
