@@ -445,8 +445,9 @@ where
         &mut self,
         decision: &BufferedPacketsDecision,
     ) -> Result<(), SchedulerError> {
-        let ((num_transactions, num_retryable), receive_completed_time_us) =
-            measure_us!(self.scheduler.receive_completed(&mut self.container, decision)?);
+        let ((num_transactions, num_retryable), receive_completed_time_us) = measure_us!(self
+            .scheduler
+            .receive_completed(&mut self.container, decision)?);
 
         self.count_metrics.update(|count_metrics| {
             saturating_add_assign!(count_metrics.num_finished, num_transactions);
