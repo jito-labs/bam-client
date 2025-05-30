@@ -2,10 +2,13 @@
 /// and buffers from into the the `TransactionStateContainer`. Key thing to note:
 /// this implementation only functions during the `Consume/Hold` phase; otherwise it will send them back
 /// to JSS with a `Retryable` result.
-use std::{sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, RwLock,
-}, time::{Duration, Instant}};
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, RwLock,
+    },
+    time::{Duration, Instant},
+};
 
 use crossbeam_channel::{unbounded, Sender};
 use itertools::Itertools;
@@ -27,7 +30,8 @@ use crate::banking_stage::{
 };
 
 use super::{
-    receive_and_buffer::{ReceiveAndBuffer, SanitizedTransactionReceiveAndBuffer}, transaction_state_container::TransactionStateContainer
+    receive_and_buffer::{ReceiveAndBuffer, SanitizedTransactionReceiveAndBuffer},
+    transaction_state_container::TransactionStateContainer,
 };
 
 use crate::banking_stage::transaction_scheduler::transaction_state_container::StateContainer;
@@ -210,13 +214,16 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                     }
 
                     let priority = u64::MAX.saturating_sub(bundle.seq_id as u64);
-                    if container.insert_new_batch(
-                        transaction_ttls,
-                        packets,
-                        priority,
-                        cost,
-                        revert_on_error,
-                    ).is_none() {
+                    if container
+                        .insert_new_batch(
+                            transaction_ttls,
+                            packets,
+                            priority,
+                            cost,
+                            revert_on_error,
+                        )
+                        .is_none()
+                    {
                         self.send_retryable_bundle_result(bundle.seq_id);
                         continue;
                     };

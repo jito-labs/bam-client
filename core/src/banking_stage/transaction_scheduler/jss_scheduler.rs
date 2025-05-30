@@ -6,16 +6,20 @@ use std::time::Instant;
 
 use ahash::HashMap;
 use crossbeam_channel::{Receiver, Sender};
-use jito_protos::proto::{jss_api::{start_scheduler_message::Msg, StartSchedulerMessage}, jss_types::bundle_result};
+use jito_protos::proto::{
+    jss_api::{start_scheduler_message::Msg, StartSchedulerMessage},
+    jss_types::bundle_result,
+};
 use prio_graph::{AccessKind, GraphNode, PrioGraph};
 use solana_pubkey::Pubkey;
 use solana_runtime_transaction::transaction_with_meta::TransactionWithMeta;
 use solana_sdk::clock::Slot;
 use solana_svm_transaction::svm_message::SVMMessage;
 
-use crate::banking_stage::{decision_maker::BufferedPacketsDecision, scheduler_messages::{
-    ConsumeWork, FinishedConsumeWork, TransactionBatchId,
-}};
+use crate::banking_stage::{
+    decision_maker::BufferedPacketsDecision,
+    scheduler_messages::{ConsumeWork, FinishedConsumeWork, TransactionBatchId},
+};
 
 use super::{
     scheduler::{Scheduler, SchedulingSummary},
@@ -277,7 +281,8 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
         // Drain prio-graph and send back 'retryable'
         while let Some((next_batch_id, _)) = self.prio_graph.pop_and_unblock() {
             self.send_retryable_bundle_result(next_batch_id.id as u32);
-            self.inflight_batch_info.remove(&TransactionBatchId::new(next_batch_id.id as u64));
+            self.inflight_batch_info
+                .remove(&TransactionBatchId::new(next_batch_id.id as u64));
         }
 
         Ok((num_transactions, 0))
