@@ -41,7 +41,7 @@ fn passthrough_priority(
 
 const MAX_SCHEDULED_PER_WORKER: usize = 2;
 
-pub struct FifoBatchScheduler<Tx: TransactionWithMeta> {
+pub struct JssScheduler<Tx: TransactionWithMeta> {
     workers_scheduled_count: Vec<usize>,
     consume_work_senders: Vec<Sender<ConsumeWork<Tx>>>,
     finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
@@ -56,7 +56,7 @@ struct InflightBatchInfo {
     pub worker_index: usize,
 }
 
-impl<Tx: TransactionWithMeta> FifoBatchScheduler<Tx> {
+impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
     pub fn new(
         consume_work_senders: Vec<Sender<ConsumeWork<Tx>>>,
         finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
@@ -184,7 +184,7 @@ impl<Tx: TransactionWithMeta> FifoBatchScheduler<Tx> {
     }
 }
 
-impl<Tx: TransactionWithMeta> Scheduler<Tx> for FifoBatchScheduler<Tx> {
+impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
     fn schedule<S: StateContainer<Tx>>(
         &mut self,
         container: &mut S,
@@ -235,6 +235,8 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for FifoBatchScheduler<Tx> {
             container.remove_by_id(inflight_batch_info.priority_id.id);
             self.workers_scheduled_count[inflight_batch_info.worker_index] -= 1;
         }
+
+        // TODO_DG: Check for slot boundary
 
         Ok((num_transactions, 0))
     }
