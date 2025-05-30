@@ -11,7 +11,7 @@ use qualifier_attr::qualifiers;
 use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
 use solana_sdk::transaction::SanitizedTransaction;
 use transaction_scheduler::{
-    jss_scheduler::JssScheduler, jss_receive_and_buffer::JssReceiveAndBuffer,
+    jss_receive_and_buffer::JssReceiveAndBuffer, jss_scheduler::JssScheduler,
 };
 
 use {

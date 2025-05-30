@@ -8,16 +8,23 @@ use {
         accounts_index::{IndexKey, ScanConfig, ScanError, ScanResult},
         ancestors::Ancestors,
         storable_accounts::StorableAccounts,
-    }, dashmap::DashMap, log::*, solana_pubkey::Pubkey, solana_sdk::{
+    },
+    dashmap::DashMap,
+    log::*,
+    solana_pubkey::Pubkey,
+    solana_sdk::{
         account::{AccountSharedData, ReadableAccount},
         address_lookup_table::{self, error::AddressLookupError, state::AddressLookupTable},
         clock::{BankId, Slot},
         message::v0::LoadedAddresses,
         slot_hashes::SlotHashes,
         transaction::{Result, SanitizedTransaction, TransactionError},
-    }, solana_svm_transaction::{
+    },
+    solana_svm_transaction::{
         message_address_table_lookup::SVMMessageAddressTableLookup, svm_message::SVMMessage,
-    }, solana_transaction_context::TransactionAccount, std::{
+    },
+    solana_transaction_context::TransactionAccount,
+    std::{
         cmp::Reverse,
         collections::{BinaryHeap, HashSet},
         ops::RangeBounds,
@@ -25,7 +32,7 @@ use {
             atomic::{AtomicUsize, Ordering},
             Arc, Mutex,
         },
-    }
+    },
 };
 
 pub type PubkeyAccountSlot = (Pubkey, AccountSharedData, Slot);
@@ -654,12 +661,15 @@ impl Accounts {
         for (tx, res) in txs_and_results {
             if res.is_ok() {
                 let tx_account_locks = TransactionAccountLocksIterator::new(tx);
-                account_locks.unlock_accounts(tx_account_locks.accounts_with_is_writable().filter(
-                    |lock| !already_unlocked_in_batch.contains(&(*lock.0, lock.1))
-                ));
+                account_locks.unlock_accounts(
+                    tx_account_locks
+                        .accounts_with_is_writable()
+                        .filter(|lock| !already_unlocked_in_batch.contains(&(*lock.0, lock.1))),
+                );
                 already_unlocked_in_batch.extend(
                     tx_account_locks
-                        .accounts_with_is_writable().map(|(pubkey, writable)| (*pubkey, writable)),
+                        .accounts_with_is_writable()
+                        .map(|(pubkey, writable)| (*pubkey, writable)),
                 );
             }
         }
