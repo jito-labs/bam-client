@@ -213,7 +213,7 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                         continue;
                     }
 
-                    let priority = u64::MAX.saturating_sub(bundle.seq_id as u64);
+                    let priority = seq_id_to_priority(bundle.seq_id);
                     if container
                         .insert_new_batch(
                             transaction_ttls,
@@ -241,4 +241,12 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
 
         Ok(result)
     }
+}
+
+pub fn seq_id_to_priority(seq_id: u32) -> u64 {
+    u64::MAX.saturating_sub(seq_id as u64)
+}
+
+pub fn priority_to_seq_id(priority: u64) -> u32 {
+    u32::try_from(u64::MAX.saturating_sub(priority)).unwrap_or(u32::MAX)
 }
