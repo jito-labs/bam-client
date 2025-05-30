@@ -6,15 +6,16 @@ use std::time::Instant;
 
 use ahash::HashMap;
 use crossbeam_channel::{Receiver, Sender};
-use jito_protos::proto::jss_api::{start_scheduler_message::Msg, StartSchedulerMessage};
+use jito_protos::proto::{jss_api::{start_scheduler_message::Msg, StartSchedulerMessage}, jss_types::bundle_result};
 use prio_graph::{AccessKind, GraphNode, PrioGraph};
 use solana_pubkey::Pubkey;
 use solana_runtime_transaction::transaction_with_meta::TransactionWithMeta;
+use solana_sdk::clock::Slot;
 use solana_svm_transaction::svm_message::SVMMessage;
 
-use crate::banking_stage::scheduler_messages::{
+use crate::banking_stage::{decision_maker::BufferedPacketsDecision, scheduler_messages::{
     ConsumeWork, FinishedConsumeWork, TransactionBatchId,
-};
+}};
 
 use super::{
     scheduler::{Scheduler, SchedulingSummary},
@@ -49,6 +50,7 @@ pub struct JssScheduler<Tx: TransactionWithMeta> {
 
     inflight_batch_info: HashMap<TransactionBatchId, InflightBatchInfo>,
     prio_graph: SchedulerPrioGraph,
+    slot: Slot,
 }
 
 struct InflightBatchInfo {
@@ -69,6 +71,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
             response_sender,
             inflight_batch_info: HashMap::default(),
             prio_graph: PrioGraph::new(passthrough_priority),
+            slot: 0,
         }
     }
 
@@ -182,6 +185,19 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
             *num_scheduled += 1;
         }
     }
+
+    fn send_retryable_bundle_result(&self, seq_id: u32) {
+        let _ = self.response_sender.try_send(StartSchedulerMessage {
+            msg: Some(Msg::BundleResult(
+                jito_protos::proto::jss_types::BundleResult {
+                    seq_id: seq_id,
+                    result: Some(bundle_result::Result::Retryable(
+                        jito_protos::proto::jss_types::Retryable {},
+                    )),
+                },
+            )),
+        });
+    }
 }
 
 impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
@@ -205,9 +221,14 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
         })
     }
 
+    /// Receive completed batches of transactions without blocking.
+    /// This also handles checking if the slot has ended and if so, it will
+    /// drain the container and prio-graph, sending back 'retryable' results
+    /// back to JSS.
     fn receive_completed(
         &mut self,
         container: &mut impl StateContainer<Tx>,
+        decision: &BufferedPacketsDecision,
     ) -> Result<(usize, usize), SchedulerError> {
         let mut num_transactions = 0;
         while let Ok(result) = self.finished_consume_work_receiver.try_recv() {
@@ -229,14 +250,35 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
 
             let batch_id = result.work.batch_id;
             let Some(inflight_batch_info) = self.inflight_batch_info.remove(&batch_id) else {
-                panic!("Batch {} not found in priority ids", batch_id);
+                error!("Batch {} not found in inflight info", batch_id.0);
+                continue;
             };
             self.prio_graph.unblock(&inflight_batch_info.priority_id);
             container.remove_by_id(inflight_batch_info.priority_id.id);
             self.workers_scheduled_count[inflight_batch_info.worker_index] -= 1;
         }
 
-        // TODO_DG: Check for slot boundary
+        let Some(bank_start) = decision.bank_start() else {
+            return Ok((num_transactions, 0));
+        };
+        let incoming_slot = bank_start.working_bank.slot();
+        if self.slot == incoming_slot {
+            return Ok((num_transactions, 0));
+        }
+
+        self.slot = incoming_slot;
+
+        // Drain container and send back 'retryable'
+        while let Some(next_batch_id) = container.pop() {
+            self.send_retryable_bundle_result(next_batch_id.id as u32);
+            container.remove_by_id(next_batch_id.id);
+        }
+
+        // Drain prio-graph and send back 'retryable'
+        while let Some((next_batch_id, _)) = self.prio_graph.pop_and_unblock() {
+            self.send_retryable_bundle_result(next_batch_id.id as u32);
+            self.inflight_batch_info.remove(&TransactionBatchId::new(next_batch_id.id as u64));
+        }
 
         Ok((num_transactions, 0))
     }

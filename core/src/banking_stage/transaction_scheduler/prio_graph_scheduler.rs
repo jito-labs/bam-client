@@ -7,15 +7,12 @@ use {
         transaction_state::SanitizedTransactionTTL,
     },
     crate::banking_stage::{
-        consumer::TARGET_NUM_TRANSACTIONS_PER_BATCH,
-        read_write_account_set::ReadWriteAccountSet,
-        scheduler_messages::{
+        consumer::TARGET_NUM_TRANSACTIONS_PER_BATCH, decision_maker::BufferedPacketsDecision, read_write_account_set::ReadWriteAccountSet, scheduler_messages::{
             ConsumeWork, FinishedConsumeWork, MaxAge, TransactionBatchId, TransactionId,
-        },
-        transaction_scheduler::{
+        }, transaction_scheduler::{
             scheduler::SchedulingSummary, transaction_priority_id::TransactionPriorityId,
             transaction_state::TransactionState, transaction_state_container::StateContainer,
-        },
+        }
     },
     crossbeam_channel::{Receiver, Sender, TryRecvError},
     itertools::izip,
@@ -327,6 +324,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for PrioGraphScheduler<Tx> {
     fn receive_completed(
         &mut self,
         container: &mut impl StateContainer<Tx>,
+        _: &BufferedPacketsDecision,
     ) -> Result<(usize, usize), SchedulerError> {
         let mut total_num_transactions: usize = 0;
         let mut total_num_retryable: usize = 0;
@@ -895,7 +893,7 @@ mod tests {
                 extra_info: None,
             })
             .unwrap();
-        scheduler.receive_completed(&mut container).unwrap();
+        scheduler.receive_completed(&mut container, &BufferedPacketsDecision::Hold).unwrap();
         let scheduling_summary = scheduler
             .schedule(&mut container, test_pre_graph_filter, test_pre_lock_filter)
             .unwrap();
