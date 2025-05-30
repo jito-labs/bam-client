@@ -110,12 +110,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
 
             let txns = batch_ids
                 .iter()
-                .filter_map(|txn_id| container.get_transaction_ttl(*txn_id))
-                .collect::<Vec<_>>();
-            if txns.len() != batch_ids.len() {
-                error!("All batch transactions not found in container");
-                continue;
-            }
+                .filter_map(|txn_id| container.get_transaction_ttl(*txn_id));
 
             self.prio_graph.insert_transaction(
                 next_batch_id,
