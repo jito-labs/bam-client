@@ -126,7 +126,7 @@ where
             self.timing_metrics
                 .maybe_report_and_reset_slot(new_leader_slot);
 
-            self.receive_completed()?;
+            self.receive_completed(&decision)?;
             self.process_transactions(&decision)?;
             if self.receive_and_buffer_packets(&decision).is_err() {
                 break;
@@ -438,9 +438,12 @@ where
     }
 
     /// Receives completed transactions from the workers and updates metrics.
-    fn receive_completed(&mut self) -> Result<(), SchedulerError> {
+    fn receive_completed(
+        &mut self,
+        decision: &BufferedPacketsDecision,
+    ) -> Result<(), SchedulerError> {
         let ((num_transactions, num_retryable), receive_completed_time_us) =
-            measure_us!(self.scheduler.receive_completed(&mut self.container)?);
+            measure_us!(self.scheduler.receive_completed(&mut self.container, decision)?);
 
         self.count_metrics.update(|count_metrics| {
             saturating_add_assign!(count_metrics.num_finished, num_transactions);
@@ -674,7 +677,7 @@ mod tests {
             .decision_maker
             .make_consume_or_forward_decision();
         assert!(matches!(decision, BufferedPacketsDecision::Consume(_)));
-        assert!(scheduler_controller.receive_completed().is_ok());
+        assert!(scheduler_controller.receive_completed(&decision).is_ok());
 
         // Time is not a reliable way for deterministic testing.
         // Loop here until no more packets are received, this avoids parallel

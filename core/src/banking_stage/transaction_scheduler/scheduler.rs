@@ -1,6 +1,5 @@
 use {
-    super::{scheduler_error::SchedulerError, transaction_state_container::StateContainer},
-    solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
+    super::{scheduler_error::SchedulerError, transaction_state_container::StateContainer}, crate::banking_stage::decision_maker::BufferedPacketsDecision, solana_runtime_transaction::transaction_with_meta::TransactionWithMeta
 };
 
 pub(crate) trait Scheduler<Tx: TransactionWithMeta> {
@@ -19,6 +18,7 @@ pub(crate) trait Scheduler<Tx: TransactionWithMeta> {
     fn receive_completed(
         &mut self,
         container: &mut impl StateContainer<Tx>,
+        decision: &BufferedPacketsDecision,
     ) -> Result<(usize, usize), SchedulerError>;
 }
 
