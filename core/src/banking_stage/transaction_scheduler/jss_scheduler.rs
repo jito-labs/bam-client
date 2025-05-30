@@ -22,6 +22,7 @@ use crate::banking_stage::{
 };
 
 use super::{
+    jss_receive_and_buffer::priority_to_seq_id,
     scheduler::{Scheduler, SchedulingSummary},
     scheduler_error::SchedulerError,
     transaction_priority_id::TransactionPriorityId,
@@ -60,6 +61,7 @@ pub struct JssScheduler<Tx: TransactionWithMeta> {
 struct InflightBatchInfo {
     pub priority_id: TransactionPriorityId,
     pub worker_index: usize,
+    pub slot: Slot,
 }
 
 impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
@@ -182,6 +184,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
                 InflightBatchInfo {
                     priority_id: next_batch_id,
                     worker_index,
+                    slot: self.slot,
                 },
             );
             self.workers_scheduled_count[worker_index] += 1;
@@ -198,6 +201,17 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
                     result: Some(bundle_result::Result::Retryable(
                         jito_protos::proto::jss_types::Retryable {},
                     )),
+                },
+            )),
+        });
+    }
+
+    fn send_back_result(&self, seq_id: u32, result: bundle_result::Result) {
+        let _ = self.response_sender.try_send(StartSchedulerMessage {
+            msg: Some(Msg::BundleResult(
+                jito_protos::proto::jss_types::BundleResult {
+                    seq_id,
+                    result: Some(result),
                 },
             )),
         });
@@ -237,52 +251,55 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
         let mut num_transactions = 0;
         while let Ok(result) = self.finished_consume_work_receiver.try_recv() {
             num_transactions += result.work.ids.len();
-
-            // Send the result back to the scheduler
-            if let Some(extra_info) = result.extra_info {
-                for bundle_result in extra_info.results.into_iter() {
-                    let _ = self.response_sender.try_send(StartSchedulerMessage {
-                        msg: Some(Msg::BundleResult(
-                            jito_protos::proto::jss_types::BundleResult {
-                                seq_id: result.work.batch_id.0 as u32,
-                                result: Some(bundle_result),
-                            },
-                        )),
-                    });
-                }
-            }
-
             let batch_id = result.work.batch_id;
             let Some(inflight_batch_info) = self.inflight_batch_info.remove(&batch_id) else {
                 error!("Batch {} not found in inflight info", batch_id.0);
                 continue;
             };
-            self.prio_graph.unblock(&inflight_batch_info.priority_id);
+            let seq_id = priority_to_seq_id(inflight_batch_info.priority_id.priority);
+
+            // Send the result back to the scheduler
+            if let Some(extra_info) = result.extra_info {
+                for bundle_result in extra_info.results.into_iter() {
+                    self.send_back_result(seq_id, bundle_result);
+                }
+            }
+
+            // A new era started while you were gone
+            if inflight_batch_info.slot == self.slot {
+                self.prio_graph.unblock(&inflight_batch_info.priority_id);
+            }
+
             container.remove_by_id(inflight_batch_info.priority_id.id);
             self.workers_scheduled_count[inflight_batch_info.worker_index] -= 1;
+        }
+
+        // Check if no bank or slot has changed
+        let bank_start = decision.bank_start();
+        if bank_start
+            .map(|bs| bs.working_bank.slot() == self.slot)
+            .unwrap_or_default()
+        {
+            return Ok((num_transactions, 0));
         }
 
         let Some(bank_start) = decision.bank_start() else {
             return Ok((num_transactions, 0));
         };
-        let incoming_slot = bank_start.working_bank.slot();
-        if self.slot == incoming_slot {
-            return Ok((num_transactions, 0));
-        }
-
-        self.slot = incoming_slot;
+        self.slot = bank_start.working_bank.slot();
 
         // Drain container and send back 'retryable'
         while let Some(next_batch_id) = container.pop() {
-            self.send_retryable_bundle_result(next_batch_id.id as u32);
+            let seq_id = priority_to_seq_id(next_batch_id.priority);
+            self.send_retryable_bundle_result(seq_id);
             container.remove_by_id(next_batch_id.id);
         }
 
         // Drain prio-graph and send back 'retryable'
         while let Some((next_batch_id, _)) = self.prio_graph.pop_and_unblock() {
-            self.send_retryable_bundle_result(next_batch_id.id as u32);
-            self.inflight_batch_info
-                .remove(&TransactionBatchId::new(next_batch_id.id as u64));
+            let seq_id = priority_to_seq_id(next_batch_id.priority);
+            self.send_retryable_bundle_result(seq_id);
+            container.remove_by_id(next_batch_id.id);
         }
 
         Ok((num_transactions, 0))
