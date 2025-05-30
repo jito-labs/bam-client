@@ -193,15 +193,12 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                     let mut transaction_ttls = vec![];
                     for _ in 0..bundle.packets.len() {
                         let Some(id) = tmp_container.pop() else {
-                            self.send_invalid_bundle_result(bundle.seq_id);
                             break;
                         };
                         let Some(entry) = tmp_container.get_mut_transaction_state(id.id) else {
-                            self.send_invalid_bundle_result(bundle.seq_id);
                             break;
                         };
                         let Some(packet) = entry.packet().cloned() else {
-                            self.send_invalid_bundle_result(bundle.seq_id);
                             break;
                         };
                         cost = cost.saturating_add(entry.cost());
