@@ -650,6 +650,7 @@ impl Accounts {
     pub fn unlock_accounts<'a, Tx: SVMMessage + 'a>(
         &self,
         txs_and_results: impl Iterator<Item = (&'a Tx, &'a Result<()>)> + Clone,
+        batched: bool,
     ) {
         if !txs_and_results.clone().any(|(_, res)| res.is_ok()) {
             return;
@@ -666,11 +667,14 @@ impl Accounts {
                         .accounts_with_is_writable()
                         .filter(|lock| !already_unlocked_in_batch.contains(&(*lock.0, lock.1))),
                 );
-                already_unlocked_in_batch.extend(
-                    tx_account_locks
-                        .accounts_with_is_writable()
-                        .map(|(pubkey, writable)| (*pubkey, writable)),
-                );
+
+                if batched {
+                    already_unlocked_in_batch.extend(
+                        tx_account_locks
+                            .accounts_with_is_writable()
+                            .map(|(pubkey, writable)| (*pubkey, writable)),
+                    );
+                }
             }
         }
     }
@@ -1028,7 +1032,7 @@ mod tests {
             let txs = vec![new_sanitized_tx(&[&keypair], message, Hash::default())];
             let results = accounts.lock_accounts(txs.iter(), MAX_TX_ACCOUNT_LOCKS);
             assert_eq!(results, vec![Ok(())]);
-            accounts.unlock_accounts(txs.iter().zip(&results));
+            accounts.unlock_accounts(txs.iter().zip(&results), false);
         }
 
         // Disallow over MAX_TX_ACCOUNT_LOCKS
@@ -1126,8 +1130,8 @@ mod tests {
             .unwrap()
             .is_locked_readonly(&keypair1.pubkey()));
 
-        accounts.unlock_accounts(iter::once(&tx).zip(&results0));
-        accounts.unlock_accounts(txs.iter().zip(&results1));
+        accounts.unlock_accounts(iter::once(&tx).zip(&results0), false);
+        accounts.unlock_accounts(txs.iter().zip(&results1), false);
         let instructions = vec![CompiledInstruction::new(2, &(), vec![0, 1])];
         let message = Message::new_with_compiled_instructions(
             1,
@@ -1208,7 +1212,7 @@ mod tests {
                     counter_clone.clone().fetch_add(1, Ordering::Release);
                 }
             }
-            accounts_clone.unlock_accounts(txs.iter().zip(&results));
+            accounts_clone.unlock_accounts(txs.iter().zip(&results), false);
             if exit_clone.clone().load(Ordering::Relaxed) {
                 break;
             }
@@ -1224,7 +1228,7 @@ mod tests {
                 thread::sleep(time::Duration::from_millis(50));
                 assert_eq!(counter_value, counter_clone.clone().load(Ordering::Acquire));
             }
-            accounts_arc.unlock_accounts(txs.iter().zip(&results));
+            accounts_arc.unlock_accounts(txs.iter().zip(&results), false);
             thread::sleep(time::Duration::from_millis(50));
         }
         exit.store(true, Ordering::Relaxed);
