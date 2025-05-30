@@ -11,7 +11,7 @@ use qualifier_attr::qualifiers;
 use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
 use solana_sdk::transaction::SanitizedTransaction;
 use transaction_scheduler::{
-    fifo_batch_scheduler::FifoBatchScheduler, jss_receive_and_buffer::JssReceiveAndBuffer,
+    jss_scheduler::JssScheduler, jss_receive_and_buffer::JssReceiveAndBuffer,
 };
 
 use {
@@ -818,7 +818,7 @@ impl BankingStage {
                     .name("solJssSched".to_string())
                     .spawn(move || {
                         let scheduler =
-                            FifoBatchScheduler::<RuntimeTransaction<SanitizedTransaction>>::new(
+                            JssScheduler::<RuntimeTransaction<SanitizedTransaction>>::new(
                                 work_senders,
                                 finished_work_receiver,
                                 jss_dependencies.outbound_sender.clone(),
