@@ -55,5 +55,5 @@ pub struct FinishedConsumeWork<Tx> {
 }
 
 pub struct FinishedConsumeWorkExtraInfo {
-    pub results: Vec<bundle_result::Result>,
+    pub result: bundle_result::Result,
 }

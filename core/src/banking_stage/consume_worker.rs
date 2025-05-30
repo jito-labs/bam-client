@@ -131,58 +131,54 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         self.metrics.has_data.store(true, Ordering::Relaxed);
 
         let extra_info = if work.respond_with_extra_info {
-            let mut results = vec![];
-            for i in 0..work.ids.len() {
-                if output
+            let result = if output
+                .execute_and_commit_transactions_output
+                .retryable_transaction_indexes
+                .len()
+                == work.transactions.len()
+            {
+                bundle_result::Result::Retryable(jito_protos::proto::jss_types::Retryable {})
+            } else {
+                if let Ok(commit_results) = output
                     .execute_and_commit_transactions_output
-                    .retryable_transaction_indexes
-                    .contains(&i)
+                    .commit_transactions_result
+                    .as_ref()
                 {
-                    results.push(bundle_result::Result::Retryable(
-                        jito_protos::proto::jss_types::Retryable {},
-                    ));
-                } else {
-                    let Ok(commit_results) = output
-                        .execute_and_commit_transactions_output
-                        .commit_transactions_result
-                        .as_ref()
-                    else {
-                        results.push(bundle_result::Result::Invalid(
-                            jito_protos::proto::jss_types::Invalid {},
-                        ));
-                        continue;
-                    };
-                    let feepayer_balance_lamports =
-                        bank.get_balance(&work.transactions[i].fee_payer()); // Not locked (So can't be assumed to be strict)
-
-                    let result = commit_results
-                        .get(i)
-                        .map(|result| match result {
-                            CommitTransactionDetails::Committed { compute_units, .. } => {
-                                bundle_result::Result::Processed(
-                                    jito_protos::proto::jss_types::Processed {
-                                        transaction_results: vec![TransactionProcessedResult {
-                                            cus_consumed: *compute_units as u32,
-                                            feepayer_balance_lamports,
-                                        }],
-                                    },
-                                )
-                            }
-                            CommitTransactionDetails::NotCommitted => {
-                                bundle_result::Result::Invalid(
-                                    jito_protos::proto::jss_types::Invalid {},
-                                )
-                            }
+                    if commit_results.len() != work.ids.len()
+                        || commit_results
+                            .iter()
+                            .map(|r| matches!(r, CommitTransactionDetails::NotCommitted))
+                            .any(|x| x)
+                    {
+                        bundle_result::Result::Invalid(jito_protos::proto::jss_types::Invalid {})
+                    } else {
+                        let mut transaction_results = vec![];
+                        for i in 0..work.ids.len() {
+                            if let Some(commit_result) = commit_results.get(i) {
+                                if let CommitTransactionDetails::Committed {
+                                    compute_units, ..
+                                } = commit_result
+                                {
+                                    transaction_results.push(TransactionProcessedResult {
+                                        cus_consumed: *compute_units as u32,
+                                        feepayer_balance_lamports: bank
+                                            .get_balance(&work.transactions[i].fee_payer()),
+                                    });
+                                } else {
+                                    continue;
+                                }
+                            };
+                        }
+                        bundle_result::Result::Processed(jito_protos::proto::jss_types::Processed {
+                            transaction_results,
                         })
-                        .unwrap_or_else(|| {
-                            bundle_result::Result::Invalid(
-                                jito_protos::proto::jss_types::Invalid {},
-                            )
-                        });
-                    results.push(result);
+                    }
+                } else {
+                    bundle_result::Result::Invalid(jito_protos::proto::jss_types::Invalid {})
                 }
-            }
-            Some(FinishedConsumeWorkExtraInfo { results })
+            };
+
+            Some(FinishedConsumeWorkExtraInfo { result })
         } else {
             None
         };
@@ -232,13 +228,9 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         self.metrics.has_data.store(true, Ordering::Relaxed);
         let extra_info = if work.respond_with_extra_info {
             Some(FinishedConsumeWorkExtraInfo {
-                results: (0..work.transactions.len())
-                    .map(|_| {
-                        bundle_result::Result::Retryable(
-                            jito_protos::proto::jss_types::Retryable {},
-                        )
-                    })
-                    .collect(),
+                result: bundle_result::Result::Retryable(
+                    jito_protos::proto::jss_types::Retryable {},
+                ),
             })
         } else {
             None
