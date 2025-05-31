@@ -149,9 +149,13 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
         }
 
         let mut result = 0;
+        const MAX_BUNDLES_PER_RECV: usize = 10;
         match decision {
             BufferedPacketsDecision::Consume(_) | BufferedPacketsDecision::Hold => {
-                while let Ok(bundle) = self.bundle_receiver.try_recv() {
+                while result < MAX_BUNDLES_PER_RECV {
+                    let Ok(bundle) = self.bundle_receiver.try_recv() else {
+                        break;
+                    };
                     if bundle.packets.len() == 0 {
                         self.send_invalid_bundle_result(bundle.seq_id);
                         continue;
