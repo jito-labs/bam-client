@@ -609,21 +609,13 @@ impl Accounts {
         batched: bool,
     ) -> Vec<Result<()>> {
         let account_locks = &mut self.account_locks.lock().unwrap();
-        let mut batch_read_locked_accounts = HashSet::new();
-        let mut batch_write_locked_accounts = HashSet::new();
+        let mut already_locked_in_batch = HashSet::new();
         tx_account_locks_results
             .into_iter()
             .map(|tx_account_locks_result| match tx_account_locks_result {
                 Ok(tx_account_locks) => {
                     let keys = tx_account_locks.accounts_with_is_writable().filter(
-                        |(pubkey, writable)| {
-                            !if *writable {
-                                batch_read_locked_accounts.contains(*pubkey)
-                                    || batch_write_locked_accounts.contains(*pubkey)
-                            } else {
-                                batch_read_locked_accounts.contains(*pubkey)
-                            }
-                        },
+                        |lock| !already_locked_in_batch.contains(&(*lock.0, lock.1)),
                     );
                     let result = account_locks.try_lock_accounts(
                         keys,
@@ -632,11 +624,7 @@ impl Accounts {
                     );
                     if batched && result.is_ok() {
                         for (pubkey, writable) in tx_account_locks.accounts_with_is_writable() {
-                            if writable {
-                                batch_write_locked_accounts.insert(*pubkey);
-                            } else {
-                                batch_read_locked_accounts.insert(*pubkey);
-                            }
+                            already_locked_in_batch.insert((*pubkey, writable));
                         }
                     }
                     result
