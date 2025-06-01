@@ -26,7 +26,7 @@ use {
     solana_transaction_context::TransactionAccount,
     std::{
         cmp::Reverse,
-        collections::{BinaryHeap, HashSet},
+        collections::{BinaryHeap, HashMap, HashSet},
         ops::RangeBounds,
         sync::{
             atomic::{AtomicUsize, Ordering},
@@ -608,29 +608,80 @@ impl Accounts {
         additional_write_locks: Option<&HashSet<Pubkey>>,
         batched: bool,
     ) -> Vec<Result<()>> {
+        if batched {
+            return self.lock_accounts_batched(
+                tx_account_locks_results,
+                additional_read_locks,
+                additional_write_locks,
+            );
+        }
         let account_locks = &mut self.account_locks.lock().unwrap();
-        let mut already_locked_in_batch = HashSet::new();
         tx_account_locks_results
             .into_iter()
             .map(|tx_account_locks_result| match tx_account_locks_result {
-                Ok(tx_account_locks) => {
-                    let keys = tx_account_locks.accounts_with_is_writable().filter(
-                        |lock| !already_locked_in_batch.contains(&(*lock.0, lock.1)),
-                    );
-                    let result = account_locks.try_lock_accounts(
-                        keys,
+                Ok(tx_account_locks) => account_locks.try_lock_accounts(
+                        tx_account_locks.accounts_with_is_writable(),
                         additional_read_locks,
                         additional_write_locks,
-                    );
-                    if batched && result.is_ok() {
-                        for (pubkey, writable) in tx_account_locks.accounts_with_is_writable() {
-                            already_locked_in_batch.insert((*pubkey, writable));
-                        }
-                    }
-                    result
-                }
+                ),
                 Err(err) => Err(err),
             })
+            .collect()
+    }
+
+    /// Lock accounts in batches, deduplicating locks across transactions.
+    /// Returns a vec with all transaction locks associated with the
+    /// first transaction result, and `Ok(())` for all other transactions (If successful).
+    fn lock_accounts_batched(
+        &self,
+        tx_account_locks_results: Vec<Result<TransactionAccountLocksIterator<impl SVMMessage>>>,
+        additional_read_locks: Option<&HashSet<Pubkey>>,
+        additional_write_locks: Option<&HashSet<Pubkey>>,
+    ) -> Vec<Result<()>> {
+        if tx_account_locks_results.iter().any(|res| res.is_err()) {
+            return tx_account_locks_results
+                .into_iter()
+                .map(|res| res.map(|_| ()))
+                .collect();
+        }
+
+        let len = tx_account_locks_results.len();
+        let deduped_locks = self.get_deduped_batch_locks(
+            tx_account_locks_results
+                .into_iter()
+                .map(|res| res.unwrap()));
+
+        let account_locks = &mut self.account_locks.lock().unwrap();
+        let result = account_locks.try_lock_accounts(
+            deduped_locks.iter().map(|(pubkey, is_writable)| (pubkey, *is_writable)),
+            additional_read_locks,
+            additional_write_locks,
+        );
+
+        std::iter::once(result).chain(
+            (0..len-1).map(|_| Ok(()))
+        ).collect()
+    }
+
+    fn get_deduped_batch_locks<'a>(
+        &self,
+        tx_account_locks: impl Iterator<Item = TransactionAccountLocksIterator<'a, impl SVMMessage + 'a>>,
+    ) -> Vec<(Pubkey, bool)> {
+        let mut deduped_locks = HashMap::new();
+        for tx_account_locks in tx_account_locks {
+            for (pubkey, is_writable) in tx_account_locks.accounts_with_is_writable() {
+                if let Some(existing) = deduped_locks.get(pubkey) {
+                    if *existing && !is_writable {
+                        continue;
+                    }
+                }
+                deduped_locks.insert(*pubkey, is_writable);
+            }
+        }
+        // Convert the HashMap to a Vec
+        deduped_locks
+            .into_iter()
+            .map(|(pubkey, is_writable)| (pubkey, is_writable))
             .collect()
     }
 
@@ -644,25 +695,28 @@ impl Accounts {
             return;
         }
 
+        if batched {
+            let deduped_locks = self.get_deduped_batch_locks(
+                txs_and_results
+                    .clone()
+                    .map(|(tx, _)| TransactionAccountLocksIterator::new(tx)),
+            );
+            let mut account_locks = self.account_locks.lock().unwrap();
+            account_locks.unlock_accounts(
+                deduped_locks.iter().map(|(pubkey, is_writable)| (pubkey, *is_writable)),
+            );
+            return;
+        }
+
         let mut account_locks = self.account_locks.lock().unwrap();
         debug!("bank unlock accounts");
-        let mut already_unlocked_in_batch = HashSet::new();
         for (tx, res) in txs_and_results {
             if res.is_ok() {
                 let tx_account_locks = TransactionAccountLocksIterator::new(tx);
                 account_locks.unlock_accounts(
                     tx_account_locks
                         .accounts_with_is_writable()
-                        .filter(|lock| !already_unlocked_in_batch.contains(&(*lock.0, lock.1))),
                 );
-
-                if batched {
-                    already_unlocked_in_batch.extend(
-                        tx_account_locks
-                            .accounts_with_is_writable()
-                            .map(|(pubkey, writable)| (*pubkey, writable)),
-                    );
-                }
             }
         }
     }
@@ -1667,5 +1721,95 @@ mod tests {
                 &sum, &account, &None
             ));
         }
+    }
+
+
+    #[test]
+    fn test_batched_locking() {
+        let keypair0 = Keypair::new();
+        let keypair1 = Keypair::new();
+        let keypair2 = Keypair::new();
+        let keypair3 = Keypair::new();
+
+        let account0 = AccountSharedData::new(1, 0, &Pubkey::default());
+        let account1 = AccountSharedData::new(2, 0, &Pubkey::default());
+        let account2 = AccountSharedData::new(3, 0, &Pubkey::default());
+        let account3 = AccountSharedData::new(4, 0, &Pubkey::default());
+
+        let accounts_db = AccountsDb::new_single_for_tests();
+        let accounts = Accounts::new(Arc::new(accounts_db));
+        accounts.store_for_tests(0, &keypair0.pubkey(), &account0);
+        accounts.store_for_tests(0, &keypair1.pubkey(), &account1);
+        accounts.store_for_tests(0, &keypair2.pubkey(), &account2);
+        accounts.store_for_tests(0, &keypair3.pubkey(), &account3);
+
+        let instructions = vec![CompiledInstruction::new(2, &(), vec![0, 1])];
+        let message = Message::new_with_compiled_instructions(
+            1,
+            0,
+            2,
+            vec![keypair1.pubkey(), keypair0.pubkey(), native_loader::id()],
+            Hash::default(),
+            instructions,
+        );
+        let tx0 = new_sanitized_tx(&[&keypair1], message, Hash::default());
+        let instructions = vec![CompiledInstruction::new(2, &(), vec![0, 1])];
+        let message = Message::new_with_compiled_instructions(
+            1,
+            0,
+            2,
+            vec![keypair2.pubkey(), keypair0.pubkey(), native_loader::id()],
+            Hash::default(),
+            instructions,
+        );
+        let tx1 = new_sanitized_tx(&[&keypair2], message, Hash::default());
+        let instructions = vec![CompiledInstruction::new(2, &(), vec![0, 1])];
+        let message = Message::new_with_compiled_instructions(
+            1,
+            0,
+            2,
+            vec![keypair3.pubkey(), keypair0.pubkey(), native_loader::id()],
+            Hash::default(),
+            instructions,
+        );
+        let tx2 = new_sanitized_tx(&[&keypair3], message, Hash::default());
+        let txs = vec![tx0, tx1, tx2];
+
+        let qos_results = vec![
+            Ok(()),
+            Ok(()),
+            Ok(()),
+        ];
+
+        let results = accounts.lock_accounts_with_results(
+            txs.iter(),
+            qos_results.into_iter(),
+            MAX_TX_ACCOUNT_LOCKS,
+            None,
+            None,
+            true,
+        );
+
+        assert_eq!(
+            results,
+            vec![
+                Ok(()), // Read-only account (keypair0) can be referenced multiple times
+                Ok(()), // Read-only account (keypair0) can be referenced multiple times
+                Ok(()), // Read-only account (keypair0) can be referenced multiple times
+            ],
+        );
+
+        // verify that keypair0 read-only locked
+        assert!(accounts
+            .account_locks
+            .lock()
+            .unwrap()
+            .is_locked_readonly(&keypair0.pubkey()));
+        // verify that keypair2 (for tx1) is write-locked (2 txns referencing it)
+        assert!(accounts
+            .account_locks
+            .lock()
+            .unwrap()
+            .is_locked_write(&keypair2.pubkey()));
     }
 }
