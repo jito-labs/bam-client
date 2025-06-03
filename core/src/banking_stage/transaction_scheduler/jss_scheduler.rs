@@ -45,7 +45,7 @@ fn passthrough_priority(
     *id
 }
 
-const MAX_SCHEDULED_PER_WORKER: usize = 2;
+const MAX_SCHEDULED_PER_WORKER: usize = 3;
 
 pub struct JssScheduler<Tx: TransactionWithMeta> {
     workers_scheduled_count: Vec<usize>,
@@ -121,14 +121,21 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
         }
     }
 
-    fn get_available_worker(&mut self) -> Option<usize> {
-        // Find a worker that has less than the max scheduled transactions
+    fn get_best_available_worker(&mut self) -> Option<usize> {
+        let mut best_worker_index = None;
+        let mut best_worker_count = MAX_SCHEDULED_PER_WORKER;
         for (worker_index, count) in self.workers_scheduled_count.iter_mut().enumerate() {
-            if *count < MAX_SCHEDULED_PER_WORKER {
+            if *count == 0 {
                 return Some(worker_index);
             }
+            if *count < MAX_SCHEDULED_PER_WORKER {
+                if best_worker_index.is_none() || *count < best_worker_count {
+                    best_worker_index = Some(worker_index);
+                    best_worker_count = *count;
+                }
+            }
         }
-        None
+        best_worker_index
     }
 
     fn send_to_workers(
@@ -142,7 +149,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
         };
 
         // Schedule any available transactions in prio-graph
-        while let Some(worker_index) = self.get_available_worker() {
+        while let Some(worker_index) = self.get_best_available_worker() {
             let Some(next_batch_id) = self.prio_graph.pop() else {
                 break;
             };
