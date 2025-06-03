@@ -701,12 +701,17 @@ impl BankingStage {
         });
 
         // Spawn the central scheduler thread
+        let jss_enabled = jss_dependencies
+            .as_ref()
+            .map(|jss| jss.jss_enabled.clone())
+            .unwrap_or(Arc::new(AtomicBool::new(false)));
         let scheduler_worker_senders = work_senders.clone();
         let scheduler_finished_work_receiver = finished_work_receiver.clone();
         let scheduler_decision_maker = decision_maker.clone();
         let scheduler_blacklisted_accounts = blacklisted_accounts.clone();
         let scheduler_bank_forks = bank_forks.clone();
         let scheduler_worker_metrics = worker_metrics.clone();
+        let scheduler_jss_enabled = jss_enabled.clone();
         if use_greedy_scheduler {
             bank_thread_hdls.push(
                 Builder::new()
@@ -726,6 +731,7 @@ impl BankingStage {
                             forwarder,
                             scheduler_blacklisted_accounts,
                             false,
+                            scheduler_jss_enabled,
                         );
 
                         match scheduler_controller.run() {
@@ -757,6 +763,7 @@ impl BankingStage {
                             forwarder,
                             scheduler_blacklisted_accounts,
                             false,
+                            scheduler_jss_enabled,
                         );
 
                         match scheduler_controller.run() {
@@ -839,6 +846,7 @@ impl BankingStage {
                             Option::<Forwarder<DummyLikeClusterInfo>>::None,
                             blacklisted_accounts.clone(),
                             true,
+                            jss_enabled,
                         );
 
                         match scheduler_controller.run() {
