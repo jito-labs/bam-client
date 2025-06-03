@@ -213,6 +213,46 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
             )),
         });
     }
+
+    fn maybe_bank_boundary_actions(
+        &mut self,
+        decision: &BufferedPacketsDecision,
+        container: &mut impl StateContainer<Tx>,
+    ) {
+        // Check if no bank or slot has changed
+        let bank_start = decision.bank_start();
+        if bank_start
+            .map(|bs| bs.working_bank.slot() == self.slot)
+            .unwrap_or_default()
+        {
+            return;
+        }
+
+        let Some(bank_start) = decision.bank_start() else {
+            return;
+        };
+        self.slot = bank_start.working_bank.slot();
+
+        // Drain container and send back 'retryable'
+        while let Some(next_batch_id) = container.pop() {
+            let seq_id = priority_to_seq_id(next_batch_id.priority);
+            self.send_retryable_bundle_result(seq_id);
+            container.remove_by_id(next_batch_id.id);
+        }
+
+        // Unblock all transactions blocked by inflight batches
+        // and then drain the prio-graph
+        for (_, inflight_info) in self.inflight_batch_info.iter() {
+            if self.prio_graph.is_blocked(inflight_info.priority_id) {
+                self.prio_graph.unblock(&inflight_info.priority_id);
+            }
+        }
+        while let Some((next_batch_id, _)) = self.prio_graph.pop_and_unblock() {
+            let seq_id = priority_to_seq_id(next_batch_id.priority);
+            self.send_retryable_bundle_result(seq_id);
+            container.remove_by_id(next_batch_id.id);
+        }
+    }
 }
 
 impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
@@ -245,6 +285,10 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
         container: &mut impl StateContainer<Tx>,
         decision: &BufferedPacketsDecision,
     ) -> Result<(usize, usize), SchedulerError> {
+        // Check if the slot/bank has changed; do what must be done
+        // IMPORTANT: This must be called before the receiving code below
+        self.maybe_bank_boundary_actions(decision, container);
+
         let mut num_transactions = 0;
         while let Ok(result) = self.finished_consume_work_receiver.try_recv() {
             num_transactions += result.work.ids.len();
@@ -269,40 +313,6 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
 
             container.remove_by_id(inflight_batch_info.priority_id.id);
             self.workers_scheduled_count[inflight_batch_info.worker_index] -= 1;
-        }
-
-        // Check if no bank or slot has changed
-        let bank_start = decision.bank_start();
-        if bank_start
-            .map(|bs| bs.working_bank.slot() == self.slot)
-            .unwrap_or_default()
-        {
-            return Ok((num_transactions, 0));
-        }
-
-        let Some(bank_start) = decision.bank_start() else {
-            return Ok((num_transactions, 0));
-        };
-        self.slot = bank_start.working_bank.slot();
-
-        // Drain container and send back 'retryable'
-        while let Some(next_batch_id) = container.pop() {
-            let seq_id = priority_to_seq_id(next_batch_id.priority);
-            self.send_retryable_bundle_result(seq_id);
-            container.remove_by_id(next_batch_id.id);
-        }
-
-        // Unblock all transactions blocked by inflight batches
-        // and then drain the prio-graph
-        for (_, inflight_info) in self.inflight_batch_info.iter() {
-            if self.prio_graph.is_blocked(inflight_info.priority_id) {
-                self.prio_graph.unblock(&inflight_info.priority_id);
-            }
-        }
-        while let Some((next_batch_id, _)) = self.prio_graph.pop_and_unblock() {
-            let seq_id = priority_to_seq_id(next_batch_id.priority);
-            self.send_retryable_bundle_result(seq_id);
-            container.remove_by_id(next_batch_id.id);
         }
 
         Ok((num_transactions, 0))
