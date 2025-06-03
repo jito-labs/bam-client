@@ -187,7 +187,7 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                     let mut cost: u64 = 0;
                     let mut transaction_ttls = vec![];
                     for parsed_packet in parsed_packets.drain(..) {
-                        let mut tmp_container = Self::Container::with_capacity(bundle.packets.len());
+                        let mut tmp_container = Self::Container::with_capacity(1);
                         self.internal_receive_and_buffer.buffer_packets(
                             &mut tmp_container,
                             timing_metrics,
