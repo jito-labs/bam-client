@@ -86,7 +86,7 @@ impl JssConnection {
     async fn background_task(
         mut inbound_stream: tonic::Streaming<StartSchedulerResponse>,
         mut outbound_sender: mpsc::Sender<StartSchedulerMessage>,
-        mut validator_client: JssNodeApiClient<tonic::transport::channel::Channel>,
+        validator_client: JssNodeApiClient<tonic::transport::channel::Channel>,
         builder_config: Arc<Mutex<Option<BuilderConfigResp>>>,
         bundle_sender: crossbeam_channel::Sender<Bundle>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
@@ -103,6 +103,14 @@ impl JssConnection {
             .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut outbound_tick_interval = interval(std::time::Duration::from_millis(1));
         outbound_tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Burst);
+
+        let keep_refreshing_builder_config = Arc::new(AtomicBool::new(true));
+        let builder_config_task = tokio::spawn(Self::refresh_builder_config_task(
+            builder_config.clone(),
+            validator_client.clone(),
+            keep_refreshing_builder_config.clone(),
+            metrics.clone(),
+        ));
         loop {
             tokio::select! {
                 _ = heartbeat_interval.tick() => {
@@ -119,12 +127,6 @@ impl JssConnection {
                     if poh_recorder.read().unwrap().would_be_leader(TICKS_PER_SLOT) {
                         continue;
                     };
-
-                    let Ok(resp) = validator_client.get_builder_config(GetBuilderConfigRequest {}).await else {
-                        break;
-                    };
-                    *builder_config.lock().unwrap() = Some(resp.into_inner());
-                    metrics.builder_config_received.fetch_add(1, Relaxed);
                 }
                 _ = metrics_and_health_check_interval.tick() => {
                     const TIMEOUT_DURATION: std::time::Duration = std::time::Duration::from_secs(6);
@@ -169,6 +171,36 @@ impl JssConnection {
             }
         }
         is_healthy.store(false, Relaxed);
+        keep_refreshing_builder_config.store(false, Relaxed);
+        let _ = builder_config_task.await.ok();
+    }
+
+    async fn refresh_builder_config_task(
+        builder_config: Arc<Mutex<Option<BuilderConfigResp>>>,
+        mut validator_client: JssNodeApiClient<tonic::transport::channel::Channel>,
+        keep_refreshing_builder_config: Arc<AtomicBool>,
+        metrics: Arc<JssConnectionMetrics>,
+    ) {
+        let mut interval = interval(std::time::Duration::from_secs(1));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        while keep_refreshing_builder_config.load(Relaxed) {
+            tokio::select! {
+                _ = interval.tick() => {
+                    let request = tonic::Request::new(GetBuilderConfigRequest {});
+                    match validator_client.get_builder_config(request).await {
+                        Ok(response) => {
+                            let config = response.into_inner();
+                            *builder_config.lock().unwrap() = Some(config);
+                            metrics.builder_config_received.fetch_add(1, Relaxed);
+                        }
+                        Err(e) => {
+                            error!("Failed to get builder config: {:?}", e);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn create_signed_heartbeat(
