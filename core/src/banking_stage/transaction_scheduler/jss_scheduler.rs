@@ -55,7 +55,7 @@ pub struct JssScheduler<Tx: TransactionWithMeta> {
 
     inflight_batch_info: HashMap<TransactionBatchId, InflightBatchInfo>,
     prio_graph: SchedulerPrioGraph,
-    slot: Slot,
+    slot: Option<Slot>,
 }
 
 struct InflightBatchInfo {
@@ -77,7 +77,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
             response_sender,
             inflight_batch_info: HashMap::default(),
             prio_graph: PrioGraph::new(passthrough_priority),
-            slot: 0,
+            slot: None,
         }
     }
 
@@ -117,6 +117,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
                 next_batch_id,
                 Self::get_transactions_account_access(txns.into_iter()),
             );
+            info!("Inserted batch {} into prio-graph", next_batch_id.id);
         }
     }
 
@@ -135,14 +136,20 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
         container: &mut impl StateContainer<Tx>,
         num_scheduled: &mut usize,
     ) {
+        let Some(slot) = self.slot else {
+            warn!("Slot is not set, cannot schedule transactions");
+            return;
+        };
+
         // Schedule any available transactions in prio-graph
         while let Some(worker_index) = self.get_available_worker() {
             let Some(next_batch_id) = self.prio_graph.pop() else {
                 break;
             };
+            info!("jbatch={} is next", next_batch_id.id);
 
             let Some((batch_ids, revert_on_error)) = container.get_batch(next_batch_id.id) else {
-                error!("Batch {} not found in container", next_batch_id.id);
+                error!("jbatch={} not found in container", next_batch_id.id);
                 continue;
             };
 
@@ -181,10 +188,15 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
                 InflightBatchInfo {
                     priority_id: next_batch_id,
                     worker_index,
-                    slot: self.slot,
+                    slot,
                 },
             );
             self.workers_scheduled_count[worker_index] += 1;
+
+            info!(
+                "jbatch={} sent to worker {}",
+                next_batch_id.id, worker_index
+            );
 
             *num_scheduled += 1;
         }
@@ -221,37 +233,50 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
     ) {
         // Check if no bank or slot has changed
         let bank_start = decision.bank_start();
-        if bank_start
-            .map(|bs| bs.working_bank.slot() == self.slot)
-            .unwrap_or_default()
+        if bank_start.map(|bs| bs.working_bank.slot()) == self.slot
         {
             return;
         }
 
-        let Some(bank_start) = decision.bank_start() else {
-            return;
-        };
-        self.slot = bank_start.working_bank.slot();
+        if let Some(bank_start) = decision.bank_start() {
+            info!("Bank boundary detected: slot changed from {:?} to {:?}", self.slot, bank_start.working_bank.slot());
+            self.slot = Some(bank_start.working_bank.slot());
+        } else {
+            info!("Bank boundary detected: slot changed to None");
+            self.slot = None;
+        }
 
         // Drain container and send back 'retryable'
-        while let Some(next_batch_id) = container.pop() {
-            let seq_id = priority_to_seq_id(next_batch_id.priority);
-            self.send_retryable_bundle_result(seq_id);
-            container.remove_by_id(next_batch_id.id);
+        if self.slot.is_none() {
+            while let Some(next_batch_id) = container.pop() {
+                let seq_id = priority_to_seq_id(next_batch_id.priority);
+                self.send_retryable_bundle_result(seq_id);
+                container.remove_by_id(next_batch_id.id);
+                info!("jbatch={} drained from container", next_batch_id.id);
+            }
         }
 
         // Unblock all transactions blocked by inflight batches
         // and then drain the prio-graph
         for (_, inflight_info) in self.inflight_batch_info.iter() {
-            if self.prio_graph.is_blocked(inflight_info.priority_id) {
-                self.prio_graph.unblock(&inflight_info.priority_id);
-            }
+            self.prio_graph.unblock(&inflight_info.priority_id);
+            info!(
+                "jbatch={} unblocked in prio-graph",
+                inflight_info.priority_id.id
+            );
         }
         while let Some((next_batch_id, _)) = self.prio_graph.pop_and_unblock() {
             let seq_id = priority_to_seq_id(next_batch_id.priority);
             self.send_retryable_bundle_result(seq_id);
             container.remove_by_id(next_batch_id.id);
+            info!("jbatch={} drained from prio-graph", next_batch_id.id);
         }
+
+        // Print worker s scheduled count
+        info!(
+            "Workers scheduled count: {:?}",
+            self.workers_scheduled_count
+        );
     }
 }
 
@@ -294,10 +319,15 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
             num_transactions += result.work.ids.len();
             let batch_id = result.work.batch_id;
             let Some(inflight_batch_info) = self.inflight_batch_info.remove(&batch_id) else {
-                error!("Batch {} not found in inflight info", batch_id.0);
+                error!("jbatch={} not found in inflight info", batch_id.0);
                 continue;
             };
             let seq_id = priority_to_seq_id(inflight_batch_info.priority_id.priority);
+
+            info!(
+                "jbatch={} Received finished",
+                inflight_batch_info.priority_id.id,
+            );
 
             // Send the result back to the scheduler
             if let Some(extra_info) = result.extra_info {
@@ -305,10 +335,16 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
             }
 
             // A new era started while you were gone
-            if inflight_batch_info.slot == self.slot {
-                if self.prio_graph.is_blocked(inflight_batch_info.priority_id) {
+            info!("jbatch={} slot {:?}, current_slot {:?}", inflight_batch_info.priority_id.id,
+                inflight_batch_info.slot, self.slot);
+            if Some(inflight_batch_info.slot) == self.slot {
                     self.prio_graph.unblock(&inflight_batch_info.priority_id);
-                }
+                    info!(
+                        "jbatch={} in prio-graph",
+                        inflight_batch_info.priority_id.id
+                    );
+            } else {
+                info!("Slot changed while the work was being done");
             }
 
             container.remove_by_id(inflight_batch_info.priority_id.id);
