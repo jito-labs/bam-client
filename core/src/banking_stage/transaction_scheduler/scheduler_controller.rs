@@ -165,7 +165,7 @@ where
                 if !self.scheduling_enabled() {
                     return Ok(());
                 }
-                
+
                 let (scheduling_summary, schedule_time_us) = measure_us!(self.scheduler.schedule(
                     &mut self.container,
                     |txs, results| {
