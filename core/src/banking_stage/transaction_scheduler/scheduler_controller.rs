@@ -30,7 +30,7 @@ use {
     solana_svm_transaction::svm_message::SVMMessage,
     std::{
         collections::HashSet,
-        sync::{Arc, RwLock},
+        sync::{atomic::AtomicBool, Arc, RwLock},
         time::{Duration, Instant},
     },
 };
@@ -65,8 +65,10 @@ where
     forwarder: Option<Forwarder<C>>,
     /// Blacklisted accounts
     blacklisted_accounts: HashSet<Pubkey>,
-    /// Don't clean the container/queue if true.
-    disable_container_cleaning: bool,
+    /// This is the JSS controller.
+    jss_controller: bool,
+    /// Whether JSS is enabled.
+    jss_enabled: Arc<AtomicBool>,
 }
 
 impl<C, R, S> SchedulerController<C, R, S>
@@ -83,7 +85,8 @@ where
         worker_metrics: Vec<Arc<ConsumeWorkerMetrics>>,
         forwarder: Option<Forwarder<C>>,
         blacklisted_accounts: HashSet<Pubkey>,
-        disable_container_cleaning: bool,
+        jss_controller: bool,
+        jss_enabled: Arc<AtomicBool>,
     ) -> Self {
         Self {
             decision_maker,
@@ -97,7 +100,8 @@ where
             worker_metrics,
             forwarder,
             blacklisted_accounts,
-            disable_container_cleaning,
+            jss_controller,
+            jss_enabled,
         }
     }
 
@@ -158,6 +162,10 @@ where
         let forwarding_enabled = self.forwarder.is_some();
         match decision {
             BufferedPacketsDecision::Consume(bank_start) => {
+                if !self.scheduling_enabled() {
+                    return Ok(());
+                }
+                
                 let (scheduling_summary, schedule_time_us) = measure_us!(self.scheduler.schedule(
                     &mut self.container,
                     |txs, results| {
@@ -354,7 +362,7 @@ where
     /// Clears the transaction state container.
     /// This only clears pending transactions, and does **not** clear in-flight transactions.
     fn clear_container(&mut self) {
-        if self.disable_container_cleaning {
+        if self.jss_controller {
             return;
         }
 
@@ -373,7 +381,7 @@ where
     /// expired, already processed, or are no longer sanitizable.
     /// This only clears pending transactions, and does **not** clear in-flight transactions.
     fn clean_queue(&mut self) {
-        if self.disable_container_cleaning {
+        if self.jss_controller {
             return;
         }
 
@@ -480,6 +488,10 @@ where
         !tx.account_keys()
             .iter()
             .any(|a| blacklisted_accounts.contains(a))
+    }
+
+    fn scheduling_enabled(&self) -> bool {
+        self.jss_controller == self.jss_enabled.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -628,6 +640,7 @@ mod tests {
             None,
             HashSet::default(),
             true,
+            Arc::new(AtomicBool::new(false)),
         );
 
         (test_frame, scheduler_controller)
