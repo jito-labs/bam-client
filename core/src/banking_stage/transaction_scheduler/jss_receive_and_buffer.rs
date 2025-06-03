@@ -161,8 +161,8 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                         continue;
                     }
 
-                    let packets = Self::parse_transactions(bundle.packets.iter());
-                    if packets.len() != bundle.packets.len() {
+                    let mut parsed_packets = Self::parse_transactions(bundle.packets.iter());
+                    if parsed_packets.len() != bundle.packets.len() {
                         self.send_invalid_bundle_result(bundle.seq_id);
                         continue;
                     }
@@ -183,18 +183,18 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                     };
 
                     // Hacky way to leverage existing receive_and_buffer logic
-                    let mut tmp_container = Self::Container::with_capacity(bundle.packets.len());
-                    self.internal_receive_and_buffer.buffer_packets(
-                        &mut tmp_container,
-                        timing_metrics,
-                        count_metrics,
-                        packets,
-                    );
-
                     let mut packets = vec![];
                     let mut cost: u64 = 0;
                     let mut transaction_ttls = vec![];
-                    for _ in 0..bundle.packets.len() {
+                    for parsed_packet in parsed_packets.drain(..) {
+                        let mut tmp_container = Self::Container::with_capacity(bundle.packets.len());
+                        self.internal_receive_and_buffer.buffer_packets(
+                            &mut tmp_container,
+                            timing_metrics,
+                            count_metrics,
+                            vec![parsed_packet]
+                        );
+
                         let Some(id) = tmp_container.pop() else {
                             break;
                         };
