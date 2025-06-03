@@ -262,7 +262,9 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
 
             // A new era started while you were gone
             if inflight_batch_info.slot == self.slot {
-                self.prio_graph.unblock(&inflight_batch_info.priority_id);
+                if self.prio_graph.is_blocked(inflight_batch_info.priority_id) {
+                    self.prio_graph.unblock(&inflight_batch_info.priority_id);
+                }
             }
 
             container.remove_by_id(inflight_batch_info.priority_id.id);
@@ -290,7 +292,13 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
             container.remove_by_id(next_batch_id.id);
         }
 
-        // Drain prio-graph and send back 'retryable'
+        // Unblock all transactions blocked by inflight batches
+        // and then drain the prio-graph
+        for (_, inflight_info) in self.inflight_batch_info.iter() {
+            if self.prio_graph.is_blocked(inflight_info.priority_id) {
+                self.prio_graph.unblock(&inflight_info.priority_id);
+            }
+        }
         while let Some((next_batch_id, _)) = self.prio_graph.pop_and_unblock() {
             let seq_id = priority_to_seq_id(next_batch_id.priority);
             self.send_retryable_bundle_result(seq_id);
