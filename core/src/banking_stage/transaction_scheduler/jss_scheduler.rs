@@ -141,7 +141,8 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
             };
 
             let Some((batch_ids, revert_on_error)) = container.get_batch(next_batch_id.id) else {
-                panic!("Batch {} not found in container", next_batch_id.id);
+                error!("Batch {} not found in container", next_batch_id.id);
+                continue;
             };
 
             let transactions = batch_ids
