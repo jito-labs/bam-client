@@ -29,9 +29,11 @@ pub struct JssConnection {
     background_task: tokio::task::JoinHandle<()>,
     is_healthy: Arc<AtomicBool>,
     url: String,
+    exit: Arc<AtomicBool>,
 }
 
 impl JssConnection {
+    /// Try to initialize a connection to the JSS Node; if it is not possible to connect, it will return an error.
     pub async fn try_init(
         url: String,
         poh_recorder: Arc<RwLock<PohRecorder>>,
@@ -62,7 +64,9 @@ impl JssConnection {
         let is_healthy = Arc::new(AtomicBool::new(false));
         let builder_config = Arc::new(Mutex::new(None));
 
-        let background_task = tokio::spawn(Self::background_task(
+        let exit = Arc::new(AtomicBool::new(false));
+        let background_task = tokio::spawn(Self::connection_task(
+            exit.clone(),
             inbound_stream,
             outbound_sender,
             validator_client,
@@ -80,10 +84,12 @@ impl JssConnection {
             background_task,
             is_healthy,
             url,
+            exit,
         })
     }
 
-    async fn background_task(
+    async fn connection_task(
+        exit: Arc<AtomicBool>,
         mut inbound_stream: tonic::Streaming<StartSchedulerResponse>,
         mut outbound_sender: mpsc::Sender<StartSchedulerMessage>,
         validator_client: JssNodeApiClient<tonic::transport::channel::Channel>,
@@ -104,17 +110,19 @@ impl JssConnection {
         let mut outbound_tick_interval = interval(std::time::Duration::from_millis(1));
         outbound_tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Burst);
 
-        let keep_refreshing_builder_config = Arc::new(AtomicBool::new(true));
         let builder_config_task = tokio::spawn(Self::refresh_builder_config_task(
+            exit.clone(),
             builder_config.clone(),
             validator_client.clone(),
-            keep_refreshing_builder_config.clone(),
             metrics.clone(),
         ));
-        loop {
+        while !exit.load(Relaxed) {
             tokio::select! {
                 _ = heartbeat_interval.tick() => {
-                    let Some(signed_heartbeat) = Self::create_signed_heartbeat(poh_recorder.read().unwrap().get_current_slot(), cluster_info.as_ref()) else {
+                    let Some(signed_heartbeat) = Self::create_signed_heartbeat(
+                        poh_recorder.read().unwrap().get_current_slot(),
+                        cluster_info.as_ref()) else
+                    {
                         error!("Failed to create signed heartbeat");
                         break;
                     };
@@ -171,20 +179,19 @@ impl JssConnection {
             }
         }
         is_healthy.store(false, Relaxed);
-        keep_refreshing_builder_config.store(false, Relaxed);
         let _ = builder_config_task.await.ok();
     }
 
     async fn refresh_builder_config_task(
+        exit: Arc<AtomicBool>,
         builder_config: Arc<Mutex<Option<BuilderConfigResp>>>,
         mut validator_client: JssNodeApiClient<tonic::transport::channel::Channel>,
-        keep_refreshing_builder_config: Arc<AtomicBool>,
         metrics: Arc<JssConnectionMetrics>,
     ) {
         let mut interval = interval(std::time::Duration::from_secs(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        while keep_refreshing_builder_config.load(Relaxed) {
+        while !exit.load(Relaxed) {
             tokio::select! {
                 _ = interval.tick() => {
                     let request = tonic::Request::new(GetBuilderConfigRequest {});
@@ -203,6 +210,7 @@ impl JssConnection {
         }
     }
 
+    /// Create a signed heartbeat message for the given slot.
     fn create_signed_heartbeat(
         slot: u64,
         cluster_info: &ClusterInfo,
@@ -237,6 +245,8 @@ impl JssConnection {
 impl Drop for JssConnection {
     fn drop(&mut self) {
         self.is_healthy.store(false, Relaxed);
+        self.exit.store(true, Relaxed);
+        std::thread::sleep(std::time::Duration::from_millis(10));
         self.background_task.abort();
     }
 }
