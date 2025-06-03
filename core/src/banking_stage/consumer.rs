@@ -695,7 +695,8 @@ impl Consumer {
         {
             QosService::remove_or_update_costs(transaction_qos_cost_results.iter(), None, bank);
             let mut result = Self::early_bailout_batch_output(txs.len(), true);
-            result.cost_model_throttled_transactions_count = cost_model_throttled_transactions_count;
+            result.cost_model_throttled_transactions_count =
+                cost_model_throttled_transactions_count;
             result.cost_model_us = cost_model_us;
             return result;
         }
@@ -719,7 +720,8 @@ impl Consumer {
         if revert_on_error && batch.lock_results().iter().any(|result| result.is_err()) {
             QosService::remove_or_update_costs(transaction_qos_cost_results.iter(), None, bank);
             let mut result = Self::early_bailout_batch_output(txs.len(), true);
-            result.cost_model_throttled_transactions_count = cost_model_throttled_transactions_count;
+            result.cost_model_throttled_transactions_count =
+                cost_model_throttled_transactions_count;
             result.cost_model_us = cost_model_us;
             return result;
         }

@@ -240,13 +240,16 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
     ) {
         // Check if no bank or slot has changed
         let bank_start = decision.bank_start();
-        if bank_start.map(|bs| bs.working_bank.slot()) == self.slot
-        {
+        if bank_start.map(|bs| bs.working_bank.slot()) == self.slot {
             return;
         }
 
         if let Some(bank_start) = decision.bank_start() {
-            info!("Bank boundary detected: slot changed from {:?} to {:?}", self.slot, bank_start.working_bank.slot());
+            info!(
+                "Bank boundary detected: slot changed from {:?} to {:?}",
+                self.slot,
+                bank_start.working_bank.slot()
+            );
             self.slot = Some(bank_start.working_bank.slot());
         } else {
             info!("Bank boundary detected: slot changed to None");
@@ -342,14 +345,16 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
             }
 
             // A new era started while you were gone
-            info!("jbatch={} slot {:?}, current_slot {:?}", inflight_batch_info.priority_id.id,
-                inflight_batch_info.slot, self.slot);
+            info!(
+                "jbatch={} slot {:?}, current_slot {:?}",
+                inflight_batch_info.priority_id.id, inflight_batch_info.slot, self.slot
+            );
             if Some(inflight_batch_info.slot) == self.slot {
-                    self.prio_graph.unblock(&inflight_batch_info.priority_id);
-                    info!(
-                        "jbatch={} in prio-graph",
-                        inflight_batch_info.priority_id.id
-                    );
+                self.prio_graph.unblock(&inflight_batch_info.priority_id);
+                info!(
+                    "jbatch={} in prio-graph",
+                    inflight_batch_info.priority_id.id
+                );
             } else {
                 info!("Slot changed while the work was being done");
             }

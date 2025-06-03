@@ -192,7 +192,7 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                             &mut tmp_container,
                             timing_metrics,
                             count_metrics,
-                            vec![parsed_packet]
+                            vec![parsed_packet],
                         );
 
                         let Some(id) = tmp_container.pop() else {

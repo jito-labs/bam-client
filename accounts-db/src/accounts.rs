@@ -646,26 +646,28 @@ impl Accounts {
         }
 
         let len = tx_account_locks_results.len();
-        let deduped_locks = self.get_deduped_batch_locks(
-            tx_account_locks_results
-                .into_iter()
-                .map(|res| res.unwrap()));
+        let deduped_locks = self
+            .get_deduped_batch_locks(tx_account_locks_results.into_iter().map(|res| res.unwrap()));
 
         let account_locks = &mut self.account_locks.lock().unwrap();
         let result = account_locks.try_lock_accounts(
-            deduped_locks.iter().map(|(pubkey, is_writable)| (pubkey, *is_writable)),
+            deduped_locks
+                .iter()
+                .map(|(pubkey, is_writable)| (pubkey, *is_writable)),
             additional_read_locks,
             additional_write_locks,
         );
 
-        std::iter::once(result).chain(
-            (0..len-1).map(|_| Ok(()))
-        ).collect()
+        std::iter::once(result)
+            .chain((0..len - 1).map(|_| Ok(())))
+            .collect()
     }
 
     fn get_deduped_batch_locks<'a>(
         &self,
-        tx_account_locks: impl Iterator<Item = TransactionAccountLocksIterator<'a, impl SVMMessage + 'a>>,
+        tx_account_locks: impl Iterator<
+            Item = TransactionAccountLocksIterator<'a, impl SVMMessage + 'a>,
+        >,
     ) -> Vec<(Pubkey, bool)> {
         let mut deduped_locks = HashMap::new();
         for tx_account_locks in tx_account_locks {
@@ -703,7 +705,9 @@ impl Accounts {
             );
             let mut account_locks = self.account_locks.lock().unwrap();
             account_locks.unlock_accounts(
-                deduped_locks.iter().map(|(pubkey, is_writable)| (pubkey, *is_writable)),
+                deduped_locks
+                    .iter()
+                    .map(|(pubkey, is_writable)| (pubkey, *is_writable)),
             );
             return;
         }
@@ -713,10 +717,7 @@ impl Accounts {
         for (tx, res) in txs_and_results {
             if res.is_ok() {
                 let tx_account_locks = TransactionAccountLocksIterator::new(tx);
-                account_locks.unlock_accounts(
-                    tx_account_locks
-                        .accounts_with_is_writable()
-                );
+                account_locks.unlock_accounts(tx_account_locks.accounts_with_is_writable());
             }
         }
     }
@@ -1723,7 +1724,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn test_batched_locking() {
         let keypair0 = Keypair::new();
@@ -1775,11 +1775,7 @@ mod tests {
         let tx2 = new_sanitized_tx(&[&keypair3], message, Hash::default());
         let txs = vec![tx0, tx1, tx2];
 
-        let qos_results = vec![
-            Ok(()),
-            Ok(()),
-            Ok(()),
-        ];
+        let qos_results = vec![Ok(()), Ok(()), Ok(())];
 
         let results = accounts.lock_accounts_with_results(
             txs.iter(),
