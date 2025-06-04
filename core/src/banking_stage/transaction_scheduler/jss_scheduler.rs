@@ -214,8 +214,10 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
             msg: Some(Msg::BundleResult(
                 jito_protos::proto::jss_types::BundleResult {
                     seq_id: seq_id,
-                    result: Some(bundle_result::Result::Retryable(
-                        jito_protos::proto::jss_types::Retryable {},
+                    result: Some(bundle_result::Result::NotCommitted(
+                        jito_protos::proto::jss_types::NotCommitted {
+                            reason: "retryable".to_string(),
+                        },
                     )),
                 },
             )),
@@ -236,27 +238,33 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
     fn generate_bundle_result(processed_results: &[TransactionResult]) -> bundle_result::Result {
         if processed_results
             .iter()
-            .all(|result| matches!(result, TransactionResult::Retryable))
+            .all(|result| matches!(result, TransactionResult::Committed(_)))
         {
-            bundle_result::Result::Retryable(jito_protos::proto::jss_types::Retryable {})
-        } else if processed_results
-            .iter()
-            .any(|result| matches!(result, TransactionResult::Invalid))
-        {
-            bundle_result::Result::Invalid(jito_protos::proto::jss_types::Invalid {})
-        } else {
             let transaction_results = processed_results
                 .iter()
                 .filter_map(|result| {
-                    if let TransactionResult::Processed(processed) = result {
+                    if let TransactionResult::Committed(processed) = result {
                         Some(processed.clone())
                     } else {
                         None
                     }
                 })
                 .collect();
-            bundle_result::Result::Processed(jito_protos::proto::jss_types::Processed {
+            bundle_result::Result::Committed(jito_protos::proto::jss_types::Committed {
                 transaction_results,
+            })
+        } else {
+            bundle_result::Result::NotCommitted(jito_protos::proto::jss_types::NotCommitted {
+                reason: processed_results
+                    .iter()
+                    .find_map(|result| {
+                        if let TransactionResult::NotCommitted { reason } = result {
+                            Some(reason.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(|| "unknown".to_string()),
             })
         }
     }
