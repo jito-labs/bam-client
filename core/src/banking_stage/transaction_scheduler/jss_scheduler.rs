@@ -18,7 +18,7 @@ use solana_svm_transaction::svm_message::SVMMessage;
 
 use crate::banking_stage::{
     decision_maker::BufferedPacketsDecision,
-    scheduler_messages::{ConsumeWork, FinishedConsumeWork, TransactionBatchId},
+    scheduler_messages::{ConsumeWork, FinishedConsumeWork, TransactionBatchId, TransactionResult},
 };
 
 use super::{
@@ -233,6 +233,30 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
         });
     }
 
+    fn generate_bundle_result(
+        processed_results: &[TransactionResult],
+    ) -> bundle_result::Result {
+        if processed_results.iter().all(|result| matches!(result, TransactionResult::Retryable)) {
+            bundle_result::Result::Retryable(jito_protos::proto::jss_types::Retryable {})
+        } else if processed_results.iter().any(|result| matches!(result, TransactionResult::Invalid)) {
+            bundle_result::Result::Invalid(jito_protos::proto::jss_types::Invalid {})
+        } else {
+            let transaction_results = processed_results
+                .iter()
+                .filter_map(|result| {
+                    if let TransactionResult::Processed(processed) = result {
+                        Some(processed.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            bundle_result::Result::Processed(jito_protos::proto::jss_types::Processed {
+                transaction_results,
+            })
+        }
+    }
+
     fn maybe_bank_boundary_actions(
         &mut self,
         decision: &BufferedPacketsDecision,
@@ -341,7 +365,10 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
 
             // Send the result back to the scheduler
             if let Some(extra_info) = result.extra_info {
-                self.send_back_result(seq_id, extra_info.result);
+                let bundle_result = Self::generate_bundle_result(
+                    &extra_info.processed_results,
+                );
+                self.send_back_result(seq_id, bundle_result);
             }
 
             // A new era started while you were gone
