@@ -8,7 +8,7 @@ use ahash::HashMap;
 use crossbeam_channel::{Receiver, Sender};
 use jito_protos::proto::{
     jss_api::{start_scheduler_message::Msg, StartSchedulerMessage},
-    jss_types::bundle_result,
+    jss_types::{bundle_result, NotCommittedReason},
 };
 use prio_graph::{AccessKind, GraphNode, PrioGraph};
 use solana_pubkey::Pubkey;
@@ -216,7 +216,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
                     seq_id: seq_id,
                     result: Some(bundle_result::Result::NotCommitted(
                         jito_protos::proto::jss_types::NotCommitted {
-                            reason: "retryable".to_string(),
+                            reason: NotCommittedReason::Retryable as i32,
                         },
                     )),
                 },
@@ -258,13 +258,13 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
                 reason: processed_results
                     .iter()
                     .find_map(|result| {
-                        if let TransactionResult::NotCommitted { reason } = result {
-                            Some(reason.clone())
+                        if let TransactionResult::NotCommitted(reason) = result {
+                            Some(*reason as i32)
                         } else {
                             None
                         }
                     })
-                    .unwrap_or_else(|| "unknown".to_string()),
+                    .unwrap_or_else(|| NotCommittedReason::Invalid as i32),
             })
         }
     }
