@@ -459,34 +459,6 @@ impl Consumer {
         }
     }
 
-    fn early_bailout_batch_output(
-        txn_count: usize,
-        retryable: bool,
-    ) -> ProcessTransactionBatchOutput {
-        ProcessTransactionBatchOutput {
-            cost_model_throttled_transactions_count: 0,
-            cost_model_us: 0,
-            execute_and_commit_transactions_output: ExecuteAndCommitTransactionsOutput {
-                transaction_counts: LeaderProcessedTransactionCounts {
-                    attempted_processing_count: txn_count as u64,
-                    ..Default::default()
-                },
-                retryable_transaction_indexes: if retryable {
-                    (0..txn_count).collect()
-                } else {
-                    vec![]
-                },
-                commit_transactions_result: (0..txn_count)
-                    .map(|_| Ok(CommitTransactionDetails::NotCommitted))
-                    .collect(),
-                execute_and_commit_timings: LeaderExecuteAndCommitTimings::default(),
-                error_counters: TransactionErrorMetrics::default(),
-                min_prioritization_fees: 0,
-                max_prioritization_fees: 0,
-            },
-        }
-    }
-
     fn run_tip_programs_if_needed(
         &self,
         bank: &Arc<Bank>,
@@ -567,13 +539,6 @@ impl Consumer {
         let pre_results = vec![Ok(()); txs.len()];
         let check_results =
             bank.check_transactions(txs, &pre_results, MAX_PROCESSING_AGE, &mut error_counters);
-        if revert_on_error && check_results.iter().any(|result| result.is_err()) {
-            info!(
-                "process_and_record_transactions revert_on_error check_results= {:?}",
-                check_results
-            );
-            return Self::early_bailout_batch_output(txs.len(), false);
-        }
 
         // If checks passed, verify pre-compiles and continue processing on success.
         let move_precompile_verification_to_svm = bank
@@ -593,13 +558,6 @@ impl Consumer {
                 Err(err) => Err(err),
             })
             .collect();
-        if revert_on_error && check_results.iter().any(|result| result.is_err()) {
-            info!(
-                "process_and_record_transactions revert_on_error check_results= {:?}",
-                check_results
-            );
-            return Self::early_bailout_batch_output(txs.len(), false);
-        }
 
         let mut output = self.process_and_record_transactions_with_pre_results(
             bank,
@@ -688,18 +646,6 @@ impl Consumer {
             pre_results,
             reservation_cb
         ));
-        if revert_on_error
-            && transaction_qos_cost_results
-                .iter()
-                .any(|result| result.is_err())
-        {
-            QosService::remove_or_update_costs(transaction_qos_cost_results.iter(), None, bank);
-            let mut result = Self::early_bailout_batch_output(txs.len(), true);
-            result.cost_model_throttled_transactions_count =
-                cost_model_throttled_transactions_count;
-            result.cost_model_us = cost_model_us;
-            return result;
-        }
 
         // Only lock accounts for those transactions are selected for the block;
         // Once accounts are locked, other threads cannot encode transactions that will modify the
@@ -717,14 +663,6 @@ impl Consumer {
             revert_on_error,
         ));
         drop(bundle_account_locks);
-        if revert_on_error && batch.lock_results().iter().any(|result| result.is_err()) {
-            QosService::remove_or_update_costs(transaction_qos_cost_results.iter(), None, bank);
-            let mut result = Self::early_bailout_batch_output(txs.len(), true);
-            result.cost_model_throttled_transactions_count =
-                cost_model_throttled_transactions_count;
-            result.cost_model_us = cost_model_us;
-            return result;
-        }
 
         // retryable_txs includes AccountInUse, WouldExceedMaxBlockCostLimit
         // WouldExceedMaxAccountCostLimit, WouldExceedMaxVoteCostLimit
@@ -850,6 +788,22 @@ impl Consumer {
                 Ok(_) => None,
             })
             .collect();
+        if revert_on_error && batch.lock_results().iter().any(|res| res.is_err()) {
+            return ExecuteAndCommitTransactionsOutput {
+                transaction_counts: LeaderProcessedTransactionCounts {
+                    attempted_processing_count: batch.sanitized_transactions().len() as u64,
+                    ..Default::default()
+                },
+                retryable_transaction_indexes,
+                commit_transactions_result: Ok((0..batch.sanitized_transactions().len())
+                    .map(|_| CommitTransactionDetails::NotCommitted)
+                    .collect()),
+                execute_and_commit_timings,
+                error_counters,
+                min_prioritization_fees,
+                max_prioritization_fees,
+            };
+        }
 
         let (load_and_execute_transactions_output, load_execute_us) = measure_us!(bank
             .load_and_execute_transactions(
