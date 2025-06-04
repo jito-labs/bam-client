@@ -3,10 +3,10 @@ use {
         committer::CommitTransactionDetails,
         consumer::{Consumer, ExecuteAndCommitTransactionsOutput, ProcessTransactionBatchOutput},
         leader_slot_timing_metrics::LeaderExecuteAndCommitTimings,
-        scheduler_messages::{ConsumeWork, FinishedConsumeWork, FinishedConsumeWorkExtraInfo},
+        scheduler_messages::{ConsumeWork, FinishedConsumeWork, FinishedConsumeWorkExtraInfo, TransactionResult},
     },
     crossbeam_channel::{Receiver, RecvError, SendError, Sender},
-    jito_protos::proto::jss_types::{bundle_result, TransactionProcessedResult},
+    jito_protos::proto::jss_types::TransactionProcessedResult,
     solana_measure::measure_us,
     solana_poh::leader_bank_notifier::LeaderBankNotifier,
     solana_runtime::bank::Bank,
@@ -131,54 +131,11 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         self.metrics.has_data.store(true, Ordering::Relaxed);
 
         let extra_info = if work.respond_with_extra_info {
-            let result = if output
-                .execute_and_commit_transactions_output
-                .retryable_transaction_indexes
-                .len()
-                == work.transactions.len()
-            {
-                bundle_result::Result::Retryable(jito_protos::proto::jss_types::Retryable {})
-            } else {
-                if let Ok(commit_results) = output
-                    .execute_and_commit_transactions_output
-                    .commit_transactions_result
-                    .as_ref()
-                {
-                    if commit_results.len() != work.ids.len()
-                        || commit_results
-                            .iter()
-                            .map(|r| matches!(r, CommitTransactionDetails::NotCommitted))
-                            .any(|x| x)
-                    {
-                        bundle_result::Result::Invalid(jito_protos::proto::jss_types::Invalid {})
-                    } else {
-                        let mut transaction_results = vec![];
-                        for i in 0..work.ids.len() {
-                            if let Some(commit_result) = commit_results.get(i) {
-                                if let CommitTransactionDetails::Committed {
-                                    compute_units, ..
-                                } = commit_result
-                                {
-                                    transaction_results.push(TransactionProcessedResult {
-                                        cus_consumed: *compute_units as u32,
-                                        feepayer_balance_lamports: bank
-                                            .get_balance(&work.transactions[i].fee_payer()),
-                                    });
-                                } else {
-                                    continue;
-                                }
-                            };
-                        }
-                        bundle_result::Result::Processed(jito_protos::proto::jss_types::Processed {
-                            transaction_results,
-                        })
-                    }
-                } else {
-                    bundle_result::Result::Invalid(jito_protos::proto::jss_types::Invalid {})
-                }
-            };
-
-            Some(FinishedConsumeWorkExtraInfo { result })
+            Some(Self::generate_extra_info(
+                &output,
+                &work,
+                bank,
+            ))
         } else {
             None
         };
@@ -191,6 +148,43 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
             extra_info,
         })?;
         Ok(())
+    }
+
+    fn generate_extra_info(
+        output: &ProcessTransactionBatchOutput,
+        work: &ConsumeWork<Tx>,
+        bank: &Arc<Bank>,
+    ) -> FinishedConsumeWorkExtraInfo {
+        let retryable_indexes = &output
+            .execute_and_commit_transactions_output
+            .retryable_transaction_indexes;
+        let commit_transactions_result =
+            output.execute_and_commit_transactions_output.commit_transactions_result.as_ref().cloned().unwrap_or(
+            vec![CommitTransactionDetails::NotCommitted; work.transactions.len()],
+        );
+
+        let mut processed_results = vec![];
+        for (i, commit_info) in commit_transactions_result.iter().enumerate() {
+            if retryable_indexes.contains(&i) {
+                processed_results.push(TransactionResult::Retryable);
+            } else if let CommitTransactionDetails::Committed {
+                compute_units,
+                loaded_accounts_data_size: _,
+            } = commit_info
+            {
+                processed_results.push(TransactionResult::Processed(
+                    TransactionProcessedResult {
+                        cus_consumed: *compute_units as u32,
+                        feepayer_balance_lamports: bank
+                            .get_balance(&work.transactions[i].fee_payer()),
+                    },
+                ));
+            } else {
+                processed_results.push(TransactionResult::Invalid);
+            }
+        }
+
+        FinishedConsumeWorkExtraInfo { processed_results }
     }
 
     /// Try to get a bank for consuming.
@@ -228,9 +222,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         self.metrics.has_data.store(true, Ordering::Relaxed);
         let extra_info = if work.respond_with_extra_info {
             Some(FinishedConsumeWorkExtraInfo {
-                result: bundle_result::Result::Retryable(
-                    jito_protos::proto::jss_types::Retryable {},
-                ),
+                processed_results: vec![TransactionResult::Retryable; num_retryable],
             })
         } else {
             None

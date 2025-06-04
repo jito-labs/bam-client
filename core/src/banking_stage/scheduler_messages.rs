@@ -1,8 +1,8 @@
 use {
-    jito_protos::proto::jss_types::bundle_result,
     solana_sdk::clock::{Epoch, Slot},
     std::fmt::Display,
 };
+use jito_protos::proto::jss_types::TransactionProcessedResult;
 
 /// A unique identifier for a transaction batch.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -55,5 +55,12 @@ pub struct FinishedConsumeWork<Tx> {
 }
 
 pub struct FinishedConsumeWorkExtraInfo {
-    pub result: bundle_result::Result,
+    pub processed_results: Vec<TransactionResult>,
+}
+
+#[derive(Clone, Debug)]
+pub enum TransactionResult {
+    Retryable,
+    Processed(TransactionProcessedResult),
+    Invalid,
 }
