@@ -3,7 +3,9 @@ use {
         committer::CommitTransactionDetails,
         consumer::{Consumer, ExecuteAndCommitTransactionsOutput, ProcessTransactionBatchOutput},
         leader_slot_timing_metrics::LeaderExecuteAndCommitTimings,
-        scheduler_messages::{ConsumeWork, FinishedConsumeWork, FinishedConsumeWorkExtraInfo, TransactionResult},
+        scheduler_messages::{
+            ConsumeWork, FinishedConsumeWork, FinishedConsumeWorkExtraInfo, TransactionResult,
+        },
     },
     crossbeam_channel::{Receiver, RecvError, SendError, Sender},
     jito_protos::proto::jss_types::TransactionProcessedResult,
@@ -131,11 +133,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         self.metrics.has_data.store(true, Ordering::Relaxed);
 
         let extra_info = if work.respond_with_extra_info {
-            Some(Self::generate_extra_info(
-                &output,
-                &work,
-                bank,
-            ))
+            Some(Self::generate_extra_info(&output, &work, bank))
         } else {
             None
         };
@@ -158,10 +156,15 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         let retryable_indexes = &output
             .execute_and_commit_transactions_output
             .retryable_transaction_indexes;
-        let commit_transactions_result =
-            output.execute_and_commit_transactions_output.commit_transactions_result.as_ref().cloned().unwrap_or(
-            vec![CommitTransactionDetails::NotCommitted; work.transactions.len()],
-        );
+        let commit_transactions_result = output
+            .execute_and_commit_transactions_output
+            .commit_transactions_result
+            .as_ref()
+            .cloned()
+            .unwrap_or(vec![
+                CommitTransactionDetails::NotCommitted;
+                work.transactions.len()
+            ]);
 
         let mut processed_results = vec![];
         for (i, commit_info) in commit_transactions_result.iter().enumerate() {
@@ -172,13 +175,10 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
                 loaded_accounts_data_size: _,
             } = commit_info
             {
-                processed_results.push(TransactionResult::Processed(
-                    TransactionProcessedResult {
-                        cus_consumed: *compute_units as u32,
-                        feepayer_balance_lamports: bank
-                            .get_balance(&work.transactions[i].fee_payer()),
-                    },
-                ));
+                processed_results.push(TransactionResult::Processed(TransactionProcessedResult {
+                    cus_consumed: *compute_units as u32,
+                    feepayer_balance_lamports: bank.get_balance(&work.transactions[i].fee_payer()),
+                }));
             } else {
                 processed_results.push(TransactionResult::Invalid);
             }
