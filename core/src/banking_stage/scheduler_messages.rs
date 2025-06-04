@@ -1,8 +1,8 @@
+use jito_protos::proto::jss_types::TransactionProcessedResult;
 use {
     solana_sdk::clock::{Epoch, Slot},
     std::fmt::Display,
 };
-use jito_protos::proto::jss_types::TransactionProcessedResult;
 
 /// A unique identifier for a transaction batch.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
