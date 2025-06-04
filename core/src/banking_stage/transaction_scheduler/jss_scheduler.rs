@@ -233,12 +233,16 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
         });
     }
 
-    fn generate_bundle_result(
-        processed_results: &[TransactionResult],
-    ) -> bundle_result::Result {
-        if processed_results.iter().all(|result| matches!(result, TransactionResult::Retryable)) {
+    fn generate_bundle_result(processed_results: &[TransactionResult]) -> bundle_result::Result {
+        if processed_results
+            .iter()
+            .all(|result| matches!(result, TransactionResult::Retryable))
+        {
             bundle_result::Result::Retryable(jito_protos::proto::jss_types::Retryable {})
-        } else if processed_results.iter().any(|result| matches!(result, TransactionResult::Invalid)) {
+        } else if processed_results
+            .iter()
+            .any(|result| matches!(result, TransactionResult::Invalid))
+        {
             bundle_result::Result::Invalid(jito_protos::proto::jss_types::Invalid {})
         } else {
             let transaction_results = processed_results
@@ -365,9 +369,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
 
             // Send the result back to the scheduler
             if let Some(extra_info) = result.extra_info {
-                let bundle_result = Self::generate_bundle_result(
-                    &extra_info.processed_results,
-                );
+                let bundle_result = Self::generate_bundle_result(&extra_info.processed_results);
                 self.send_back_result(seq_id, bundle_result);
             }
 
