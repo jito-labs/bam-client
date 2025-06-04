@@ -169,9 +169,9 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         let mut processed_results = vec![];
         for (i, commit_info) in commit_transactions_result.iter().enumerate() {
             if retryable_indexes.contains(&i) {
-                processed_results.push(TransactionResult::NotCommitted {
-                    reason: "retryable".to_string(),
-                });
+                processed_results.push(TransactionResult::NotCommitted(
+                    jito_protos::proto::jss_types::NotCommittedReason::Retryable,
+                ));
             } else if let CommitTransactionDetails::Committed {
                 compute_units,
                 loaded_accounts_data_size: _,
@@ -182,9 +182,9 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
                     feepayer_balance_lamports: bank.get_balance(&work.transactions[i].fee_payer()),
                 }));
             } else {
-                processed_results.push(TransactionResult::NotCommitted {
-                    reason: "invalid".to_string(),
-                });
+                processed_results.push(TransactionResult::NotCommitted(
+                    jito_protos::proto::jss_types::NotCommittedReason::Invalid,
+                ));
             }
         }
 
@@ -227,9 +227,9 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         let extra_info = if work.respond_with_extra_info {
             Some(FinishedConsumeWorkExtraInfo {
                 processed_results: vec![
-                    TransactionResult::NotCommitted {
-                        reason: "retryable".to_string(),
-                    };
+                    TransactionResult::NotCommitted(
+                        jito_protos::proto::jss_types::NotCommittedReason::Retryable
+                    );
                     num_retryable
                 ],
             })
