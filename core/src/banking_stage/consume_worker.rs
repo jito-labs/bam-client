@@ -8,7 +8,7 @@ use {
         },
     },
     crossbeam_channel::{Receiver, RecvError, SendError, Sender},
-    jito_protos::proto::jss_types::TransactionProcessedResult,
+    jito_protos::proto::jss_types::TransactionCommittedResult,
     solana_measure::measure_us,
     solana_poh::leader_bank_notifier::LeaderBankNotifier,
     solana_runtime::bank::Bank,
@@ -169,18 +169,22 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         let mut processed_results = vec![];
         for (i, commit_info) in commit_transactions_result.iter().enumerate() {
             if retryable_indexes.contains(&i) {
-                processed_results.push(TransactionResult::Retryable);
+                processed_results.push(TransactionResult::NotCommitted {
+                    reason: "retryable".to_string(),
+                });
             } else if let CommitTransactionDetails::Committed {
                 compute_units,
                 loaded_accounts_data_size: _,
             } = commit_info
             {
-                processed_results.push(TransactionResult::Processed(TransactionProcessedResult {
+                processed_results.push(TransactionResult::Committed(TransactionCommittedResult {
                     cus_consumed: *compute_units as u32,
                     feepayer_balance_lamports: bank.get_balance(&work.transactions[i].fee_payer()),
                 }));
             } else {
-                processed_results.push(TransactionResult::Invalid);
+                processed_results.push(TransactionResult::NotCommitted {
+                    reason: "invalid".to_string(),
+                });
             }
         }
 
@@ -222,7 +226,12 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         self.metrics.has_data.store(true, Ordering::Relaxed);
         let extra_info = if work.respond_with_extra_info {
             Some(FinishedConsumeWorkExtraInfo {
-                processed_results: vec![TransactionResult::Retryable; num_retryable],
+                processed_results: vec![
+                    TransactionResult::NotCommitted {
+                        reason: "retryable".to_string(),
+                    };
+                    num_retryable
+                ],
             })
         } else {
             None

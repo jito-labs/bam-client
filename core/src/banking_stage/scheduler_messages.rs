@@ -1,4 +1,4 @@
-use jito_protos::proto::jss_types::TransactionProcessedResult;
+use jito_protos::proto::jss_types::TransactionCommittedResult;
 use {
     solana_sdk::clock::{Epoch, Slot},
     std::fmt::Display,
@@ -60,7 +60,6 @@ pub struct FinishedConsumeWorkExtraInfo {
 
 #[derive(Clone, Debug)]
 pub enum TransactionResult {
-    Retryable,
-    Processed(TransactionProcessedResult),
-    Invalid,
+    Committed(TransactionCommittedResult),
+    NotCommitted { reason: String },
 }

@@ -110,8 +110,10 @@ impl JssReceiveAndBuffer {
             msg: Some(Msg::BundleResult(
                 jito_protos::proto::jss_types::BundleResult {
                     seq_id: seq_id,
-                    result: Some(bundle_result::Result::Invalid(
-                        jito_protos::proto::jss_types::Invalid {},
+                    result: Some(bundle_result::Result::NotCommitted(
+                        jito_protos::proto::jss_types::NotCommitted {
+                            reason: "invalid".to_string(),
+                        },
                     )),
                 },
             )),
@@ -123,8 +125,10 @@ impl JssReceiveAndBuffer {
             msg: Some(Msg::BundleResult(
                 jito_protos::proto::jss_types::BundleResult {
                     seq_id: seq_id,
-                    result: Some(bundle_result::Result::Retryable(
-                        jito_protos::proto::jss_types::Retryable {},
+                    result: Some(bundle_result::Result::NotCommitted(
+                        jito_protos::proto::jss_types::NotCommitted {
+                            reason: "retryable".to_string(),
+                        },
                     )),
                 },
             )),
