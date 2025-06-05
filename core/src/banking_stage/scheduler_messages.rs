@@ -1,4 +1,5 @@
-use jito_protos::proto::jss_types::{NotCommittedReason, TransactionCommittedResult};
+use jito_protos::proto::jss_types::TransactionCommittedResult;
+use solana_sdk::transaction::TransactionError;
 use {
     solana_sdk::clock::{Epoch, Slot},
     std::fmt::Display,
@@ -62,4 +63,11 @@ pub struct FinishedConsumeWorkExtraInfo {
 pub enum TransactionResult {
     Committed(TransactionCommittedResult),
     NotCommitted(NotCommittedReason),
+}
+
+#[derive(Clone, Debug)]
+pub enum NotCommittedReason {
+    PohTimeout,
+    BatchRevert,
+    Error(TransactionError),
 }

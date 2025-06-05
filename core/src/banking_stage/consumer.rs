@@ -79,6 +79,8 @@ pub struct ExecuteAndCommitTransactionsOutput {
     pub(crate) error_counters: TransactionErrorMetrics,
     pub(crate) min_prioritization_fees: u64,
     pub(crate) max_prioritization_fees: u64,
+
+    pub(crate) transaction_errors: Vec<Option<TransactionError>>,
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -802,6 +804,14 @@ impl Consumer {
                 error_counters,
                 min_prioritization_fees,
                 max_prioritization_fees,
+                transaction_errors: batch
+                    .lock_results()
+                    .iter()
+                    .map(|res| match res {
+                        Ok(_) => None,
+                        Err(error) => Some(error.clone()),
+                    })
+                    .collect(),
             };
         }
 
@@ -827,6 +837,15 @@ impl Consumer {
         let successful_count = load_and_execute_transactions_output
             .processed_counts
             .processed_with_successful_result_count as usize;
+        let transaction_errors = load_and_execute_transactions_output
+            .processing_results
+            .iter()
+            .map(|result| match result {
+                Ok(_) => None,
+                Err(error) => Some(error.clone()),
+            })
+            .collect_vec();
+
         if revert_on_error && successful_count != batch.sanitized_transactions().len() {
             return ExecuteAndCommitTransactionsOutput {
                 transaction_counts: LeaderProcessedTransactionCounts {
@@ -841,6 +860,7 @@ impl Consumer {
                 error_counters,
                 min_prioritization_fees,
                 max_prioritization_fees,
+                transaction_errors,
             };
         }
 
@@ -916,6 +936,7 @@ impl Consumer {
                 error_counters,
                 min_prioritization_fees,
                 max_prioritization_fees,
+                transaction_errors,
             };
         }
 
@@ -966,6 +987,7 @@ impl Consumer {
             error_counters,
             min_prioritization_fees,
             max_prioritization_fees,
+            transaction_errors,
         }
     }
 
