@@ -4,7 +4,8 @@ use {
         consumer::{Consumer, ExecuteAndCommitTransactionsOutput, ProcessTransactionBatchOutput},
         leader_slot_timing_metrics::LeaderExecuteAndCommitTimings,
         scheduler_messages::{
-            ConsumeWork, FinishedConsumeWork, FinishedConsumeWorkExtraInfo, TransactionResult,
+            ConsumeWork, FinishedConsumeWork, FinishedConsumeWorkExtraInfo, NotCommittedReason,
+            TransactionResult,
         },
     },
     crossbeam_channel::{Receiver, RecvError, SendError, Sender},
@@ -153,26 +154,27 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         work: &ConsumeWork<Tx>,
         bank: &Arc<Bank>,
     ) -> FinishedConsumeWorkExtraInfo {
-        let retryable_indexes = &output
-            .execute_and_commit_transactions_output
-            .retryable_transaction_indexes;
-        let commit_transactions_result = output
+        let Ok(commit_transactions_result) = output
             .execute_and_commit_transactions_output
             .commit_transactions_result
             .as_ref()
-            .cloned()
-            .unwrap_or(vec![
-                CommitTransactionDetails::NotCommitted;
-                work.transactions.len()
-            ]);
+        else {
+            return FinishedConsumeWorkExtraInfo {
+                processed_results: vec![
+                    TransactionResult::NotCommitted(
+                        NotCommittedReason::PohTimeout,
+                    );
+                    work.transactions.len()
+                ],
+            };
+        };
 
+        let errors = &output
+            .execute_and_commit_transactions_output
+            .transaction_errors;
         let mut processed_results = vec![];
         for (i, commit_info) in commit_transactions_result.iter().enumerate() {
-            if retryable_indexes.contains(&i) {
-                processed_results.push(TransactionResult::NotCommitted(
-                    jito_protos::proto::jss_types::NotCommittedReason::Retryable,
-                ));
-            } else if let CommitTransactionDetails::Committed {
+            if let CommitTransactionDetails::Committed {
                 compute_units,
                 loaded_accounts_data_size: _,
             } = commit_info
@@ -182,9 +184,13 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
                     feepayer_balance_lamports: bank.get_balance(&work.transactions[i].fee_payer()),
                 }));
             } else {
-                processed_results.push(TransactionResult::NotCommitted(
-                    jito_protos::proto::jss_types::NotCommittedReason::Invalid,
-                ));
+                let not_committed_reason = errors
+                    .get(i)
+                    .cloned()
+                    .flatten()
+                    .map(|e| NotCommittedReason::Error(e))
+                    .unwrap_or(NotCommittedReason::BatchRevert);
+                processed_results.push(TransactionResult::NotCommitted(not_committed_reason));
             }
         }
 
@@ -228,7 +234,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
             Some(FinishedConsumeWorkExtraInfo {
                 processed_results: vec![
                     TransactionResult::NotCommitted(
-                        jito_protos::proto::jss_types::NotCommittedReason::Retryable
+                        NotCommittedReason::PohTimeout,
                     );
                     num_retryable
                 ],

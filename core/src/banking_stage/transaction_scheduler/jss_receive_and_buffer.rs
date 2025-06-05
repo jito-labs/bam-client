@@ -14,7 +14,7 @@ use crossbeam_channel::{unbounded, Sender};
 use itertools::Itertools;
 use jito_protos::proto::{
     jss_api::{start_scheduler_message::Msg, StartSchedulerMessage},
-    jss_types::{bundle_result, Bundle, NotCommittedReason, Packet},
+    jss_types::{bundle_result, not_committed::Reason, Bundle, GenericInvalid, Packet, PohTimeout},
 };
 use solana_runtime::bank_forks::BankForks;
 use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
@@ -112,7 +112,7 @@ impl JssReceiveAndBuffer {
                     seq_id: seq_id,
                     result: Some(bundle_result::Result::NotCommitted(
                         jito_protos::proto::jss_types::NotCommitted {
-                            reason: NotCommittedReason::Invalid.into(),
+                            reason: Some(Reason::GenericInvalid(GenericInvalid {})),
                         },
                     )),
                 },
@@ -127,7 +127,7 @@ impl JssReceiveAndBuffer {
                     seq_id: seq_id,
                     result: Some(bundle_result::Result::NotCommitted(
                         jito_protos::proto::jss_types::NotCommitted {
-                            reason: NotCommittedReason::Retryable.into(),
+                            reason: Some(Reason::PohTimeout(PohTimeout {})),
                         },
                     )),
                 },
