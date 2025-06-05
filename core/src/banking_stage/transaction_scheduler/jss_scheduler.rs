@@ -8,17 +8,19 @@ use ahash::HashMap;
 use crossbeam_channel::{Receiver, Sender};
 use jito_protos::proto::{
     jss_api::{start_scheduler_message::Msg, StartSchedulerMessage},
-    jss_types::{bundle_result, NotCommittedReason},
+    jss_types::{bundle_result, not_committed::Reason, PohTimeout, TransactionErrorReason},
 };
 use prio_graph::{AccessKind, GraphNode, PrioGraph};
 use solana_pubkey::Pubkey;
 use solana_runtime_transaction::transaction_with_meta::TransactionWithMeta;
-use solana_sdk::clock::Slot;
+use solana_sdk::{clock::Slot, transaction::TransactionError};
 use solana_svm_transaction::svm_message::SVMMessage;
 
 use crate::banking_stage::{
     decision_maker::BufferedPacketsDecision,
-    scheduler_messages::{ConsumeWork, FinishedConsumeWork, TransactionBatchId, TransactionResult},
+    scheduler_messages::{
+        ConsumeWork, FinishedConsumeWork, NotCommittedReason, TransactionBatchId, TransactionResult,
+    },
 };
 
 use super::{
@@ -216,7 +218,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
                     seq_id: seq_id,
                     result: Some(bundle_result::Result::NotCommitted(
                         jito_protos::proto::jss_types::NotCommitted {
-                            reason: NotCommittedReason::Retryable as i32,
+                            reason: Some(Reason::PohTimeout(PohTimeout {})),
                         },
                     )),
                 },
@@ -254,18 +256,143 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
                 transaction_results,
             })
         } else {
-            bundle_result::Result::NotCommitted(jito_protos::proto::jss_types::NotCommitted {
-                reason: processed_results
-                    .iter()
-                    .find_map(|result| {
-                        if let TransactionResult::NotCommitted(reason) = result {
-                            Some(*reason as i32)
-                        } else {
+            // Get first NotCommit Reason that is not BatchRevert
+            let (index, not_commit_reason) = processed_results
+                .iter()
+                .enumerate()
+                .find_map(|(index, result)| {
+                    if let TransactionResult::NotCommitted(reason) = result {
+                        if matches!(reason, &NotCommittedReason::BatchRevert) {
                             None
+                        } else {
+                            Some((index, reason.clone()))
                         }
-                    })
-                    .unwrap_or_else(|| NotCommittedReason::Invalid as i32),
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or((0, NotCommittedReason::PohTimeout));
+
+            bundle_result::Result::NotCommitted(jito_protos::proto::jss_types::NotCommitted {
+                reason: Some(Self::convert_reason_to_proto(index, not_commit_reason)),
             })
+        }
+    }
+
+    fn convert_reason_to_proto(
+        index: usize,
+        reason: NotCommittedReason,
+    ) -> jito_protos::proto::jss_types::not_committed::Reason {
+        match reason {
+            NotCommittedReason::PohTimeout => {
+                jito_protos::proto::jss_types::not_committed::Reason::PohTimeout(
+                    jito_protos::proto::jss_types::PohTimeout {},
+                )
+            }
+            // Should not happen, but just in case:
+            NotCommittedReason::BatchRevert => {
+                jito_protos::proto::jss_types::not_committed::Reason::GenericInvalid(
+                    jito_protos::proto::jss_types::GenericInvalid {},
+                )
+            }
+            NotCommittedReason::Error(err) => {
+                jito_protos::proto::jss_types::not_committed::Reason::TransactionError(
+                    jito_protos::proto::jss_types::TransactionError {
+                        index: index as u32,
+                        reason: Self::convert_error_to_proto(err) as i32,
+                    },
+                )
+            }
+        }
+    }
+
+    fn convert_error_to_proto(err: TransactionError) -> TransactionErrorReason {
+        match err {
+            TransactionError::AccountInUse => TransactionErrorReason::AccountInUse,
+            TransactionError::AccountLoadedTwice => TransactionErrorReason::AccountLoadedTwice,
+            TransactionError::AccountNotFound => TransactionErrorReason::AccountNotFound,
+            TransactionError::ProgramAccountNotFound => {
+                TransactionErrorReason::ProgramAccountNotFound
+            }
+            TransactionError::InsufficientFundsForFee => {
+                TransactionErrorReason::InsufficientFundsForFee
+            }
+            TransactionError::InvalidAccountForFee => TransactionErrorReason::InvalidAccountForFee,
+            TransactionError::AlreadyProcessed => TransactionErrorReason::AlreadyProcessed,
+            TransactionError::BlockhashNotFound => TransactionErrorReason::BlockhashNotFound,
+            TransactionError::InstructionError(_, _) => TransactionErrorReason::InstructionError,
+            TransactionError::CallChainTooDeep => TransactionErrorReason::CallChainTooDeep,
+            TransactionError::MissingSignatureForFee => {
+                TransactionErrorReason::MissingSignatureForFee
+            }
+            TransactionError::InvalidAccountIndex => TransactionErrorReason::InvalidAccountIndex,
+            TransactionError::SignatureFailure => TransactionErrorReason::SignatureFailure,
+            TransactionError::InvalidProgramForExecution => {
+                TransactionErrorReason::InvalidProgramForExecution
+            }
+            TransactionError::SanitizeFailure => TransactionErrorReason::SanitizeFailure,
+            TransactionError::ClusterMaintenance => TransactionErrorReason::ClusterMaintenance,
+            TransactionError::AccountBorrowOutstanding => {
+                TransactionErrorReason::AccountBorrowOutstanding
+            }
+            TransactionError::WouldExceedMaxBlockCostLimit => {
+                TransactionErrorReason::WouldExceedMaxBlockCostLimit
+            }
+            TransactionError::UnsupportedVersion => TransactionErrorReason::UnsupportedVersion,
+            TransactionError::InvalidWritableAccount => {
+                TransactionErrorReason::InvalidWritableAccount
+            }
+            TransactionError::WouldExceedMaxAccountCostLimit => {
+                TransactionErrorReason::WouldExceedMaxAccountCostLimit
+            }
+            TransactionError::WouldExceedAccountDataBlockLimit => {
+                TransactionErrorReason::WouldExceedAccountDataBlockLimit
+            }
+            TransactionError::TooManyAccountLocks => TransactionErrorReason::TooManyAccountLocks,
+            TransactionError::AddressLookupTableNotFound => {
+                TransactionErrorReason::AddressLookupTableNotFound
+            }
+            TransactionError::InvalidAddressLookupTableOwner => {
+                TransactionErrorReason::InvalidAddressLookupTableOwner
+            }
+            TransactionError::InvalidAddressLookupTableData => {
+                TransactionErrorReason::InvalidAddressLookupTableData
+            }
+            TransactionError::InvalidAddressLookupTableIndex => {
+                TransactionErrorReason::InvalidAddressLookupTableIndex
+            }
+            TransactionError::InvalidRentPayingAccount => {
+                TransactionErrorReason::InvalidRentPayingAccount
+            }
+            TransactionError::WouldExceedMaxVoteCostLimit => {
+                TransactionErrorReason::WouldExceedMaxVoteCostLimit
+            }
+            TransactionError::WouldExceedAccountDataTotalLimit => {
+                TransactionErrorReason::WouldExceedAccountDataTotalLimit
+            }
+            TransactionError::DuplicateInstruction(_) => {
+                TransactionErrorReason::DuplicateInstruction
+            }
+            TransactionError::InsufficientFundsForRent { .. } => {
+                TransactionErrorReason::InsufficientFundsForRent
+            }
+            TransactionError::MaxLoadedAccountsDataSizeExceeded => {
+                TransactionErrorReason::MaxLoadedAccountsDataSizeExceeded
+            }
+            TransactionError::InvalidLoadedAccountsDataSizeLimit => {
+                TransactionErrorReason::InvalidLoadedAccountsDataSizeLimit
+            }
+            TransactionError::ResanitizationNeeded => TransactionErrorReason::ResanitizationNeeded,
+            TransactionError::ProgramExecutionTemporarilyRestricted { .. } => {
+                TransactionErrorReason::ProgramExecutionTemporarilyRestricted
+            }
+            TransactionError::UnbalancedTransaction => {
+                TransactionErrorReason::UnbalancedTransaction
+            }
+            TransactionError::ProgramCacheHitMaxLimit => {
+                TransactionErrorReason::ProgramCacheHitMaxLimit
+            }
+            TransactionError::CommitCancelled => TransactionErrorReason::CommitCancelled,
         }
     }
 
