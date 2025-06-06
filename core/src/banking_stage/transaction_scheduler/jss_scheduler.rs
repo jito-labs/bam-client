@@ -159,33 +159,8 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
                 continue;
             };
 
-            let transactions = batch_ids
-                .iter()
-                .filter_map(|txn_id| {
-                    let result = container.get_mut_transaction_state(*txn_id)?;
-                    let result = result.transition_to_pending();
-                    Some(result)
-                })
-                .collect::<Vec<_>>();
+            let work = Self::generate_work(next_batch_id, batch_ids, revert_on_error, container);
 
-            let max_ages = transactions
-                .iter()
-                .map(|txn| txn.max_age)
-                .collect::<Vec<_>>();
-
-            let transactions = transactions
-                .into_iter()
-                .map(|txn| txn.transaction)
-                .collect::<Vec<_>>();
-
-            let work = ConsumeWork {
-                batch_id: TransactionBatchId::new(next_batch_id.id as u64),
-                ids: batch_ids,
-                transactions: transactions,
-                max_ages,
-                revert_on_error,
-                respond_with_extra_info: true,
-            };
             // Send the work to the worker
             let consume_work_sender = &self.consume_work_senders[worker_index];
             let _ = consume_work_sender.send(work);
@@ -200,6 +175,41 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
             self.workers_scheduled_count[worker_index] += 1;
 
             *num_scheduled += 1;
+        }
+    }
+
+    fn generate_work(
+        next_batch_id: TransactionPriorityId,
+        batch_ids: Vec<usize>,
+        revert_on_error: bool,
+        container: &mut impl StateContainer<Tx>,
+    ) -> ConsumeWork<Tx> {
+        let transactions = batch_ids
+            .iter()
+            .filter_map(|txn_id| {
+                let result = container.get_mut_transaction_state(*txn_id)?;
+                let result = result.transition_to_pending();
+                Some(result)
+            })
+            .collect::<Vec<_>>();
+
+        let max_ages = transactions
+            .iter()
+            .map(|txn| txn.max_age)
+            .collect::<Vec<_>>();
+
+        let transactions = transactions
+            .into_iter()
+            .map(|txn| txn.transaction)
+            .collect::<Vec<_>>();
+
+        ConsumeWork {
+            batch_id: TransactionBatchId::new(next_batch_id.id as u64),
+            ids: batch_ids,
+            transactions: transactions,
+            max_ages,
+            revert_on_error,
+            respond_with_extra_info: true,
         }
     }
 
