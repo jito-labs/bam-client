@@ -199,11 +199,6 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
             );
             self.workers_scheduled_count[worker_index] += 1;
 
-            info!(
-                "jbatch={} sent to worker {}",
-                next_batch_id.id, worker_index
-            );
-
             *num_scheduled += 1;
         }
     }
