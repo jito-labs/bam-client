@@ -425,7 +425,6 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
                 let seq_id = priority_to_seq_id(next_batch_id.priority);
                 self.send_retryable_bundle_result(seq_id);
                 container.remove_by_id(next_batch_id.id);
-                info!("jbatch={} drained from container", next_batch_id.id);
             }
         }
 
@@ -433,23 +432,12 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
         // and then drain the prio-graph
         for (_, inflight_info) in self.inflight_batch_info.iter() {
             self.prio_graph.unblock(&inflight_info.priority_id);
-            info!(
-                "jbatch={} unblocked in prio-graph",
-                inflight_info.priority_id.id
-            );
         }
         while let Some((next_batch_id, _)) = self.prio_graph.pop_and_unblock() {
             let seq_id = priority_to_seq_id(next_batch_id.priority);
             self.send_retryable_bundle_result(seq_id);
             container.remove_by_id(next_batch_id.id);
-            info!("jbatch={} drained from prio-graph", next_batch_id.id);
         }
-
-        // Print worker s scheduled count
-        info!(
-            "Workers scheduled count: {:?}",
-            self.workers_scheduled_count
-        );
     }
 }
 
@@ -492,15 +480,9 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
             num_transactions += result.work.ids.len();
             let batch_id = result.work.batch_id;
             let Some(inflight_batch_info) = self.inflight_batch_info.remove(&batch_id) else {
-                error!("jbatch={} not found in inflight info", batch_id.0);
                 continue;
             };
             let seq_id = priority_to_seq_id(inflight_batch_info.priority_id.priority);
-
-            info!(
-                "jbatch={} Received finished",
-                inflight_batch_info.priority_id.id,
-            );
 
             // Send the result back to the scheduler
             if let Some(extra_info) = result.extra_info {
@@ -509,18 +491,8 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
             }
 
             // A new era started while you were gone
-            info!(
-                "jbatch={} slot {:?}, current_slot {:?}",
-                inflight_batch_info.priority_id.id, inflight_batch_info.slot, self.slot
-            );
             if Some(inflight_batch_info.slot) == self.slot {
                 self.prio_graph.unblock(&inflight_batch_info.priority_id);
-                info!(
-                    "jbatch={} in prio-graph",
-                    inflight_batch_info.priority_id.id
-                );
-            } else {
-                info!("Slot changed while the work was being done");
             }
 
             container.remove_by_id(inflight_batch_info.priority_id.id);
