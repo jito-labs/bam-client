@@ -55,13 +55,17 @@ pub struct JssScheduler<Tx: TransactionWithMeta> {
     finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
     response_sender: Sender<StartSchedulerMessage>,
 
+    next_batch_id: u64,
     inflight_batch_info: HashMap<TransactionBatchId, InflightBatchInfo>,
     prio_graph: SchedulerPrioGraph,
     slot: Option<Slot>,
 }
 
+// A structure to hold information about inflight batches.
+// A batch can either be one 'revert_on_error' batch or multiple
+// 'non-revert_on_error' batches that are scheduled together.
 struct InflightBatchInfo {
-    pub priority_id: TransactionPriorityId,
+    pub priority_ids: Vec<TransactionPriorityId>,
     pub worker_index: usize,
     pub slot: Slot,
 }
@@ -77,6 +81,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
             consume_work_senders,
             finished_consume_work_receiver,
             response_sender,
+            next_batch_id: 0,
             inflight_batch_info: HashMap::default(),
             prio_graph: PrioGraph::new(passthrough_priority),
             slot: None,
@@ -159,15 +164,16 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
                 continue;
             };
 
-            let work = Self::generate_work(next_batch_id, batch_ids, revert_on_error, container);
+            let batch_id = self.get_next_schedule_id();
+            let work = Self::generate_work(batch_id, batch_ids, revert_on_error, container);
 
             // Send the work to the worker
             let consume_work_sender = &self.consume_work_senders[worker_index];
             let _ = consume_work_sender.send(work);
             self.inflight_batch_info.insert(
-                TransactionBatchId::new(next_batch_id.id as u64),
+                batch_id,
                 InflightBatchInfo {
-                    priority_id: next_batch_id,
+                    priority_ids: vec![next_batch_id],
                     worker_index,
                     slot,
                 },
@@ -178,13 +184,19 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
         }
     }
 
+    fn get_next_schedule_id(&mut self) -> TransactionBatchId {
+        let result = TransactionBatchId::new(self.next_batch_id);
+        self.next_batch_id += 1;
+        result
+    }
+
     fn generate_work(
-        next_batch_id: TransactionPriorityId,
-        batch_ids: Vec<usize>,
+        batch_id: TransactionBatchId,
+        ids: Vec<usize>,
         revert_on_error: bool,
         container: &mut impl StateContainer<Tx>,
     ) -> ConsumeWork<Tx> {
-        let transactions = batch_ids
+        let transactions = ids
             .iter()
             .filter_map(|txn_id| {
                 let result = container.get_mut_transaction_state(*txn_id)?;
@@ -204,8 +216,8 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
             .collect::<Vec<_>>();
 
         ConsumeWork {
-            batch_id: TransactionBatchId::new(next_batch_id.id as u64),
-            ids: batch_ids,
+            batch_id,
+            ids,
             transactions: transactions,
             max_ages,
             revert_on_error,
@@ -239,7 +251,8 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
         });
     }
 
-    fn generate_bundle_result(processed_results: &[TransactionResult]) -> bundle_result::Result {
+    /// Generates a `bundle_result::Result` based on the processed results for 'revert_on_error' batches.
+    fn generate_revert_on_error_bundle_result(processed_results: &[TransactionResult]) -> bundle_result::Result {
         if processed_results
             .iter()
             .all(|result| matches!(result, TransactionResult::Committed(_)))
@@ -278,6 +291,29 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
             bundle_result::Result::NotCommitted(jito_protos::proto::jss_types::NotCommitted {
                 reason: Some(Self::convert_reason_to_proto(index, not_commit_reason)),
             })
+        }
+    }
+
+    /// Generates a `bundle_result::Result` based on the processed result of a single transaction.
+    fn generate_bundle_result(
+        processed: &TransactionResult,
+    ) -> bundle_result::Result {
+        match processed {
+            TransactionResult::Committed(result) => {
+                bundle_result::Result::Committed(jito_protos::proto::jss_types::Committed {
+                    transaction_results: vec![result.clone()],
+                })
+            }
+            TransactionResult::NotCommitted(reason) => {
+                let (index, not_commit_reason) = match reason {
+                    NotCommittedReason::PohTimeout => (0, NotCommittedReason::PohTimeout),
+                    NotCommittedReason::BatchRevert => (0, NotCommittedReason::BatchRevert),
+                    NotCommittedReason::Error(err) => (0, NotCommittedReason::Error(err.clone())),
+                };
+                bundle_result::Result::NotCommitted(jito_protos::proto::jss_types::NotCommitted {
+                    reason: Some(Self::convert_reason_to_proto(index, not_commit_reason)),
+                })
+            }
         }
     }
 
@@ -433,7 +469,9 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
         // Unblock all transactions blocked by inflight batches
         // and then drain the prio-graph
         for (_, inflight_info) in self.inflight_batch_info.iter() {
-            self.prio_graph.unblock(&inflight_info.priority_id);
+            for priority_id in &inflight_info.priority_ids {
+                self.prio_graph.unblock(priority_id);
+            }
         }
         while let Some((next_batch_id, _)) = self.prio_graph.pop_and_unblock() {
             let seq_id = priority_to_seq_id(next_batch_id.priority);
@@ -481,24 +519,36 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
         while let Ok(result) = self.finished_consume_work_receiver.try_recv() {
             num_transactions += result.work.ids.len();
             let batch_id = result.work.batch_id;
+            let revert_on_error = result.work.revert_on_error;
             let Some(inflight_batch_info) = self.inflight_batch_info.remove(&batch_id) else {
                 continue;
             };
-            let seq_id = priority_to_seq_id(inflight_batch_info.priority_id.priority);
 
-            // Send the result back to the scheduler
-            if let Some(extra_info) = result.extra_info {
-                let bundle_result = Self::generate_bundle_result(&extra_info.processed_results);
-                self.send_back_result(seq_id, bundle_result);
+            let len = if revert_on_error { 1 } else { inflight_batch_info.priority_ids.len() };
+            for (i, priority_id) in inflight_batch_info.priority_ids.iter().enumerate().take(len) {
+                let seq_id = priority_to_seq_id(priority_id.priority);
+            
+                if let Some(extra_info) = result.extra_info.as_ref() {
+                    let bundle_result = if revert_on_error {
+                        Self::generate_revert_on_error_bundle_result(&extra_info.processed_results)
+                    } else {
+                        let Some(txn_result) = extra_info.processed_results.get(i) else {
+                            warn!("Processed results for batch {} are missing for index {}", batch_id.0, i);
+                            continue;
+                        };
+                        Self::generate_bundle_result(txn_result)
+                    };
+                    self.send_back_result(seq_id, bundle_result);
+                }
+
+                if Some(inflight_batch_info.slot) == self.slot {
+                    self.prio_graph.unblock(&priority_id);
+                }
+
+                container.remove_by_id(priority_id.id);
+                self.workers_scheduled_count[inflight_batch_info.worker_index] -= 1;
+
             }
-
-            // A new era started while you were gone
-            if Some(inflight_batch_info.slot) == self.slot {
-                self.prio_graph.unblock(&inflight_batch_info.priority_id);
-            }
-
-            container.remove_by_id(inflight_batch_info.priority_id.id);
-            self.workers_scheduled_count[inflight_batch_info.worker_index] -= 1;
         }
 
         Ok((num_transactions, 0))
