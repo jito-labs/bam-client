@@ -153,7 +153,6 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
             let Some(next_batch_id) = self.prio_graph.pop() else {
                 break;
             };
-            info!("jbatch={} is next", next_batch_id.id);
 
             let Some((batch_ids, revert_on_error)) = container.get_batch(next_batch_id.id) else {
                 error!("jbatch={} not found in container", next_batch_id.id);
