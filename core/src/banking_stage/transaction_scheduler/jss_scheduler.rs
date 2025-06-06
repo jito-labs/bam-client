@@ -155,21 +155,57 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
 
         // Schedule any available transactions in prio-graph
         while let Some(worker_index) = self.get_best_available_worker() {
-            let Some(next_batch_id) = self.prio_graph.pop() else {
+            let batches_for_scheduling = self.get_batches_for_scheduling(container);
+            if batches_for_scheduling.is_empty() {
                 break;
-            };
+            }
+            for (priority_ids, revert_on_error) in batches_for_scheduling {
+                let batch_id = self.get_next_schedule_id();
+                let txn_ids = priority_ids
+                    .iter()
+                    .map(|priority_id| priority_id.id)
+                    .collect::<Vec<_>>();
+                let work = Self::generate_work(batch_id, txn_ids, revert_on_error, container);
+                self.send_to_worker(worker_index, priority_ids, work, slot);
+                *num_scheduled += 1;
+            }
+        }
+    }
 
-            let Some((batch_ids, revert_on_error)) = container.get_batch(next_batch_id.id) else {
-                error!("jbatch={} not found in container", next_batch_id.id);
+    /// Get batches of transactions for scheduling.
+    /// Build a normal txn batch up to a maximum of `MAX_TXN_PER_BATCH` transactions;
+    /// but if a 'revert_on_error' batch is encountered, the WIP batch is sent immediately
+    /// and the 'revert_on_error' batch is sent afterwards.
+    fn get_batches_for_scheduling(
+        &mut self,
+        container: &mut impl StateContainer<Tx>,
+    ) -> Vec<(Vec<TransactionPriorityId>, bool)> {
+        const MAX_TXN_PER_BATCH: usize = 16;
+        let mut result = vec![];
+        let mut current_batch_ids = vec![];
+        while let Some(next_batch_id) = self.prio_graph.pop() {
+            let Some((_, revert_on_error)) = container.get_batch(next_batch_id.id) else {
                 continue;
             };
 
-            let batch_id = self.get_next_schedule_id();
-            let work = Self::generate_work(batch_id, batch_ids, revert_on_error, container);
-            self.send_to_worker(worker_index, vec![next_batch_id], work, slot);
+            if revert_on_error {
+                if !current_batch_ids.is_empty() {
+                    result.push((std::mem::take(&mut current_batch_ids), false));
+                }
+                result.push((vec![next_batch_id], true));
+                break;
+            } else {
+                current_batch_ids.push(next_batch_id);
+            }
 
-            *num_scheduled += 1;
+            if current_batch_ids.len() >= MAX_TXN_PER_BATCH {
+                break;
+            }
         }
+        if !current_batch_ids.is_empty() {
+            result.push((current_batch_ids, false));
+        }
+        result
     }
 
     fn send_to_worker(
