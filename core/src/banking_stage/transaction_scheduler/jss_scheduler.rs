@@ -103,14 +103,13 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
         })
     }
 
+    /// Insert all incoming transactions into the `PrioGraph`.
     fn pull_into_prio_graph<S: StateContainer<Tx>>(&mut self, container: &mut S) {
-        // Insert all incoming transactions into the prio-graph
         while let Some(next_batch_id) = container.pop() {
             let Some((batch_ids, _)) = container.get_batch(next_batch_id.id) else {
                 error!("Batch {} not found in container", next_batch_id.id);
                 continue;
             };
-
             let txns = batch_ids
                 .iter()
                 .filter_map(|txn_id| container.get_transaction_ttl(*txn_id));
@@ -119,7 +118,6 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
                 next_batch_id,
                 Self::get_transactions_account_access(txns.into_iter()),
             );
-            info!("Inserted batch {} into prio-graph", next_batch_id.id);
         }
     }
 
