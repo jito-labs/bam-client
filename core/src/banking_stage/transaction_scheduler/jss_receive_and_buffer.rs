@@ -3,6 +3,7 @@
 /// this implementation only functions during the `Consume/Hold` phase; otherwise it will send them back
 /// to JSS with a `Retryable` result.
 use std::{
+    cmp::min,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, RwLock,
@@ -25,7 +26,7 @@ use solana_sdk::{
 
 use crate::banking_stage::{
     decision_maker::BufferedPacketsDecision,
-    immutable_deserialized_packet::ImmutableDeserializedPacket,
+    immutable_deserialized_packet::{DeserializedPacketError, ImmutableDeserializedPacket},
     packet_deserializer::PacketDeserializer,
 };
 
@@ -64,18 +65,17 @@ impl JssReceiveAndBuffer {
         }
     }
 
-    fn parse_transactions<'a>(
+    fn deserialize_jss_packets<'a>(
         packets: impl Iterator<Item = &'a Packet>,
-    ) -> Vec<ImmutableDeserializedPacket> {
+    ) -> Vec<Result<ImmutableDeserializedPacket, DeserializedPacketError>> {
         packets
-            .filter_map(|packet| {
-                if packet.data.len() > PACKET_DATA_SIZE {
-                    return None;
-                }
+            .map(|packet| {
                 let mut solana_packet = solana_sdk::packet::Packet::default();
                 solana_packet.meta_mut().size = packet.data.len() as usize;
                 solana_packet.meta_mut().set_discard(false);
-                solana_packet.buffer_mut()[0..packet.data.len()].copy_from_slice(&packet.data);
+                let len_to_copy = min(packet.data.len(), PACKET_DATA_SIZE);
+                solana_packet.buffer_mut()[0..len_to_copy]
+                    .copy_from_slice(&packet.data[0..len_to_copy]);
                 if let Some(meta) = &packet.meta {
                     solana_packet.meta_mut().size = meta.size as usize;
                     if let Some(addr) = &meta.addr.parse().ok() {
@@ -100,7 +100,7 @@ impl JssReceiveAndBuffer {
                         }
                     }
                 }
-                Some(ImmutableDeserializedPacket::new(solana_packet).ok()?)
+                ImmutableDeserializedPacket::new(solana_packet)
             })
             .collect_vec()
     }
@@ -165,8 +165,9 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                         continue;
                     }
 
-                    let mut parsed_packets = Self::parse_transactions(bundle.packets.iter());
-                    if parsed_packets.len() != bundle.packets.len() {
+                    let mut parsed_packets = Self::deserialize_jss_packets(bundle.packets.iter());
+                    if let Some(Err(_)) = parsed_packets.iter().find(|r| r.is_err()) {
+                        // TODO_DG: report specific error
                         self.send_invalid_bundle_result(bundle.seq_id);
                         continue;
                     }
@@ -190,7 +191,7 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                     let mut packets = vec![];
                     let mut cost: u64 = 0;
                     let mut transaction_ttls = vec![];
-                    for parsed_packet in parsed_packets.drain(..) {
+                    for parsed_packet in parsed_packets.drain(..).filter_map(Result::ok) {
                         let mut tmp_container = Self::Container::with_capacity(1);
                         self.internal_receive_and_buffer.buffer_packets(
                             &mut tmp_container,
