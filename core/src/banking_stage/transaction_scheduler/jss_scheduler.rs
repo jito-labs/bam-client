@@ -166,22 +166,31 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
 
             let batch_id = self.get_next_schedule_id();
             let work = Self::generate_work(batch_id, batch_ids, revert_on_error, container);
-
-            // Send the work to the worker
-            let consume_work_sender = &self.consume_work_senders[worker_index];
-            let _ = consume_work_sender.send(work);
-            self.inflight_batch_info.insert(
-                batch_id,
-                InflightBatchInfo {
-                    priority_ids: vec![next_batch_id],
-                    worker_index,
-                    slot,
-                },
-            );
-            self.workers_scheduled_count[worker_index] += 1;
+            self.send_to_worker(worker_index, vec![next_batch_id], work, slot);
 
             *num_scheduled += 1;
         }
+    }
+
+    fn send_to_worker(
+        &mut self,
+        worker_index: usize,
+        priority_ids: Vec<TransactionPriorityId>,
+        work: ConsumeWork<Tx>,
+        slot: Slot,
+    ) {
+        let consume_work_sender = &self.consume_work_senders[worker_index];
+        let batch_id = work.batch_id;
+        let _ = consume_work_sender.send(work);
+        self.inflight_batch_info.insert(
+            batch_id,
+            InflightBatchInfo {
+                priority_ids,
+                worker_index,
+                slot,
+            },
+        );
+        self.workers_scheduled_count[worker_index] += 1;
     }
 
     fn get_next_schedule_id(&mut self) -> TransactionBatchId {
