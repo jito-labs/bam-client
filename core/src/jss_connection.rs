@@ -170,10 +170,19 @@ impl JssConnection {
                 }
                 _ = outbound_tick_interval.tick() => {
                     while let Ok(outbound) = outbound_receiver.try_recv() {
+                        match outbound.msg.as_ref() {
+                            Some(Msg::LeaderState(_)) => {
+                                metrics.leaderstate_sent.fetch_add(1, Relaxed);
+                            }
+                            Some(Msg::BundleResult(_)) => {
+                                metrics.bundleresult_sent.fetch_add(1, Relaxed);
+                            }
+                            _ => {}
+                        }
                         let _ = outbound_sender.try_send(outbound).inspect_err(|_| {
                             error!("Failed to send outbound message");
                         });
-                        metrics.bundle_polls.fetch_add(1, Relaxed);
+                        metrics.outbound_sent.fetch_add(1, Relaxed);
                     }
                 }
             }
@@ -260,8 +269,9 @@ struct JssConnectionMetrics {
     unhealthy_connection_count: AtomicU64,
 
     leaderstate_sent: AtomicU64,
+    bundleresult_sent: AtomicU64,
     heartbeat_sent: AtomicU64,
-    bundle_polls: AtomicU64,
+    outbound_sent: AtomicU64,
 }
 
 impl JssConnectionMetrics {
@@ -294,13 +304,18 @@ impl JssConnectionMetrics {
                 i64
             ),
             (
+                "bundleresult_sent",
+                self.bundleresult_sent.swap(0, Relaxed) as i64,
+                i64
+            ),
+            (
                 "heartbeat_sent",
                 self.heartbeat_sent.swap(0, Relaxed) as i64,
                 i64
             ),
             (
-                "bundle_polls",
-                self.bundle_polls.swap(0, Relaxed) as i64,
+                "outbound_sent",
+                self.outbound_sent.swap(0, Relaxed) as i64,
                 i64
             ),
         );
