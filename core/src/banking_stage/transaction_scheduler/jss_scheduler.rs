@@ -252,7 +252,9 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
     }
 
     /// Generates a `bundle_result::Result` based on the processed results for 'revert_on_error' batches.
-    fn generate_revert_on_error_bundle_result(processed_results: &[TransactionResult]) -> bundle_result::Result {
+    fn generate_revert_on_error_bundle_result(
+        processed_results: &[TransactionResult],
+    ) -> bundle_result::Result {
         if processed_results
             .iter()
             .all(|result| matches!(result, TransactionResult::Committed(_)))
@@ -295,9 +297,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
     }
 
     /// Generates a `bundle_result::Result` based on the processed result of a single transaction.
-    fn generate_bundle_result(
-        processed: &TransactionResult,
-    ) -> bundle_result::Result {
+    fn generate_bundle_result(processed: &TransactionResult) -> bundle_result::Result {
         match processed {
             TransactionResult::Committed(result) => {
                 bundle_result::Result::Committed(jito_protos::proto::jss_types::Committed {
@@ -524,16 +524,28 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
                 continue;
             };
 
-            let len = if revert_on_error { 1 } else { inflight_batch_info.priority_ids.len() };
-            for (i, priority_id) in inflight_batch_info.priority_ids.iter().enumerate().take(len) {
+            let len = if revert_on_error {
+                1
+            } else {
+                inflight_batch_info.priority_ids.len()
+            };
+            for (i, priority_id) in inflight_batch_info
+                .priority_ids
+                .iter()
+                .enumerate()
+                .take(len)
+            {
                 let seq_id = priority_to_seq_id(priority_id.priority);
-            
+
                 if let Some(extra_info) = result.extra_info.as_ref() {
                     let bundle_result = if revert_on_error {
                         Self::generate_revert_on_error_bundle_result(&extra_info.processed_results)
                     } else {
                         let Some(txn_result) = extra_info.processed_results.get(i) else {
-                            warn!("Processed results for batch {} are missing for index {}", batch_id.0, i);
+                            warn!(
+                                "Processed results for batch {} are missing for index {}",
+                                batch_id.0, i
+                            );
                             continue;
                         };
                         Self::generate_bundle_result(txn_result)
@@ -547,7 +559,6 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
 
                 container.remove_by_id(priority_id.id);
                 self.workers_scheduled_count[inflight_batch_info.worker_index] -= 1;
-
             }
         }
 
