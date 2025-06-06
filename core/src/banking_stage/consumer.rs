@@ -892,15 +892,11 @@ impl Consumer {
         let (freeze_lock, freeze_lock_us) = measure_us!(bank.freeze_lock());
         execute_and_commit_timings.freeze_lock_us = freeze_lock_us;
 
-        let batches: Vec<Vec<VersionedTransaction>> = if revert_on_error {
-            Self::create_non_conflicing_batches(
-                processed_transactions
-                    .into_iter()
-                    .zip(batch.sanitized_transactions().iter()),
-            )
-        } else {
-            vec![processed_transactions]
-        };
+        let batches = Self::create_sequential_non_conflicting_batches(
+            processed_transactions
+                .into_iter()
+                .zip(batch.sanitized_transactions().iter()),
+        );
 
         let (record_transactions_summary, record_us) = measure_us!(self
             .transaction_recorder
@@ -991,7 +987,7 @@ impl Consumer {
         }
     }
 
-    fn create_non_conflicing_batches<'a>(
+    fn create_sequential_non_conflicting_batches<'a>(
         transactions: impl Iterator<Item = (VersionedTransaction, &'a (impl TransactionWithMeta + 'a))>,
     ) -> Vec<Vec<VersionedTransaction>> {
         let mut result = vec![];
@@ -3360,5 +3356,43 @@ mod tests {
             .store(true, Ordering::Relaxed);
         exit.store(true, Ordering::Relaxed);
         poh_simulator.join().unwrap();
+    }
+
+    #[test]
+    fn test_create_sequential_non_conflicting_batches() {
+        let a = Pubkey::new_unique();
+        let b = Pubkey::new_unique();
+        let c = Pubkey::new_unique();
+        let d = Pubkey::new_unique();
+        let txns = vec![
+            Transaction::new_unsigned(Message::new(
+                &[system_instruction::transfer(&a, &b, 1)],
+                Some(&Pubkey::new_unique()),
+            )),
+            Transaction::new_unsigned(Message::new(
+                &[system_instruction::transfer(&d, &d, 1)],
+                Some(&Pubkey::new_unique()),
+            )),
+            Transaction::new_unsigned(Message::new(
+                &[system_instruction::transfer(&b, &c, 1)],
+                Some(&Pubkey::new_unique()),
+            )),
+        ];
+        let txn_infos = txns
+            .iter()
+            .map(|tx| RuntimeTransaction::from_transaction_for_tests(tx.clone()))
+            .collect::<Vec<_>>();
+        let txns = txns
+            .into_iter()
+            .map(|tx| VersionedTransaction::from(tx))
+            .collect::<Vec<_>>();
+        let batches = Consumer::create_sequential_non_conflicting_batches(
+            txns.into_iter().zip(txn_infos.iter()),
+        );
+
+        // Expect 2 batches: one with len=2 (a,b,c), and one with len=1 (d)
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].len(), 2);
+        assert_eq!(batches[1].len(), 1);
     }
 }
