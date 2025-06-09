@@ -377,14 +377,6 @@ impl Consumer {
                 reservation_cb,
             );
 
-            info!(
-                "process_and_record_transactions: bank: {} txs: {} chunk_start: {} chunk_end: {}",
-                bank.slot(),
-                transactions.len(),
-                chunk_start,
-                chunk_end,
-            );
-
             let ProcessTransactionBatchOutput {
                 cost_model_throttled_transactions_count: new_cost_model_throttled_transactions_count,
                 cost_model_us: new_cost_model_us,

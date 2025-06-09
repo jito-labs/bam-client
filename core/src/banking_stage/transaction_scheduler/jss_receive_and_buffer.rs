@@ -288,7 +288,7 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
 
                         let lock_results: [_; 1] = core::array::from_fn(|_| Ok(()));
                         let check_results = working_bank.check_transactions(
-                            &[tx.clone()], // TODO: don't clone, use a reference
+                            std::slice::from_ref(&tx),
                             &lock_results,
                             MAX_PROCESSING_AGE,
                             &mut TransactionErrorMetrics::default(),
