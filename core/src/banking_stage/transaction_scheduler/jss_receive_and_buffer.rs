@@ -11,37 +11,46 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crossbeam_channel::{unbounded, Sender};
+use crossbeam_channel::Sender;
 use itertools::Itertools;
 use jito_protos::proto::{
     jss_api::{start_scheduler_message::Msg, StartSchedulerMessage},
-    jss_types::{bundle_result, not_committed::Reason, Bundle, GenericInvalid, Packet, PohTimeout},
+    jss_types::{
+        bundle_result, not_committed::Reason, Bundle, DeserializationErrorReason,
+        Packet, PohTimeout,
+    },
 };
+use solana_accounts_db::account_locks::validate_account_locks;
 use solana_runtime::bank_forks::BankForks;
-use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
-use solana_sdk::{
-    packet::{PacketFlags, PACKET_DATA_SIZE},
-    transaction::SanitizedTransaction,
+use solana_runtime_transaction::{
+    runtime_transaction::RuntimeTransaction, transaction_meta::StaticMeta,
 };
+use solana_sdk::{
+    clock::MAX_PROCESSING_AGE,
+    packet::{PacketFlags, PACKET_DATA_SIZE},
+    transaction::{SanitizedTransaction, TransactionError},
+};
+use solana_svm::transaction_error_metrics::TransactionErrorMetrics;
 
 use crate::banking_stage::{
     decision_maker::BufferedPacketsDecision,
     immutable_deserialized_packet::{DeserializedPacketError, ImmutableDeserializedPacket},
-    packet_deserializer::PacketDeserializer,
+    transaction_scheduler::{
+        jss_utils::{convert_deserialize_error_to_proto, convert_txn_error_to_proto},
+        receive_and_buffer::{calculate_max_age, calculate_priority_and_cost},
+        transaction_state::SanitizedTransactionTTL,
+    },
 };
 
 use super::{
-    receive_and_buffer::{ReceiveAndBuffer, SanitizedTransactionReceiveAndBuffer},
-    transaction_state_container::TransactionStateContainer,
+    receive_and_buffer::ReceiveAndBuffer, transaction_state_container::TransactionStateContainer,
 };
-
-use crate::banking_stage::transaction_scheduler::transaction_state_container::StateContainer;
 
 pub struct JssReceiveAndBuffer {
     jss_enabled: Arc<AtomicBool>,
     bundle_receiver: crossbeam_channel::Receiver<Bundle>,
     response_sender: Sender<StartSchedulerMessage>,
-    internal_receive_and_buffer: SanitizedTransactionReceiveAndBuffer,
+    bank_forks: Arc<RwLock<BankForks>>,
 }
 
 impl JssReceiveAndBuffer {
@@ -51,17 +60,11 @@ impl JssReceiveAndBuffer {
         response_sender: Sender<StartSchedulerMessage>,
         bank_forks: Arc<RwLock<BankForks>>,
     ) -> Self {
-        let internal_receive_and_buffer = SanitizedTransactionReceiveAndBuffer::new(
-            PacketDeserializer::new(unbounded().1),
-            bank_forks.clone(),
-            false,
-            Arc::new(AtomicBool::new(false)),
-        );
         Self {
             jss_enabled,
             bundle_receiver,
             response_sender,
-            internal_receive_and_buffer,
+            bank_forks,
         }
     }
 
@@ -105,14 +108,45 @@ impl JssReceiveAndBuffer {
             .collect_vec()
     }
 
-    fn send_invalid_bundle_result(&self, seq_id: u32) {
+    fn send_txn_error_bundle_result(&self, seq_id: u32, index: usize, error: TransactionError) {
+        let reason = convert_txn_error_to_proto(error);
         let _ = self.response_sender.try_send(StartSchedulerMessage {
             msg: Some(Msg::BundleResult(
                 jito_protos::proto::jss_types::BundleResult {
                     seq_id: seq_id,
                     result: Some(bundle_result::Result::NotCommitted(
                         jito_protos::proto::jss_types::NotCommitted {
-                            reason: Some(Reason::GenericInvalid(GenericInvalid {})),
+                            reason: Some(Reason::TransactionError(
+                                jito_protos::proto::jss_types::TransactionError {
+                                    index: index as u32,
+                                    reason: reason as i32,
+                                },
+                            )),
+                        },
+                    )),
+                },
+            )),
+        });
+    }
+
+    fn send_deserialization_error_bundle_result(
+        &self,
+        seq_id: u32,
+        index: usize,
+        reason: DeserializationErrorReason,
+    ) {
+        let _ = self.response_sender.try_send(StartSchedulerMessage {
+            msg: Some(Msg::BundleResult(
+                jito_protos::proto::jss_types::BundleResult {
+                    seq_id: seq_id,
+                    result: Some(bundle_result::Result::NotCommitted(
+                        jito_protos::proto::jss_types::NotCommitted {
+                            reason: Some(Reason::DeserializationError(
+                                jito_protos::proto::jss_types::DeserializationError {
+                                    index: index as u32,
+                                    reason: reason as i32,
+                                },
+                            )),
                         },
                     )),
                 },
@@ -143,8 +177,8 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
     fn receive_and_buffer_packets(
         &mut self,
         container: &mut Self::Container,
-        timing_metrics: &mut super::scheduler_metrics::SchedulerTimingMetrics,
-        count_metrics: &mut super::scheduler_metrics::SchedulerCountMetrics,
+        _: &mut super::scheduler_metrics::SchedulerTimingMetrics,
+        _: &mut super::scheduler_metrics::SchedulerCountMetrics,
         decision: &crate::banking_stage::decision_maker::BufferedPacketsDecision,
     ) -> Result<usize, ()> {
         if !self.jss_enabled.load(Ordering::Relaxed) {
@@ -161,14 +195,22 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                         break;
                     };
                     if bundle.packets.len() == 0 {
-                        self.send_invalid_bundle_result(bundle.seq_id);
+                        self.send_deserialization_error_bundle_result(
+                            bundle.seq_id,
+                            0,
+                            DeserializationErrorReason::Empty,
+                        );
                         continue;
                     }
 
                     let mut parsed_packets = Self::deserialize_jss_packets(bundle.packets.iter());
-                    if let Some(Err(_)) = parsed_packets.iter().find(|r| r.is_err()) {
-                        // TODO_DG: report specific error
-                        self.send_invalid_bundle_result(bundle.seq_id);
+                    if let Some(Err(err)) = parsed_packets.iter().find(|r| r.is_err()) {
+                        let reason = convert_deserialize_error_to_proto(err);
+                        self.send_deserialization_error_bundle_result(
+                            bundle.seq_id,
+                            parsed_packets.iter().position(|r| r.is_err()).unwrap_or(0),
+                            reason,
+                        );
                         continue;
                     }
 
@@ -183,38 +225,99 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                         })
                         .all_equal_value()
                     else {
-                        self.send_invalid_bundle_result(bundle.seq_id);
+                        self.send_deserialization_error_bundle_result(
+                            bundle.seq_id,
+                            0,
+                            DeserializationErrorReason::InconsistentBundle,
+                        );
                         continue;
                     };
 
-                    // Hacky way to leverage existing receive_and_buffer logic
+                    let (root_bank, working_bank) = {
+                        let bank_forks = self.bank_forks.read().unwrap();
+                        let root_bank = bank_forks.root_bank();
+                        let working_bank = bank_forks.working_bank();
+                        (root_bank, working_bank)
+                    };
+                    let alt_resolved_slot = root_bank.slot();
+                    let sanitized_epoch = root_bank.epoch();
+                    let transaction_account_lock_limit =
+                        working_bank.get_transaction_account_lock_limit();
+                    let vote_only = working_bank.vote_only_bank();
+
                     let mut packets = vec![];
                     let mut cost: u64 = 0;
                     let mut transaction_ttls = vec![];
-                    for parsed_packet in parsed_packets.drain(..).filter_map(Result::ok) {
-                        let mut tmp_container = Self::Container::with_capacity(1);
-                        self.internal_receive_and_buffer.buffer_packets(
-                            &mut tmp_container,
-                            timing_metrics,
-                            count_metrics,
-                            vec![parsed_packet],
+                    for (index, parsed_packet) in
+                        parsed_packets.drain(..).filter_map(Result::ok).enumerate()
+                    {
+                        let Some((tx, deactivation_slot)) = parsed_packet
+                            .build_sanitized_transaction(
+                                vote_only,
+                                root_bank.as_ref(),
+                                root_bank.get_reserved_account_keys(),
+                            )
+                        else {
+                            self.send_deserialization_error_bundle_result(
+                                bundle.seq_id,
+                                0,
+                                DeserializationErrorReason::SanitizeError,
+                            );
+                            break;
+                        };
+
+                        if let Err(err) = validate_account_locks(
+                            tx.message().account_keys(),
+                            transaction_account_lock_limit,
+                        ) {
+                            self.send_txn_error_bundle_result(bundle.seq_id, index, err);
+                            break;
+                        }
+
+                        let fee_budget_limits = match tx
+                            .compute_budget_instruction_details()
+                            .sanitize_and_convert_to_compute_budget_limits(
+                                &working_bank.feature_set,
+                            ) {
+                            Ok(fee_budget_limits) => fee_budget_limits,
+                            Err(err) => {
+                                self.send_txn_error_bundle_result(bundle.seq_id, index, err);
+                                break;
+                            }
+                        };
+
+                        let lock_results: [_; 1] = core::array::from_fn(|_| Ok(()));
+                        let check_results = working_bank.check_transactions(
+                            &[tx.clone()], // TODO: don't clone, use a reference
+                            &lock_results,
+                            MAX_PROCESSING_AGE,
+                            &mut TransactionErrorMetrics::default(),
+                        );
+                        if let Some(Err(err)) = check_results.first() {
+                            self.send_txn_error_bundle_result(bundle.seq_id, index, err.clone());
+                            break;
+                        }
+
+                        let max_age = calculate_max_age(
+                            sanitized_epoch,
+                            deactivation_slot,
+                            alt_resolved_slot,
                         );
 
-                        let Some(id) = tmp_container.pop() else {
-                            break;
-                        };
-                        let Some(entry) = tmp_container.get_mut_transaction_state(id.id) else {
-                            break;
-                        };
-                        let Some(packet) = entry.packet().cloned() else {
-                            break;
-                        };
-                        cost = cost.saturating_add(entry.cost());
-                        transaction_ttls.push(entry.transition_to_pending());
-                        packets.push(packet);
+                        let (_, txn_cost) = calculate_priority_and_cost(
+                            &tx,
+                            &fee_budget_limits.into(),
+                            &working_bank,
+                        );
+                        cost = cost.saturating_add(txn_cost);
+                        transaction_ttls.push(SanitizedTransactionTTL {
+                            transaction: tx,
+                            max_age,
+                        });
+                        packets.push(Arc::new(parsed_packet));
                     }
                     if packets.len() != bundle.packets.len() {
-                        self.send_invalid_bundle_result(bundle.seq_id);
+                        // Specific error would have been sent above for first 'invalid' packet/transaction
                         continue;
                     }
 
