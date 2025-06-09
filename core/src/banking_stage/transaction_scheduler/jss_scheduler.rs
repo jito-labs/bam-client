@@ -8,12 +8,12 @@ use ahash::HashMap;
 use crossbeam_channel::{Receiver, Sender};
 use jito_protos::proto::{
     jss_api::{start_scheduler_message::Msg, StartSchedulerMessage},
-    jss_types::{bundle_result, not_committed::Reason, PohTimeout, TransactionErrorReason},
+    jss_types::{bundle_result, not_committed::Reason, PohTimeout},
 };
 use prio_graph::{AccessKind, GraphNode, PrioGraph};
 use solana_pubkey::Pubkey;
 use solana_runtime_transaction::transaction_with_meta::TransactionWithMeta;
-use solana_sdk::{clock::Slot, transaction::TransactionError};
+use solana_sdk::clock::Slot;
 use solana_svm_transaction::svm_message::SVMMessage;
 
 use crate::banking_stage::{
@@ -21,6 +21,7 @@ use crate::banking_stage::{
     scheduler_messages::{
         ConsumeWork, FinishedConsumeWork, NotCommittedReason, TransactionBatchId, TransactionResult,
     },
+    transaction_scheduler::jss_utils::convert_txn_error_to_proto,
 };
 
 use super::{
@@ -383,100 +384,10 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
                 jito_protos::proto::jss_types::not_committed::Reason::TransactionError(
                     jito_protos::proto::jss_types::TransactionError {
                         index: index as u32,
-                        reason: Self::convert_error_to_proto(err) as i32,
+                        reason: convert_txn_error_to_proto(err) as i32,
                     },
                 )
             }
-        }
-    }
-
-    fn convert_error_to_proto(err: TransactionError) -> TransactionErrorReason {
-        match err {
-            TransactionError::AccountInUse => TransactionErrorReason::AccountInUse,
-            TransactionError::AccountLoadedTwice => TransactionErrorReason::AccountLoadedTwice,
-            TransactionError::AccountNotFound => TransactionErrorReason::AccountNotFound,
-            TransactionError::ProgramAccountNotFound => {
-                TransactionErrorReason::ProgramAccountNotFound
-            }
-            TransactionError::InsufficientFundsForFee => {
-                TransactionErrorReason::InsufficientFundsForFee
-            }
-            TransactionError::InvalidAccountForFee => TransactionErrorReason::InvalidAccountForFee,
-            TransactionError::AlreadyProcessed => TransactionErrorReason::AlreadyProcessed,
-            TransactionError::BlockhashNotFound => TransactionErrorReason::BlockhashNotFound,
-            TransactionError::InstructionError(_, _) => TransactionErrorReason::InstructionError,
-            TransactionError::CallChainTooDeep => TransactionErrorReason::CallChainTooDeep,
-            TransactionError::MissingSignatureForFee => {
-                TransactionErrorReason::MissingSignatureForFee
-            }
-            TransactionError::InvalidAccountIndex => TransactionErrorReason::InvalidAccountIndex,
-            TransactionError::SignatureFailure => TransactionErrorReason::SignatureFailure,
-            TransactionError::InvalidProgramForExecution => {
-                TransactionErrorReason::InvalidProgramForExecution
-            }
-            TransactionError::SanitizeFailure => TransactionErrorReason::SanitizeFailure,
-            TransactionError::ClusterMaintenance => TransactionErrorReason::ClusterMaintenance,
-            TransactionError::AccountBorrowOutstanding => {
-                TransactionErrorReason::AccountBorrowOutstanding
-            }
-            TransactionError::WouldExceedMaxBlockCostLimit => {
-                TransactionErrorReason::WouldExceedMaxBlockCostLimit
-            }
-            TransactionError::UnsupportedVersion => TransactionErrorReason::UnsupportedVersion,
-            TransactionError::InvalidWritableAccount => {
-                TransactionErrorReason::InvalidWritableAccount
-            }
-            TransactionError::WouldExceedMaxAccountCostLimit => {
-                TransactionErrorReason::WouldExceedMaxAccountCostLimit
-            }
-            TransactionError::WouldExceedAccountDataBlockLimit => {
-                TransactionErrorReason::WouldExceedAccountDataBlockLimit
-            }
-            TransactionError::TooManyAccountLocks => TransactionErrorReason::TooManyAccountLocks,
-            TransactionError::AddressLookupTableNotFound => {
-                TransactionErrorReason::AddressLookupTableNotFound
-            }
-            TransactionError::InvalidAddressLookupTableOwner => {
-                TransactionErrorReason::InvalidAddressLookupTableOwner
-            }
-            TransactionError::InvalidAddressLookupTableData => {
-                TransactionErrorReason::InvalidAddressLookupTableData
-            }
-            TransactionError::InvalidAddressLookupTableIndex => {
-                TransactionErrorReason::InvalidAddressLookupTableIndex
-            }
-            TransactionError::InvalidRentPayingAccount => {
-                TransactionErrorReason::InvalidRentPayingAccount
-            }
-            TransactionError::WouldExceedMaxVoteCostLimit => {
-                TransactionErrorReason::WouldExceedMaxVoteCostLimit
-            }
-            TransactionError::WouldExceedAccountDataTotalLimit => {
-                TransactionErrorReason::WouldExceedAccountDataTotalLimit
-            }
-            TransactionError::DuplicateInstruction(_) => {
-                TransactionErrorReason::DuplicateInstruction
-            }
-            TransactionError::InsufficientFundsForRent { .. } => {
-                TransactionErrorReason::InsufficientFundsForRent
-            }
-            TransactionError::MaxLoadedAccountsDataSizeExceeded => {
-                TransactionErrorReason::MaxLoadedAccountsDataSizeExceeded
-            }
-            TransactionError::InvalidLoadedAccountsDataSizeLimit => {
-                TransactionErrorReason::InvalidLoadedAccountsDataSizeLimit
-            }
-            TransactionError::ResanitizationNeeded => TransactionErrorReason::ResanitizationNeeded,
-            TransactionError::ProgramExecutionTemporarilyRestricted { .. } => {
-                TransactionErrorReason::ProgramExecutionTemporarilyRestricted
-            }
-            TransactionError::UnbalancedTransaction => {
-                TransactionErrorReason::UnbalancedTransaction
-            }
-            TransactionError::ProgramCacheHitMaxLimit => {
-                TransactionErrorReason::ProgramCacheHitMaxLimit
-            }
-            TransactionError::CommitCancelled => TransactionErrorReason::CommitCancelled,
         }
     }
 
