@@ -359,19 +359,6 @@ impl LikeClusterInfo for Arc<ClusterInfo> {
     }
 }
 
-#[derive(Clone)]
-struct DummyLikeClusterInfo;
-
-impl LikeClusterInfo for DummyLikeClusterInfo {
-    fn id(&self) -> Pubkey {
-        Pubkey::default()
-    }
-
-    fn lookup_contact_info<R>(&self, _: &Pubkey, _: impl ContactInfoQuery<R>) -> Option<R> {
-        None
-    }
-}
-
 impl BankingStage {
     /// Create the stage using `bank`. Exit when `verified_receiver` is dropped.
     #[allow(clippy::too_many_arguments)]
@@ -838,7 +825,7 @@ impl BankingStage {
                             bank_forks,
                             scheduler,
                             worker_metrics,
-                            Option::<Forwarder<DummyLikeClusterInfo>>::None,
+                            None::<Forwarder<Arc<ClusterInfo>>>,
                             blacklisted_accounts.clone(),
                             true,
                             jss_enabled,
