@@ -155,7 +155,7 @@ impl JssManager {
         let info = info?;
         let Socket { ip, port } = info;
         Some(SocketAddr::V4(SocketAddrV4::new(
-            Ipv4Addr::from_str(&ip).ok()?,
+            Ipv4Addr::from_str(ip).ok()?,
             *port as u16,
         )))
     }
@@ -178,7 +178,7 @@ impl JssManager {
     ) {
         if let Some(builder_info) = builder_info {
             let pubkey = Pubkey::from_str(&builder_info.builder_pubkey).unwrap();
-            let commission = builder_info.builder_commission as u64;
+            let commission = builder_info.builder_commission;
             let mut block_builder_fee_info = block_builder_fee_info.lock().unwrap();
             block_builder_fee_info.block_builder = pubkey;
             block_builder_fee_info.block_builder_commission = commission;

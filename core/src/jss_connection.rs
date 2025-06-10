@@ -88,6 +88,7 @@ impl JssConnection {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn connection_task(
         exit: Arc<AtomicBool>,
         mut inbound_stream: tonic::Streaming<StartSchedulerResponse>,
