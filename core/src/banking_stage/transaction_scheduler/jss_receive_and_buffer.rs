@@ -10,6 +10,8 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use jito_protos::proto::jss_types::SchedulingError;
+
 use {
     super::{
         receive_and_buffer::ReceiveAndBuffer,
@@ -30,7 +32,6 @@ use {
         jss_api::{start_scheduler_message::Msg, StartSchedulerMessage},
         jss_types::{
             bundle_result, not_committed::Reason, Bundle, DeserializationErrorReason, Packet,
-            PohTimeout,
         },
     },
     solana_accounts_db::account_locks::validate_account_locks,
@@ -154,14 +155,29 @@ impl JssReceiveAndBuffer {
         });
     }
 
-    fn send_retryable_bundle_result(&self, seq_id: u32) {
+    fn send_no_leader_slot_bundle_result(&self, seq_id: u32) {
         let _ = self.response_sender.try_send(StartSchedulerMessage {
             msg: Some(Msg::BundleResult(
                 jito_protos::proto::jss_types::BundleResult {
                     seq_id,
                     result: Some(bundle_result::Result::NotCommitted(
                         jito_protos::proto::jss_types::NotCommitted {
-                            reason: Some(Reason::PohTimeout(PohTimeout {})),
+                            reason: Some(Reason::SchedulingError(SchedulingError::OutsideLeaderSlot as i32)),
+                        },
+                    )),
+                },
+            )),
+        });
+    }
+
+    fn send_container_full_bundle_result(&self, seq_id: u32) {
+        let _ = self.response_sender.try_send(StartSchedulerMessage {
+            msg: Some(Msg::BundleResult(
+                jito_protos::proto::jss_types::BundleResult {
+                    seq_id,
+                    result: Some(bundle_result::Result::NotCommitted(
+                        jito_protos::proto::jss_types::NotCommitted {
+                            reason: Some(Reason::SchedulingError(SchedulingError::ContainerFull as i32)),
                         },
                     )),
                 },
@@ -330,7 +346,7 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                         )
                         .is_none()
                     {
-                        self.send_retryable_bundle_result(bundle.seq_id);
+                        self.send_container_full_bundle_result(bundle.seq_id);
                         continue;
                     };
 
@@ -341,7 +357,7 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                 // Send back any bundles that were received while in Forward/Hold state
                 let deadline = Instant::now() + Duration::from_millis(5);
                 while let Ok(bundle) = self.bundle_receiver.recv_deadline(deadline) {
-                    self.send_retryable_bundle_result(bundle.seq_id);
+                    self.send_no_leader_slot_bundle_result(bundle.seq_id);
                 }
             }
         }

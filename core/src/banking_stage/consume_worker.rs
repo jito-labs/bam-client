@@ -179,7 +179,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         for (i, commit_info) in commit_transactions_result.iter().enumerate() {
             if let CommitTransactionDetails::Committed {
                 compute_units,
-                loaded_accounts_data_size: _,
+                loaded_accounts_data_size,
             } = commit_info
             {
                 processed_results.push(TransactionResult::Committed(TransactionCommittedResult {
