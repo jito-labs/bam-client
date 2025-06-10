@@ -187,7 +187,7 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
         }
 
         let mut result = 0;
-        const MAX_BUNDLES_PER_RECV: usize = 10;
+        const MAX_BUNDLES_PER_RECV: usize = 24;
         match decision {
             BufferedPacketsDecision::Consume(_) | BufferedPacketsDecision::Hold => {
                 while result < MAX_BUNDLES_PER_RECV {
