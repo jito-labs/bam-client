@@ -12,19 +12,19 @@ use std::{
         Arc, Mutex, RwLock,
     },
 };
-
-use jito_protos::proto::{
-    jss_api::{start_scheduler_message::Msg, BuilderConfigResp, StartSchedulerMessage},
-    jss_types::{LeaderState, Socket},
-};
-use solana_gossip::cluster_info::ClusterInfo;
-use solana_poh::poh_recorder::PohRecorder;
-use solana_pubkey::Pubkey;
-use solana_runtime::bank::Bank;
-
-use crate::{
-    jss_connection::JssConnection, jss_dependencies::JssDependencies,
-    proxy::block_engine_stage::BlockBuilderFeeInfo,
+use {
+    crate::{
+        jss_connection::JssConnection, jss_dependencies::JssDependencies,
+        proxy::block_engine_stage::BlockBuilderFeeInfo,
+    },
+    jito_protos::proto::{
+        jss_api::{start_scheduler_message::Msg, BuilderConfigResp, StartSchedulerMessage},
+        jss_types::{LeaderState, Socket},
+    },
+    solana_gossip::cluster_info::ClusterInfo,
+    solana_poh::poh_recorder::PohRecorder,
+    solana_pubkey::Pubkey,
+    solana_runtime::bank::Bank,
 };
 
 pub struct JssManager {

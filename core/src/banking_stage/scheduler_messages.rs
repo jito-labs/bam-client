@@ -1,7 +1,9 @@
-use jito_protos::proto::jss_types::TransactionCommittedResult;
-use solana_sdk::transaction::TransactionError;
 use {
-    solana_sdk::clock::{Epoch, Slot},
+    jito_protos::proto::jss_types::TransactionCommittedResult,
+    solana_sdk::{
+        clock::{Epoch, Slot},
+        transaction::TransactionError,
+    },
     std::fmt::Display,
 };
 

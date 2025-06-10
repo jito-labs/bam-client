@@ -1,26 +1,26 @@
 // Maintains a connection to the JSS Node and handles sending and receiving messages
 // Keeps track of last received heartbeat 'behind the scenes' and will mark itself as unhealthy if no heartbeat is received
 
-use std::sync::{
-    atomic::{AtomicBool, AtomicU64},
-    Arc, Mutex, RwLock,
-};
-
-use futures::{channel::mpsc, StreamExt};
-use jito_protos::proto::{
-    jss_api::{
-        jss_node_api_client::JssNodeApiClient, start_scheduler_message::Msg,
-        start_scheduler_response::Resp, BuilderConfigResp, GetBuilderConfigRequest,
-        StartSchedulerMessage, StartSchedulerResponse,
+use {
+    futures::{channel::mpsc, StreamExt},
+    jito_protos::proto::{
+        jss_api::{
+            jss_node_api_client::JssNodeApiClient, start_scheduler_message::Msg,
+            start_scheduler_response::Resp, BuilderConfigResp, GetBuilderConfigRequest,
+            StartSchedulerMessage, StartSchedulerResponse,
+        },
+        jss_types::{Bundle, ValidatorHeartBeat},
     },
-    jss_types::{Bundle, ValidatorHeartBeat},
+    solana_gossip::cluster_info::ClusterInfo,
+    solana_poh::poh_recorder::PohRecorder,
+    solana_sdk::{signature::Keypair, signer::Signer},
+    std::sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
+        Arc, Mutex, RwLock,
+    },
+    thiserror::Error,
+    tokio::time::{interval, timeout},
 };
-use solana_gossip::cluster_info::ClusterInfo;
-use solana_poh::poh_recorder::PohRecorder;
-use solana_sdk::{signature::Keypair, signer::Signer};
-use std::sync::atomic::Ordering::Relaxed;
-use thiserror::Error;
-use tokio::time::{interval, timeout};
 
 const TICKS_PER_SLOT: u64 = 64;
 

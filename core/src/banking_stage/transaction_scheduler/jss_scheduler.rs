@@ -3,34 +3,34 @@
 /// `PrioGraph` data structure, which is a directed graph that tracks the dependencies.
 /// Currently a very simple implementation that probably under pipelines the workers.
 use std::time::Instant;
-
-use ahash::HashMap;
-use crossbeam_channel::{Receiver, Sender};
-use jito_protos::proto::{
-    jss_api::{start_scheduler_message::Msg, StartSchedulerMessage},
-    jss_types::{bundle_result, not_committed::Reason, PohTimeout},
-};
-use prio_graph::{AccessKind, GraphNode, PrioGraph};
-use solana_pubkey::Pubkey;
-use solana_runtime_transaction::transaction_with_meta::TransactionWithMeta;
-use solana_sdk::clock::Slot;
-use solana_svm_transaction::svm_message::SVMMessage;
-
-use crate::banking_stage::{
-    decision_maker::BufferedPacketsDecision,
-    scheduler_messages::{
-        ConsumeWork, FinishedConsumeWork, NotCommittedReason, TransactionBatchId, TransactionResult,
+use {
+    super::{
+        jss_receive_and_buffer::priority_to_seq_id,
+        scheduler::{Scheduler, SchedulingSummary},
+        scheduler_error::SchedulerError,
+        transaction_priority_id::TransactionPriorityId,
+        transaction_state::SanitizedTransactionTTL,
+        transaction_state_container::StateContainer,
     },
-    transaction_scheduler::jss_utils::convert_txn_error_to_proto,
-};
-
-use super::{
-    jss_receive_and_buffer::priority_to_seq_id,
-    scheduler::{Scheduler, SchedulingSummary},
-    scheduler_error::SchedulerError,
-    transaction_priority_id::TransactionPriorityId,
-    transaction_state::SanitizedTransactionTTL,
-    transaction_state_container::StateContainer,
+    crate::banking_stage::{
+        decision_maker::BufferedPacketsDecision,
+        scheduler_messages::{
+            ConsumeWork, FinishedConsumeWork, NotCommittedReason, TransactionBatchId,
+            TransactionResult,
+        },
+        transaction_scheduler::jss_utils::convert_txn_error_to_proto,
+    },
+    ahash::HashMap,
+    crossbeam_channel::{Receiver, Sender},
+    jito_protos::proto::{
+        jss_api::{start_scheduler_message::Msg, StartSchedulerMessage},
+        jss_types::{bundle_result, not_committed::Reason, PohTimeout},
+    },
+    prio_graph::{AccessKind, GraphNode, PrioGraph},
+    solana_pubkey::Pubkey,
+    solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
+    solana_sdk::clock::Slot,
+    solana_svm_transaction::svm_message::SVMMessage,
 };
 
 type SchedulerPrioGraph = PrioGraph<
@@ -134,7 +134,9 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
             if *count == 0 {
                 return Some(worker_index);
             }
-            if *count < MAX_SCHEDULED_PER_WORKER && best_worker_index.is_none() || *count < best_worker_count {
+            if *count < MAX_SCHEDULED_PER_WORKER && best_worker_index.is_none()
+                || *count < best_worker_count
+            {
                 best_worker_index = Some(worker_index);
                 best_worker_count = *count;
             }

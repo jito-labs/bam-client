@@ -10,40 +10,40 @@ use std::{
     },
     time::{Duration, Instant},
 };
-
-use crossbeam_channel::Sender;
-use itertools::Itertools;
-use jito_protos::proto::{
-    jss_api::{start_scheduler_message::Msg, StartSchedulerMessage},
-    jss_types::{
-        bundle_result, not_committed::Reason, Bundle, DeserializationErrorReason, Packet,
-        PohTimeout,
+use {
+    super::{
+        receive_and_buffer::ReceiveAndBuffer,
+        transaction_state_container::TransactionStateContainer,
     },
-};
-use solana_accounts_db::account_locks::validate_account_locks;
-use solana_runtime::bank_forks::BankForks;
-use solana_runtime_transaction::{
-    runtime_transaction::RuntimeTransaction, transaction_meta::StaticMeta,
-};
-use solana_sdk::{
-    clock::MAX_PROCESSING_AGE,
-    packet::{PacketFlags, PACKET_DATA_SIZE},
-    transaction::{SanitizedTransaction, TransactionError},
-};
-use solana_svm::transaction_error_metrics::TransactionErrorMetrics;
-
-use crate::banking_stage::{
-    decision_maker::BufferedPacketsDecision,
-    immutable_deserialized_packet::{DeserializedPacketError, ImmutableDeserializedPacket},
-    transaction_scheduler::{
-        jss_utils::{convert_deserialize_error_to_proto, convert_txn_error_to_proto},
-        receive_and_buffer::{calculate_max_age, calculate_priority_and_cost},
-        transaction_state::SanitizedTransactionTTL,
+    crate::banking_stage::{
+        decision_maker::BufferedPacketsDecision,
+        immutable_deserialized_packet::{DeserializedPacketError, ImmutableDeserializedPacket},
+        transaction_scheduler::{
+            jss_utils::{convert_deserialize_error_to_proto, convert_txn_error_to_proto},
+            receive_and_buffer::{calculate_max_age, calculate_priority_and_cost},
+            transaction_state::SanitizedTransactionTTL,
+        },
     },
-};
-
-use super::{
-    receive_and_buffer::ReceiveAndBuffer, transaction_state_container::TransactionStateContainer,
+    crossbeam_channel::Sender,
+    itertools::Itertools,
+    jito_protos::proto::{
+        jss_api::{start_scheduler_message::Msg, StartSchedulerMessage},
+        jss_types::{
+            bundle_result, not_committed::Reason, Bundle, DeserializationErrorReason, Packet,
+            PohTimeout,
+        },
+    },
+    solana_accounts_db::account_locks::validate_account_locks,
+    solana_runtime::bank_forks::BankForks,
+    solana_runtime_transaction::{
+        runtime_transaction::RuntimeTransaction, transaction_meta::StaticMeta,
+    },
+    solana_sdk::{
+        clock::MAX_PROCESSING_AGE,
+        packet::{PacketFlags, PACKET_DATA_SIZE},
+        transaction::{SanitizedTransaction, TransactionError},
+    },
+    solana_svm::transaction_error_metrics::TransactionErrorMetrics,
 };
 
 pub struct JssReceiveAndBuffer {
@@ -220,7 +220,8 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                         .map(|p| {
                             p.meta
                                 .as_ref()
-                                .and_then(|meta| meta.flags.as_ref()).is_some_and(|flags| flags.revert_on_error)
+                                .and_then(|meta| meta.flags.as_ref())
+                                .is_some_and(|flags| flags.revert_on_error)
                         })
                         .all_equal_value()
                     else {
