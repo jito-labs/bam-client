@@ -16,8 +16,8 @@ use itertools::Itertools;
 use jito_protos::proto::{
     jss_api::{start_scheduler_message::Msg, StartSchedulerMessage},
     jss_types::{
-        bundle_result, not_committed::Reason, Bundle, DeserializationErrorReason,
-        Packet, PohTimeout,
+        bundle_result, not_committed::Reason, Bundle, DeserializationErrorReason, Packet,
+        PohTimeout,
     },
 };
 use solana_accounts_db::account_locks::validate_account_locks;
@@ -113,7 +113,7 @@ impl JssReceiveAndBuffer {
         let _ = self.response_sender.try_send(StartSchedulerMessage {
             msg: Some(Msg::BundleResult(
                 jito_protos::proto::jss_types::BundleResult {
-                    seq_id: seq_id,
+                    seq_id,
                     result: Some(bundle_result::Result::NotCommitted(
                         jito_protos::proto::jss_types::NotCommitted {
                             reason: Some(Reason::TransactionError(
