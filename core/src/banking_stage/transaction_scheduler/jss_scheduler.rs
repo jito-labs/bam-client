@@ -134,11 +134,9 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
             if *count == 0 {
                 return Some(worker_index);
             }
-            if *count < MAX_SCHEDULED_PER_WORKER {
-                if best_worker_index.is_none() || *count < best_worker_count {
-                    best_worker_index = Some(worker_index);
-                    best_worker_count = *count;
-                }
+            if *count < MAX_SCHEDULED_PER_WORKER && best_worker_index.is_none() || *count < best_worker_count {
+                best_worker_index = Some(worker_index);
+                best_worker_count = *count;
             }
         }
         best_worker_index
@@ -265,7 +263,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
         ConsumeWork {
             batch_id,
             ids,
-            transactions: transactions,
+            transactions,
             max_ages,
             revert_on_error,
             respond_with_extra_info: true,
@@ -276,7 +274,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
         let _ = self.response_sender.try_send(StartSchedulerMessage {
             msg: Some(Msg::BundleResult(
                 jito_protos::proto::jss_types::BundleResult {
-                    seq_id: seq_id,
+                    seq_id,
                     result: Some(bundle_result::Result::NotCommitted(
                         jito_protos::proto::jss_types::NotCommitted {
                             reason: Some(Reason::PohTimeout(PohTimeout {})),
@@ -511,7 +509,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
                 }
 
                 if Some(inflight_batch_info.slot) == self.slot {
-                    self.prio_graph.unblock(&priority_id);
+                    self.prio_graph.unblock(priority_id);
                 }
 
                 container.remove_by_id(priority_id.id);

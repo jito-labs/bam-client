@@ -491,7 +491,7 @@ impl Consumer {
         }
 
         let initialize_tip_programs_bundle =
-            tip_manager.get_initialize_tip_programs_bundle(&bank, &keypair);
+            tip_manager.get_initialize_tip_programs_bundle(bank, &keypair);
         if let Some(init_bundle) = initialize_tip_programs_bundle {
             let txs = init_bundle.transactions;
             let result = self.process_and_record_transactions(bank, &txs, 0, reservation_cb, true);
@@ -509,7 +509,7 @@ impl Consumer {
             return false;
         }
         if let Ok(Some(tip_crank_bundle)) =
-            tip_manager.get_tip_programs_crank_bundle(&bank, &keypair, &block_builder_fee_info)
+            tip_manager.get_tip_programs_crank_bundle(bank, &keypair, &block_builder_fee_info)
         {
             let txs = tip_crank_bundle.transactions;
             let result = self.process_and_record_transactions(bank, &txs, 0, reservation_cb, true);
@@ -1252,15 +1252,13 @@ mod tests {
 
         let recorded: Vec<VersionedTransaction> = entry_receiver
             .try_iter()
-            .map(|entry| {
+            .flat_map(|entry| {
                 entry
                     .entries_ticks
                     .iter()
-                    .map(|(entry, _)| entry.transactions.clone())
-                    .flatten()
+                    .flat_map(|(entry, _)| entry.transactions.clone())
                     .collect::<Vec<_>>()
             })
-            .flatten()
             .collect::<Vec<_>>();
 
         poh_recorder
@@ -3266,7 +3264,7 @@ mod tests {
         let tip_account = tip_accounts.iter().collect::<Vec<_>>()[0];
         let txns = sanitize_transactions(vec![system_transaction::transfer(
             &genesis_config_info.mint_keypair,
-            &tip_account,
+            tip_account,
             1000,
             genesis_config_info.genesis_config.hash(),
         )]);
@@ -3278,7 +3276,7 @@ mod tests {
                 block_builder: block_builder_pubkey,
                 block_builder_commission: 5,
             })),
-            cluster_info: cluster_info,
+            cluster_info,
         };
 
         let committer = Committer::new(
@@ -3384,7 +3382,7 @@ mod tests {
             .collect::<Vec<_>>();
         let txns = txns
             .into_iter()
-            .map(|tx| VersionedTransaction::from(tx))
+            .map(VersionedTransaction::from)
             .collect::<Vec<_>>();
         let batches = Consumer::create_sequential_non_conflicting_batches(
             txns.into_iter().zip(txn_infos.iter()),

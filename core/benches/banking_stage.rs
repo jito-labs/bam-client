@@ -340,6 +340,7 @@ fn bench_banking(
         BundleAccountLocker::default(),
         |_| 0,
         None,
+        None,
     );
 
     let chunk_len = verified.len() / CHUNKS;

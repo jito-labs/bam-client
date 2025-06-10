@@ -64,6 +64,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         self.metrics.clone()
     }
 
+    #[allow(clippy::result_large_err)]
     pub fn run(self, reservation_cb: impl Fn(&Bank) -> u64) -> Result<(), ConsumeWorkerError<Tx>> {
         loop {
             let work = self.consume_receiver.recv()?;
@@ -71,6 +72,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         }
     }
 
+    #[allow(clippy::result_large_err)]
     fn consume_loop(
         &self,
         work: ConsumeWork<Tx>,
@@ -116,6 +118,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
     }
 
     /// Consume a single batch.
+    #[allow(clippy::result_large_err)]
     fn consume(
         &self,
         bank: &Arc<Bank>,
@@ -181,14 +184,14 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
             {
                 processed_results.push(TransactionResult::Committed(TransactionCommittedResult {
                     cus_consumed: *compute_units as u32,
-                    feepayer_balance_lamports: bank.get_balance(&work.transactions[i].fee_payer()),
+                    feepayer_balance_lamports: bank.get_balance(work.transactions[i].fee_payer()),
                 }));
             } else {
                 let not_committed_reason = errors
                     .get(i)
                     .cloned()
                     .flatten()
-                    .map(|e| NotCommittedReason::Error(e))
+                    .map(NotCommittedReason::Error)
                     .unwrap_or(NotCommittedReason::BatchRevert);
                 processed_results.push(TransactionResult::NotCommitted(not_committed_reason));
             }
@@ -210,6 +213,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
     }
 
     /// Retry current batch and all outstanding batches.
+    #[allow(clippy::result_large_err)]
     fn retry_drain(&self, work: ConsumeWork<Tx>) -> Result<(), ConsumeWorkerError<Tx>> {
         for work in try_drain_iter(work, &self.consume_receiver) {
             self.retry(work)?;
@@ -218,6 +222,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
     }
 
     /// Send transactions back to scheduler as retryable.
+    #[allow(clippy::result_large_err)]
     fn retry(&self, work: ConsumeWork<Tx>) -> Result<(), ConsumeWorkerError<Tx>> {
         let retryable_indexes: Vec<_> = (0..work.transactions.len()).collect();
         let num_retryable = retryable_indexes.len();
