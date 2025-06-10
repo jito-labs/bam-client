@@ -1,7 +1,8 @@
-use jito_protos::proto::jss_types::{DeserializationErrorReason, TransactionErrorReason};
-use solana_sdk::transaction::TransactionError;
-
-use crate::banking_stage::immutable_deserialized_packet::DeserializedPacketError;
+use {
+    crate::banking_stage::immutable_deserialized_packet::DeserializedPacketError,
+    jito_protos::proto::jss_types::{DeserializationErrorReason, TransactionErrorReason},
+    solana_sdk::transaction::TransactionError,
+};
 
 pub fn convert_txn_error_to_proto(err: TransactionError) -> TransactionErrorReason {
     match err {

@@ -1,22 +1,16 @@
 //! The `tpu` module implements the Transaction Processing Unit, a
 //! multi-stage transaction processing pipeline in software.
 
-use crossbeam_channel::bounded;
-pub use solana_sdk::net::DEFAULT_TPU_COALESCE;
 // allow multiple connections for NAT and any open/close overlap
-use crate::{
-    banking_stage::consumer::TipProcessingDependencies, jss_dependencies::JssDependencies,
-    jss_manager::JssManager,
-};
+pub use solana_sdk::net::DEFAULT_TPU_COALESCE;
 #[deprecated(
     since = "2.2.0",
     note = "Use solana_streamer::quic::DEFAULT_MAX_QUIC_CONNECTIONS_PER_PEER instead"
 )]
 pub use solana_streamer::quic::DEFAULT_MAX_QUIC_CONNECTIONS_PER_PEER as MAX_QUIC_CONNECTIONS_PER_PEER;
-
 use {
     crate::{
-        banking_stage::BankingStage,
+        banking_stage::{consumer::TipProcessingDependencies, BankingStage},
         banking_trace::{Channels, TracerThread},
         bundle_stage::{bundle_account_locker::BundleAccountLocker, BundleStage},
         cluster_info_vote_listener::{
@@ -24,6 +18,8 @@ use {
             VerifiedVoteSender, VoteTracker,
         },
         fetch_stage::FetchStage,
+        jss_dependencies::JssDependencies,
+        jss_manager::JssManager,
         proxy::{
             block_engine_stage::{BlockBuilderFeeInfo, BlockEngineConfig, BlockEngineStage},
             fetch_stage_manager::FetchStageManager,
@@ -37,7 +33,7 @@ use {
         validator::{BlockProductionMethod, GeneratorConfig, TransactionStructure},
     },
     bytes::Bytes,
-    crossbeam_channel::{unbounded, Receiver},
+    crossbeam_channel::{bounded, unbounded, Receiver},
     solana_client::connection_cache::ConnectionCache,
     solana_gossip::cluster_info::ClusterInfo,
     solana_ledger::{
