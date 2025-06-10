@@ -2,18 +2,8 @@
 //! to construct a software pipeline. The stage uses all available CPU cores and
 //! can do its processing in parallel with signature verification on the GPU.
 
-use std::sync::atomic::AtomicBool;
-
-use crate::jss_dependencies::JssDependencies;
-use consumer::TipProcessingDependencies;
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
-use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
-use solana_sdk::transaction::SanitizedTransaction;
-use transaction_scheduler::{
-    jss_receive_and_buffer::JssReceiveAndBuffer, jss_scheduler::JssScheduler,
-};
-
 use {
     self::{
         committer::Committer,
@@ -36,9 +26,11 @@ use {
             },
         },
         bundle_stage::bundle_account_locker::BundleAccountLocker,
+        jss_dependencies::JssDependencies,
         validator::{BlockProductionMethod, TransactionStructure},
     },
     agave_banking_stage_ingress_types::BankingPacketReceiver,
+    consumer::TipProcessingDependencies,
     crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Sender},
     histogram::Histogram,
     solana_client::connection_cache::ConnectionCache,
@@ -51,14 +43,15 @@ use {
         bank::Bank, bank_forks::BankForks, prioritization_fee_cache::PrioritizationFeeCache,
         vote_sender_types::ReplayVoteSender,
     },
-    solana_sdk::{pubkey::Pubkey, timing::AtomicInterval},
+    solana_runtime_transaction::runtime_transaction::RuntimeTransaction,
+    solana_sdk::{pubkey::Pubkey, timing::AtomicInterval, transaction::SanitizedTransaction},
     std::{
         cmp,
         collections::HashSet,
         env,
         ops::Deref,
         sync::{
-            atomic::{AtomicU64, AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
             Arc, RwLock,
         },
         thread::{self, Builder, JoinHandle},
@@ -66,6 +59,8 @@ use {
     },
     transaction_scheduler::{
         greedy_scheduler::{GreedyScheduler, GreedySchedulerConfig},
+        jss_receive_and_buffer::JssReceiveAndBuffer,
+        jss_scheduler::JssScheduler,
         prio_graph_scheduler::PrioGraphSchedulerConfig,
         receive_and_buffer::{
             ReceiveAndBuffer, SanitizedTransactionReceiveAndBuffer, TransactionViewReceiveAndBuffer,
