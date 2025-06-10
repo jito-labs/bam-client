@@ -74,7 +74,7 @@ impl JssReceiveAndBuffer {
         packets
             .map(|packet| {
                 let mut solana_packet = solana_sdk::packet::Packet::default();
-                solana_packet.meta_mut().size = packet.data.len() as usize;
+                solana_packet.meta_mut().size = packet.data.len();
                 solana_packet.meta_mut().set_discard(false);
                 let len_to_copy = min(packet.data.len(), PACKET_DATA_SIZE);
                 solana_packet.buffer_mut()[0..len_to_copy]
@@ -138,7 +138,7 @@ impl JssReceiveAndBuffer {
         let _ = self.response_sender.try_send(StartSchedulerMessage {
             msg: Some(Msg::BundleResult(
                 jito_protos::proto::jss_types::BundleResult {
-                    seq_id: seq_id,
+                    seq_id,
                     result: Some(bundle_result::Result::NotCommitted(
                         jito_protos::proto::jss_types::NotCommitted {
                             reason: Some(Reason::DeserializationError(
@@ -158,7 +158,7 @@ impl JssReceiveAndBuffer {
         let _ = self.response_sender.try_send(StartSchedulerMessage {
             msg: Some(Msg::BundleResult(
                 jito_protos::proto::jss_types::BundleResult {
-                    seq_id: seq_id,
+                    seq_id,
                     result: Some(bundle_result::Result::NotCommitted(
                         jito_protos::proto::jss_types::NotCommitted {
                             reason: Some(Reason::PohTimeout(PohTimeout {})),
@@ -194,7 +194,7 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                     let Ok(bundle) = self.bundle_receiver.try_recv() else {
                         break;
                     };
-                    if bundle.packets.len() == 0 {
+                    if bundle.packets.is_empty() {
                         self.send_deserialization_error_bundle_result(
                             bundle.seq_id,
                             0,
@@ -220,8 +220,7 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                         .map(|p| {
                             p.meta
                                 .as_ref()
-                                .and_then(|meta| meta.flags.as_ref())
-                                .map_or(false, |flags| flags.revert_on_error)
+                                .and_then(|meta| meta.flags.as_ref()).is_some_and(|flags| flags.revert_on_error)
                         })
                         .all_equal_value()
                     else {

@@ -197,6 +197,7 @@ impl BlockEngineStage {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn connect_auth_and_stream(
         local_block_engine_config: &BlockEngineConfig,
         global_block_engine_config: &Arc<Mutex<BlockEngineConfig>>,

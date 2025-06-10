@@ -163,10 +163,7 @@ impl<Tx: TransactionWithMeta> StateContainer<Tx> for TransactionStateContainer<T
             return None;
         };
 
-        let Some(ids) = self.batch_id_to_transaction_ids.get(&batch_info.batch_id) else {
-            return None;
-        };
-
+        let ids = self.batch_id_to_transaction_ids.get(&batch_info.batch_id)?;
         let revert_on_error = batch_info.revert_on_error;
         Some((ids.clone(), revert_on_error))
     }
@@ -256,7 +253,7 @@ impl<Tx: TransactionWithMeta> TransactionStateContainer<Tx> {
         let entry = self.get_vacant_map_entry();
         let batch_id = entry.key();
         entry.insert(BatchIdOrTransactionState::Batch(BatchInfo {
-            batch_id: batch_id,
+            batch_id,
             revert_on_error,
         }));
 
@@ -615,9 +612,9 @@ mod tests {
 
         // Get the batch id and revert_on_error flag.
         let batch_id = batch_id.unwrap();
-        let (batch, revert_on_error) = container.get_batch(batch_id as usize).unwrap();
+        let (batch, revert_on_error) = container.get_batch(batch_id).unwrap();
         assert_eq!(batch.len(), 5);
-        assert_eq!(revert_on_error, true);
+        assert!(revert_on_error);
 
         // Remove a batch of transactions.
         let batch_id = container.pop().unwrap();
