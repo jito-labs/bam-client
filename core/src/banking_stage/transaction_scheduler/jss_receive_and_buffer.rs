@@ -204,13 +204,11 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                     }
 
                     let mut parsed_packets = Self::deserialize_jss_packets(bundle.packets.iter());
-                    if let Some(Err(err)) = parsed_packets.iter().find(|r| r.is_err()) {
+                    if let Some((index, Err(err))) =
+                        parsed_packets.iter().find_position(|r| r.is_err())
+                    {
                         let reason = convert_deserialize_error_to_proto(err);
-                        self.send_deserialization_error_bundle_result(
-                            bundle.seq_id,
-                            parsed_packets.iter().position(|r| r.is_err()).unwrap_or(0),
-                            reason,
-                        );
+                        self.send_deserialization_error_bundle_result(bundle.seq_id, index, reason);
                         continue;
                     }
 

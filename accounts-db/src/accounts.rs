@@ -646,8 +646,9 @@ impl Accounts {
         }
 
         let len = tx_account_locks_results.len();
-        let deduped_locks = 
-            Self::get_deduped_batch_locks(tx_account_locks_results.into_iter().map(|res| res.unwrap()));
+        let deduped_locks = Self::get_deduped_batch_locks(
+            tx_account_locks_results.into_iter().map(|res| res.unwrap()),
+        );
 
         let account_locks = &mut self.account_locks.lock().unwrap();
         let result = account_locks.try_lock_accounts(
