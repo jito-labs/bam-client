@@ -683,7 +683,6 @@ impl Accounts {
         // Convert the HashMap to a Vec
         deduped_locks
             .into_iter()
-            .map(|(pubkey, is_writable)| (pubkey, is_writable))
             .collect()
     }
 
