@@ -16,6 +16,7 @@ use {
         proxy::block_engine_stage::BlockBuilderFeeInfo, tip_manager::TipManager,
     },
     agave_feature_set as feature_set,
+    ahash::AHashSet,
     itertools::Itertools,
     solana_fee::FeeFeatures,
     solana_gossip::cluster_info::ClusterInfo,
@@ -984,8 +985,8 @@ impl Consumer {
     ) -> Vec<Vec<VersionedTransaction>> {
         let mut result = vec![];
         let mut current_batch = vec![];
-        let mut current_write_locks: HashSet<Pubkey> = HashSet::default();
-        let mut current_read_locks: HashSet<Pubkey> = HashSet::default();
+        let mut current_write_locks: AHashSet<Pubkey> = AHashSet::default();
+        let mut current_read_locks: AHashSet<Pubkey> = AHashSet::default();
 
         for (transaction, transaction_info) in transactions {
             let account_keys = transaction_info.account_keys();
