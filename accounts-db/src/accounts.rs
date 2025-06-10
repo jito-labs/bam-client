@@ -681,9 +681,7 @@ impl Accounts {
             }
         }
         // Convert the HashMap to a Vec
-        deduped_locks
-            .into_iter()
-            .collect()
+        deduped_locks.into_iter().collect()
     }
 
     /// Once accounts are unlocked, new transactions that modify that state can enter the pipeline
