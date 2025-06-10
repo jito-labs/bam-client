@@ -646,8 +646,8 @@ impl Accounts {
         }
 
         let len = tx_account_locks_results.len();
-        let deduped_locks = self
-            .get_deduped_batch_locks(tx_account_locks_results.into_iter().map(|res| res.unwrap()));
+        let deduped_locks = 
+            Self::get_deduped_batch_locks(tx_account_locks_results.into_iter().map(|res| res.unwrap()));
 
         let account_locks = &mut self.account_locks.lock().unwrap();
         let result = account_locks.try_lock_accounts(
@@ -663,8 +663,9 @@ impl Accounts {
             .collect()
     }
 
+    /// Deduplicate the locks across all transactions in a batch; promoting read-only locks to writable
+    /// if a writable lock exists for the same pubkey.
     fn get_deduped_batch_locks<'a>(
-        &self,
         tx_account_locks: impl Iterator<
             Item = TransactionAccountLocksIterator<'a, impl SVMMessage + 'a>,
         >,
@@ -695,7 +696,7 @@ impl Accounts {
         }
 
         if batched {
-            let deduped_locks = self.get_deduped_batch_locks(
+            let deduped_locks = Self::get_deduped_batch_locks(
                 txs_and_results
                     .clone()
                     .map(|(tx, _)| TransactionAccountLocksIterator::new(tx)),
