@@ -3,8 +3,6 @@
 /// `PrioGraph` data structure, which is a directed graph that tracks the dependencies.
 /// Currently a very simple implementation that probably under pipelines the workers.
 use std::time::Instant;
-use jito_protos::proto::jss_types::SchedulingError;
-
 use {
     super::{
         jss_receive_and_buffer::priority_to_seq_id,
@@ -26,7 +24,7 @@ use {
     crossbeam_channel::{Receiver, Sender},
     jito_protos::proto::{
         jss_api::{start_scheduler_message::Msg, StartSchedulerMessage},
-        jss_types::{bundle_result, not_committed::Reason},
+        jss_types::{bundle_result, not_committed::Reason, SchedulingError},
     },
     prio_graph::{AccessKind, GraphNode, PrioGraph},
     solana_pubkey::Pubkey,
@@ -281,7 +279,9 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
                     seq_id,
                     result: Some(bundle_result::Result::NotCommitted(
                         jito_protos::proto::jss_types::NotCommitted {
-                            reason: Some(Reason::SchedulingError(SchedulingError::OutsideLeaderSlot as i32)),
+                            reason: Some(Reason::SchedulingError(
+                                SchedulingError::OutsideLeaderSlot as i32,
+                            )),
                         },
                     )),
                 },
@@ -372,7 +372,9 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
     ) -> jito_protos::proto::jss_types::not_committed::Reason {
         match reason {
             NotCommittedReason::PohTimeout => {
-                jito_protos::proto::jss_types::not_committed::Reason::SchedulingError(SchedulingError::PohTimeout as i32)
+                jito_protos::proto::jss_types::not_committed::Reason::SchedulingError(
+                    SchedulingError::PohTimeout as i32,
+                )
             }
             // Should not happen, but just in case:
             NotCommittedReason::BatchRevert => {
