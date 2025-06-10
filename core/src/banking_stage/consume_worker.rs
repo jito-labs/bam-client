@@ -185,6 +185,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
                 processed_results.push(TransactionResult::Committed(TransactionCommittedResult {
                     cus_consumed: *compute_units as u32,
                     feepayer_balance_lamports: bank.get_balance(work.transactions[i].fee_payer()),
+                    loaded_accounts_data_size: *loaded_accounts_data_size,
                 }));
             } else {
                 let not_committed_reason = errors
