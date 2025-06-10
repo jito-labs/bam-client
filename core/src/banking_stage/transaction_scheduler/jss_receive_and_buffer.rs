@@ -10,8 +10,6 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use jito_protos::proto::jss_types::SchedulingError;
-
 use {
     super::{
         receive_and_buffer::ReceiveAndBuffer,
@@ -32,6 +30,7 @@ use {
         jss_api::{start_scheduler_message::Msg, StartSchedulerMessage},
         jss_types::{
             bundle_result, not_committed::Reason, Bundle, DeserializationErrorReason, Packet,
+            SchedulingError,
         },
     },
     solana_accounts_db::account_locks::validate_account_locks,
@@ -162,7 +161,9 @@ impl JssReceiveAndBuffer {
                     seq_id,
                     result: Some(bundle_result::Result::NotCommitted(
                         jito_protos::proto::jss_types::NotCommitted {
-                            reason: Some(Reason::SchedulingError(SchedulingError::OutsideLeaderSlot as i32)),
+                            reason: Some(Reason::SchedulingError(
+                                SchedulingError::OutsideLeaderSlot as i32,
+                            )),
                         },
                     )),
                 },
@@ -177,7 +178,9 @@ impl JssReceiveAndBuffer {
                     seq_id,
                     result: Some(bundle_result::Result::NotCommitted(
                         jito_protos::proto::jss_types::NotCommitted {
-                            reason: Some(Reason::SchedulingError(SchedulingError::ContainerFull as i32)),
+                            reason: Some(Reason::SchedulingError(
+                                SchedulingError::ContainerFull as i32,
+                            )),
                         },
                     )),
                 },
