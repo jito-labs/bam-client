@@ -204,6 +204,7 @@ impl SanitizedTransactionReceiveAndBuffer {
             chunk
                 .iter()
                 .filter_map(|packet| {
+                    // Check 1
                     packet
                         .build_sanitized_transaction(
                             vote_only,
@@ -214,6 +215,7 @@ impl SanitizedTransactionReceiveAndBuffer {
                 })
                 .inspect(|_| saturating_add_assign!(post_sanitization_count, 1))
                 .filter(|(_packet, tx, _deactivation_slot)| {
+                    // Check 2
                     validate_account_locks(
                         tx.message().account_keys(),
                         transaction_account_lock_limit,
@@ -221,6 +223,7 @@ impl SanitizedTransactionReceiveAndBuffer {
                     .is_ok()
                 })
                 .filter_map(|(packet, tx, deactivation_slot)| {
+                    // Check 3
                     tx.compute_budget_instruction_details()
                         .sanitize_and_convert_to_compute_budget_limits(&working_bank.feature_set)
                         .map(|compute_budget| {
@@ -239,6 +242,7 @@ impl SanitizedTransactionReceiveAndBuffer {
                     fee_budget_limits_vec.push(fee_budget_limits);
                 });
 
+            // Check 4
             let check_results = working_bank.check_transactions(
                 &transactions,
                 &lock_results[..transactions.len()],
@@ -259,6 +263,7 @@ impl SanitizedTransactionReceiveAndBuffer {
                     .zip(check_results)
                     .filter(|(_, check_result)| check_result.is_ok())
                     .filter(|((((_, tx), _), _), _)| {
+                        // Check 5
                         Consumer::check_fee_payer_unlocked(&working_bank, tx, &mut error_counts)
                             .is_ok()
                     })

@@ -16,6 +16,7 @@ use {
         transaction_state_container::TransactionStateContainer,
     },
     crate::banking_stage::{
+        consumer::Consumer,
         decision_maker::BufferedPacketsDecision,
         immutable_deserialized_packet::{DeserializedPacketError, ImmutableDeserializedPacket},
         transaction_scheduler::{
@@ -265,9 +266,13 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                     let mut packets = vec![];
                     let mut cost: u64 = 0;
                     let mut transaction_ttls = vec![];
+
+                    // Checks are taken from receive_and_buffer.rs:
+                    // SanitizedTransactionReceiveAndBuffer::buffer_packets
                     for (index, parsed_packet) in
                         parsed_packets.drain(..).filter_map(Result::ok).enumerate()
                     {
+                        // Check 1
                         let Some((tx, deactivation_slot)) = parsed_packet
                             .build_sanitized_transaction(
                                 vote_only,
@@ -283,6 +288,7 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                             break;
                         };
 
+                        // Check 2
                         if let Err(err) = validate_account_locks(
                             tx.message().account_keys(),
                             transaction_account_lock_limit,
@@ -291,6 +297,7 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                             break;
                         }
 
+                        // Check 3
                         let fee_budget_limits = match tx
                             .compute_budget_instruction_details()
                             .sanitize_and_convert_to_compute_budget_limits(
@@ -303,6 +310,7 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                             }
                         };
 
+                        // Check 4
                         let lock_results: [_; 1] = core::array::from_fn(|_| Ok(()));
                         let check_results = working_bank.check_transactions(
                             std::slice::from_ref(&tx),
@@ -312,6 +320,16 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                         );
                         if let Some(Err(err)) = check_results.first() {
                             self.send_txn_error_bundle_result(bundle.seq_id, index, err.clone());
+                            break;
+                        }
+
+                        // Check 5
+                        if let Err(err) = Consumer::check_fee_payer_unlocked(
+                            &working_bank,
+                            &tx,
+                            &mut TransactionErrorMetrics::default(),
+                        ) {
+                            self.send_txn_error_bundle_result(bundle.seq_id, index, err);
                             break;
                         }
 
