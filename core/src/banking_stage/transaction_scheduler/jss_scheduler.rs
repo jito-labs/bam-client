@@ -517,8 +517,8 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
                 }
 
                 container.remove_by_id(priority_id.id);
-                self.workers_scheduled_count[inflight_batch_info.worker_index] -= 1;
             }
+            self.workers_scheduled_count[inflight_batch_info.worker_index] -= 1;
         }
 
         Ok((num_transactions, 0))
