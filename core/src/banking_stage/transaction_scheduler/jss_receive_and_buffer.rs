@@ -394,3 +394,57 @@ pub fn seq_id_to_priority(seq_id: u32) -> u64 {
 pub fn priority_to_seq_id(priority: u64) -> u32 {
     u32::try_from(u64::MAX.saturating_sub(priority)).unwrap_or(u32::MAX)
 }
+
+#[cfg(test)]
+mod tests {
+    use solana_ledger::genesis_utils::GenesisConfigInfo;
+    use solana_runtime::bank::Bank;
+    use solana_sdk::signature::Keypair;
+
+    use crate::banking_stage::{tests::create_slow_genesis_config, transaction_scheduler::transaction_state_container::StateContainer};
+
+    use super::*;
+
+    #[test]
+    fn test_seq_id_to_priority() {
+        assert_eq!(seq_id_to_priority(0), u64::MAX);
+        assert_eq!(seq_id_to_priority(1), u64::MAX - 1);
+    }
+
+    #[test]
+    fn test_priority_to_seq_id() {
+        assert_eq!(priority_to_seq_id(u64::MAX), 0);
+        assert_eq!(priority_to_seq_id(u64::MAX - 1), 1);
+    }
+
+    fn test_bank_forks() -> (Arc<RwLock<BankForks>>, Keypair) {
+        let GenesisConfigInfo {
+            genesis_config,
+            mint_keypair,
+            ..
+        } = create_slow_genesis_config(u64::MAX);
+
+        let (_bank, bank_forks) = Bank::new_no_wallclock_throttle_for_tests(&genesis_config);
+        (bank_forks, mint_keypair)
+    }
+
+    fn setup_jss_receive_and_buffer(
+        receiver: crossbeam_channel::Receiver<Bundle>,
+        bank_forks: Arc<RwLock<BankForks>>,
+    ) -> (
+        JssReceiveAndBuffer,
+        TransactionStateContainer<RuntimeTransaction<SanitizedTransaction>>,
+        crossbeam_channel::Receiver<StartSchedulerMessage>,
+    ) {
+        let (response_sender, response_receiver) =
+            crossbeam_channel::unbounded::<StartSchedulerMessage>();
+        let receive_and_buffer = JssReceiveAndBuffer::new(
+            Arc::new(AtomicBool::new(true)),
+            receiver,
+            response_sender,
+            bank_forks,
+        );
+        let container = TransactionStateContainer::with_capacity(100);
+        (receive_and_buffer, container, response_receiver)
+    }
+}
