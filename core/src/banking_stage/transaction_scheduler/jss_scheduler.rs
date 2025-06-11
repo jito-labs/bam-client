@@ -134,8 +134,8 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
             if *count == 0 {
                 return Some(worker_index);
             }
-            if *count < MAX_SCHEDULED_PER_WORKER &&
-                (best_worker_index.is_none() || *count < best_worker_count)
+            if *count < MAX_SCHEDULED_PER_WORKER
+                && (best_worker_index.is_none() || *count < best_worker_count)
             {
                 best_worker_index = Some(worker_index);
                 best_worker_count = *count;
