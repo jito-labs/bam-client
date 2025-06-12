@@ -528,23 +528,60 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
 
 #[cfg(test)]
 mod tests {
-    use std::{borrow::Borrow, sync::Arc};
-
-    use crossbeam_channel::unbounded;
-    use solana_pubkey::Pubkey;
-    use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
-    use solana_sdk::{hash::Hash, message::Message, signature::Keypair, signer::Signer, compute_budget::ComputeBudgetInstruction, transaction::{SanitizedTransaction, Transaction}};
-    use jito_protos::proto::{jss_api::StartSchedulerMessage, jss_types::TransactionCommittedResult};
-    use itertools::Itertools;
-    use solana_sdk::system_instruction::transfer_many;
-    use solana_perf::packet::Packet;
-
-    use crate::banking_stage::{decision_maker::BufferedPacketsDecision, immutable_deserialized_packet::ImmutableDeserializedPacket, scheduler_messages::{ConsumeWork, FinishedConsumeWork, MaxAge, NotCommittedReason, TransactionResult}, transaction_scheduler::{jss_scheduler::JssScheduler, scheduler::Scheduler, transaction_state::SanitizedTransactionTTL, transaction_state_container::{StateContainer, TransactionStateContainer}}};
+    use {
+        crate::banking_stage::{
+            decision_maker::BufferedPacketsDecision,
+            immutable_deserialized_packet::ImmutableDeserializedPacket,
+            scheduler_messages::{
+                ConsumeWork, FinishedConsumeWork, MaxAge, NotCommittedReason, TransactionResult,
+            },
+            tests::create_slow_genesis_config,
+            transaction_scheduler::{
+                jss_receive_and_buffer::seq_id_to_priority,
+                jss_scheduler::JssScheduler,
+                scheduler::Scheduler,
+                transaction_state::SanitizedTransactionTTL,
+                transaction_state_container::{StateContainer, TransactionStateContainer},
+            },
+        },
+        crossbeam_channel::unbounded,
+        itertools::Itertools,
+        jito_protos::proto::{
+            jss_api::{start_scheduler_message::Msg, StartSchedulerMessage},
+            jss_types::{
+                bundle_result::Result::{Committed, NotCommitted},
+                TransactionCommittedResult,
+            },
+        },
+        solana_ledger::genesis_utils::GenesisConfigInfo,
+        solana_perf::packet::Packet,
+        solana_poh::poh_recorder::BankStart,
+        solana_pubkey::Pubkey,
+        solana_runtime::{bank::Bank, bank_forks::BankForks},
+        solana_runtime_transaction::runtime_transaction::RuntimeTransaction,
+        solana_sdk::{
+            compute_budget::ComputeBudgetInstruction,
+            hash::Hash,
+            message::Message,
+            signature::Keypair,
+            signer::Signer,
+            system_instruction::transfer_many,
+            transaction::{SanitizedTransaction, Transaction},
+        },
+        std::{
+            borrow::Borrow,
+            sync::{Arc, RwLock},
+            time::Instant,
+        },
+    };
 
     struct TestScheduler {
         scheduler: JssScheduler<RuntimeTransaction<SanitizedTransaction>>,
-        consume_work_receivers: Vec<crossbeam_channel::Receiver<ConsumeWork<RuntimeTransaction<SanitizedTransaction>>>>,
-        finished_consume_work_sender: crossbeam_channel::Sender<FinishedConsumeWork<RuntimeTransaction<SanitizedTransaction>>>,
+        consume_work_receivers:
+            Vec<crossbeam_channel::Receiver<ConsumeWork<RuntimeTransaction<SanitizedTransaction>>>>,
+        finished_consume_work_sender: crossbeam_channel::Sender<
+            FinishedConsumeWork<RuntimeTransaction<SanitizedTransaction>>,
+        >,
         response_receiver: crossbeam_channel::Receiver<StartSchedulerMessage>,
     }
 
@@ -626,6 +663,17 @@ mod tests {
         container
     }
 
+    fn test_bank_forks() -> (Arc<RwLock<BankForks>>, Keypair) {
+        let GenesisConfigInfo {
+            genesis_config,
+            mint_keypair,
+            ..
+        } = create_slow_genesis_config(u64::MAX);
+
+        let (_bank, bank_forks) = Bank::new_no_wallclock_throttle_for_tests(&genesis_config);
+        (bank_forks, mint_keypair)
+    }
+
     #[test]
     fn test_scheduler_empty() {
         let TestScheduler {
@@ -636,7 +684,9 @@ mod tests {
         } = create_test_scheduler(4);
 
         let mut container = TransactionStateContainer::with_capacity(100);
-        let result = scheduler.schedule(&mut container, |_, _|{}, |_| true).unwrap();
+        let result = scheduler
+            .schedule(&mut container, |_, _| {}, |_| true)
+            .unwrap();
         assert_eq!(result.num_scheduled, 0);
     }
 
@@ -651,17 +701,62 @@ mod tests {
 
         let keypair_a = Keypair::new();
 
-        let mut container = create_container(vec![
-            (&keypair_a, vec![Pubkey::new_unique()], 1000, 100),
-            (&keypair_a, vec![Pubkey::new_unique()], 1500, 200),
-            (&Keypair::new(), vec![Pubkey::new_unique()], 2000, 50),
+        let first_recipient = Pubkey::new_unique();
 
+        let mut container = create_container(vec![
+            (
+                &keypair_a,
+                vec![Pubkey::new_unique()],
+                1000,
+                seq_id_to_priority(1),
+            ),
+            (
+                &keypair_a,
+                vec![first_recipient],
+                1500,
+                seq_id_to_priority(0),
+            ),
+            (
+                &keypair_a,
+                vec![Pubkey::new_unique()],
+                1500,
+                seq_id_to_priority(2),
+            ),
+            (
+                &Keypair::new(),
+                vec![Pubkey::new_unique()],
+                2000,
+                seq_id_to_priority(3),
+            ),
         ]);
-        scheduler.slot = Some(0);
+
+        assert!(
+            scheduler.slot.is_none(),
+            "Scheduler slot should be None initially"
+        );
+
+        let (bank_forks, _) = test_bank_forks();
+
+        let decision = BufferedPacketsDecision::Consume(BankStart {
+            working_bank: bank_forks.read().unwrap().working_bank(),
+            bank_creation_time: Arc::new(Instant::now()),
+        });
+
+        // Init scheduler with bank start info
+        scheduler
+            .receive_completed(&mut container, &decision)
+            .unwrap();
+
+        assert!(
+            scheduler.slot.is_some(),
+            "Scheduler slot should be set after receiving bank start"
+        );
 
         // Schedule the transactions
-        let result = scheduler.schedule(&mut container, |_, _|{}, |_| true).unwrap();
-        
+        let result = scheduler
+            .schedule(&mut container, |_, _| {}, |_| true)
+            .unwrap();
+
         // Only two should have been scheduled as one is blocked
         assert_eq!(result.num_scheduled, 2);
 
@@ -669,43 +764,216 @@ mod tests {
         let work_1 = consume_work_receivers[0].try_recv().unwrap();
         assert_eq!(work_1.ids.len(), 2);
 
-        // Check that the first transaction is from keypair_a
-        assert_eq!(work_1.transactions[0].message().account_keys()[0], keypair_a.pubkey());
+        // Check that the first transaction is from keypair_a and first recipient is the first recipient
+        assert_eq!(
+            work_1.transactions[0].message().account_keys()[0],
+            keypair_a.pubkey()
+        );
+        assert_eq!(
+            work_1.transactions[0].message().account_keys()[1],
+            first_recipient
+        );
 
         // Try scheduling; nothing should be scheduled as the remaining transaction is blocked
-        let result = scheduler.schedule(&mut container, |_, _|{}, |_| true).unwrap();
+        let result = scheduler
+            .schedule(&mut container, |_, _| {}, |_| true)
+            .unwrap();
         assert_eq!(result.num_scheduled, 0);
 
         // Respond with finsihed work
         let finished_work = FinishedConsumeWork {
             work: work_1,
             retryable_indexes: vec![],
-            extra_info: Some(crate::banking_stage::scheduler_messages::FinishedConsumeWorkExtraInfo {
-                processed_results: vec![
-                    TransactionResult::Committed(TransactionCommittedResult {
-                        cus_consumed: 100,
-                        feepayer_balance_lamports: 1000,
-                        loaded_accounts_data_size: 10,
-                    }),
-                    TransactionResult::NotCommitted(NotCommittedReason::PohTimeout),
-                ],
-            }),
+            extra_info: Some(
+                crate::banking_stage::scheduler_messages::FinishedConsumeWorkExtraInfo {
+                    processed_results: vec![
+                        TransactionResult::Committed(TransactionCommittedResult {
+                            cus_consumed: 100,
+                            feepayer_balance_lamports: 1000,
+                            loaded_accounts_data_size: 10,
+                        }),
+                        TransactionResult::NotCommitted(NotCommittedReason::PohTimeout),
+                    ],
+                },
+            ),
         };
         let _ = finished_consume_work_sender.send(finished_work);
 
         // Receive the finished work
-        let (num_transactions, _) = scheduler.receive_completed(&mut container, &BufferedPacketsDecision::Hold).unwrap();
+        let (num_transactions, _) = scheduler
+            .receive_completed(&mut container, &decision)
+            .unwrap();
         assert_eq!(num_transactions, 2);
 
+        // Check the response for the first transaction (committed)
         let response = response_receiver.try_recv().unwrap();
-        let response = response_receiver.try_recv().unwrap();
+        assert!(response.msg.is_some(), "Response should contain a message");
+        let msg = response.msg.unwrap();
+        let Msg::BundleResult(bundle_result) = msg else {
+            panic!("Expected BundleResult message");
+        };
+        assert_eq!(bundle_result.seq_id, 0);
+        assert!(
+            bundle_result.result.is_some(),
+            "Bundle result should be present"
+        );
+        let result = bundle_result.result.unwrap();
+        match result {
+            Committed(committed) => {
+                assert_eq!(committed.transaction_results.len(), 1);
+                assert_eq!(committed.transaction_results[0].cus_consumed, 100);
+            }
+            NotCommitted(not_committed) => {
+                panic!(
+                    "Expected Committed result, got NotCommitted: {:?}",
+                    not_committed
+                );
+            }
+        }
 
-        scheduler.slot = Some(1); // Simulate a slot change
+        // Check the response for the second transaction (not committed)
+        let response = response_receiver.try_recv().unwrap();
+        assert!(response.msg.is_some(), "Response should contain a message");
+        let msg = response.msg.unwrap();
+        let Msg::BundleResult(bundle_result) = msg else {
+            panic!("Expected BundleResult message");
+        };
+        assert_eq!(bundle_result.seq_id, 3);
+        assert!(
+            bundle_result.result.is_some(),
+            "Bundle result should be present"
+        );
+        let result = bundle_result.result.unwrap();
+        match result {
+            Committed(_) => {
+                panic!("Expected NotCommitted result, got Committed");
+            }
+            NotCommitted(not_committed) => {
+                assert!(
+                    not_committed.reason.is_some(),
+                    "NotCommitted reason should be present"
+                );
+                let reason = not_committed.reason.unwrap();
+                assert_eq!(
+                    reason,
+                    jito_protos::proto::jss_types::not_committed::Reason::SchedulingError(
+                        jito_protos::proto::jss_types::SchedulingError::PohTimeout as i32
+                    )
+                );
+            }
+        }
+
         // Now try scheduling again; should schedule the remaining transaction
-        let result = scheduler.schedule(&mut container, |_, _|{}, |_| true).unwrap();
+        let result = scheduler
+            .schedule(&mut container, |_, _| {}, |_| true)
+            .unwrap();
         assert_eq!(result.num_scheduled, 1);
         // Check that the remaining transaction is sent to the worker
         let work_2 = consume_work_receivers[0].try_recv().unwrap();
         assert_eq!(work_2.ids.len(), 1);
+
+        // Try scheduling; nothing should be scheduled as the remaining transaction is blocked
+        let result = scheduler
+            .schedule(&mut container, |_, _| {}, |_| true)
+            .unwrap();
+        assert_eq!(result.num_scheduled, 0);
+
+        // Send back the finished work for the second transaction
+        let finished_work = FinishedConsumeWork {
+            work: work_2,
+            retryable_indexes: vec![],
+            extra_info: Some(
+                crate::banking_stage::scheduler_messages::FinishedConsumeWorkExtraInfo {
+                    processed_results: vec![TransactionResult::Committed(
+                        TransactionCommittedResult {
+                            cus_consumed: 1500,
+                            feepayer_balance_lamports: 1500,
+                            loaded_accounts_data_size: 20,
+                        },
+                    )],
+                },
+            ),
+        };
+        let _ = finished_consume_work_sender.send(finished_work);
+
+        // Receive the finished work
+        let (num_transactions, _) = scheduler
+            .receive_completed(&mut container, &decision)
+            .unwrap();
+        assert_eq!(num_transactions, 1);
+
+        // Check the response for the next transaction
+        let response = response_receiver.try_recv().unwrap();
+        assert!(response.msg.is_some(), "Response should contain a message");
+        let msg = response.msg.unwrap();
+        let Msg::BundleResult(bundle_result) = msg else {
+            panic!("Expected BundleResult message");
+        };
+        assert_eq!(bundle_result.seq_id, 1);
+        assert!(
+            bundle_result.result.is_some(),
+            "Bundle result should be present"
+        );
+        let result = bundle_result.result.unwrap();
+        match result {
+            Committed(committed) => {
+                assert_eq!(committed.transaction_results.len(), 1);
+                assert_eq!(committed.transaction_results[0].cus_consumed, 1500);
+            }
+            NotCommitted(not_committed) => {
+                panic!(
+                    "Expected Committed result, got NotCommitted: {:?}",
+                    not_committed
+                );
+            }
+        }
+
+        // Receive the finished work
+        let (num_transactions, _) = scheduler
+            .receive_completed(&mut container, &BufferedPacketsDecision::Forward)
+            .unwrap();
+        assert_eq!(num_transactions, 0);
+
+        // Check that container + prio-graph are empty
+        assert!(
+            container.pop().is_none(),
+            "Container should be empty after processing all transactions"
+        );
+        assert!(
+            scheduler.prio_graph.is_empty(),
+            "Prio-graph should be empty after processing all transactions"
+        );
+
+        // Receive the NotCommitted Result
+        let response = response_receiver.try_recv().unwrap();
+        assert!(response.msg.is_some(), "Response should contain a message");
+        let msg = response.msg.unwrap();
+        let Msg::BundleResult(bundle_result) = msg else {
+            panic!("Expected BundleResult message");
+        };
+        assert_eq!(bundle_result.seq_id, 2);
+        assert!(
+            bundle_result.result.is_some(),
+            "Bundle result should be present"
+        );
+        let result = bundle_result.result.unwrap();
+        match result {
+            Committed(_) => {
+                panic!("Expected NotCommitted result, got Committed");
+            }
+            NotCommitted(not_committed) => {
+                assert!(
+                    not_committed.reason.is_some(),
+                    "NotCommitted reason should be present"
+                );
+                let reason = not_committed.reason.unwrap();
+                assert_eq!(
+                    reason,
+                    jito_protos::proto::jss_types::not_committed::Reason::SchedulingError(
+                        jito_protos::proto::jss_types::SchedulingError::OutsideLeaderSlot as i32
+                    )
+                );
+            }
+        }
     }
 }
