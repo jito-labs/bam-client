@@ -779,6 +779,7 @@ mod tests {
             .schedule(&mut container, |_, _| {}, |_| true)
             .unwrap();
         assert_eq!(result.num_scheduled, 0);
+        assert_eq!(scheduler.workers_scheduled_count[0], 1);
 
         // Respond with finsihed work
         let finished_work = FinishedConsumeWork {
@@ -804,6 +805,7 @@ mod tests {
             .receive_completed(&mut container, &decision)
             .unwrap();
         assert_eq!(num_transactions, 2);
+        assert_eq!(scheduler.workers_scheduled_count[0], 0);
 
         // Check the response for the first transaction (committed)
         let response = response_receiver.try_recv().unwrap();
@@ -871,6 +873,7 @@ mod tests {
         // Check that the remaining transaction is sent to the worker
         let work_2 = consume_work_receivers[0].try_recv().unwrap();
         assert_eq!(work_2.ids.len(), 1);
+        assert_eq!(scheduler.workers_scheduled_count[0], 1);
 
         // Try scheduling; nothing should be scheduled as the remaining transaction is blocked
         let result = scheduler
@@ -901,6 +904,7 @@ mod tests {
             .receive_completed(&mut container, &decision)
             .unwrap();
         assert_eq!(num_transactions, 1);
+        assert_eq!(scheduler.workers_scheduled_count[0], 0);
 
         // Check the response for the next transaction
         let response = response_receiver.try_recv().unwrap();
