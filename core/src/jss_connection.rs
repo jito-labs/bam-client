@@ -61,7 +61,7 @@ impl JssConnection {
             .into_inner();
 
         let metrics = Arc::new(JssConnectionMetrics::default());
-        let is_healthy = Arc::new(AtomicBool::new(false));
+        let is_healthy = Arc::new(AtomicBool::new(true));
         let builder_config = Arc::new(Mutex::new(None));
 
         let exit = Arc::new(AtomicBool::new(false));
