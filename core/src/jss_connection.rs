@@ -131,11 +131,6 @@ impl JssConnection {
                         msg: Some(Msg::HeartBeat(signed_heartbeat)),
                     });
                     metrics.heartbeat_sent.fetch_add(1, Relaxed);
-
-                    // If a leader slot is coming up; we don't want to block the worker
-                    if poh_recorder.read().unwrap().would_be_leader(TICKS_PER_SLOT) {
-                        continue;
-                    };
                 }
                 _ = metrics_and_health_check_interval.tick() => {
                     const TIMEOUT_DURATION: std::time::Duration = std::time::Duration::from_secs(6);
@@ -150,9 +145,16 @@ impl JssConnection {
                     metrics.report();
                 }
                 inbound = inbound_stream.message() => {
-                    let Ok(Some(inbound)) = inbound else {
-                        error!("Failed to receive message from inbound stream");
-                        break;
+                    let inbound = match inbound {
+                        Ok(Some(msg)) => msg,
+                        Ok(None) => {
+                            error!("Inbound stream closed");
+                            break;
+                        }
+                        Err(e) => {
+                            error!("Failed to receive message from inbound stream: {:?}", e);
+                            break;
+                        }
                     };
 
                     match inbound {
