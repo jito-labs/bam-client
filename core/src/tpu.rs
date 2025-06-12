@@ -1,8 +1,8 @@
 //! The `tpu` module implements the Transaction Processing Unit, a
 //! multi-stage transaction processing pipeline in software.
 
-// allow multiple connections for NAT and any open/close overlap
 pub use solana_sdk::net::DEFAULT_TPU_COALESCE;
+// allow multiple connections for NAT and any open/close overlap
 #[deprecated(
     since = "2.2.0",
     note = "Use solana_streamer::quic::DEFAULT_MAX_QUIC_CONNECTIONS_PER_PEER instead"
