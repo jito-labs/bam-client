@@ -161,6 +161,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
                 break;
             }
             for (priority_ids, revert_on_error) in batches_for_scheduling {
+                let len = priority_ids.len();
                 let batch_id = self.get_next_schedule_id();
                 let txn_ids = priority_ids
                     .iter()
@@ -169,7 +170,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
                     .collect::<Vec<_>>();
                 let work = Self::generate_work(batch_id, txn_ids, revert_on_error, container);
                 self.send_to_worker(worker_index, priority_ids, work, slot);
-                *num_scheduled += 1;
+                *num_scheduled += len;
             }
         }
     }
@@ -522,5 +523,189 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
         }
 
         Ok((num_transactions, 0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{borrow::Borrow, sync::Arc};
+
+    use crossbeam_channel::unbounded;
+    use solana_pubkey::Pubkey;
+    use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
+    use solana_sdk::{hash::Hash, message::Message, signature::Keypair, signer::Signer, compute_budget::ComputeBudgetInstruction, transaction::{SanitizedTransaction, Transaction}};
+    use jito_protos::proto::{jss_api::StartSchedulerMessage, jss_types::TransactionCommittedResult};
+    use itertools::Itertools;
+    use solana_sdk::system_instruction::transfer_many;
+    use solana_perf::packet::Packet;
+
+    use crate::banking_stage::{decision_maker::BufferedPacketsDecision, immutable_deserialized_packet::ImmutableDeserializedPacket, scheduler_messages::{ConsumeWork, FinishedConsumeWork, MaxAge, NotCommittedReason, TransactionResult}, transaction_scheduler::{jss_scheduler::JssScheduler, scheduler::Scheduler, transaction_state::SanitizedTransactionTTL, transaction_state_container::{StateContainer, TransactionStateContainer}}};
+
+    struct TestScheduler {
+        scheduler: JssScheduler<RuntimeTransaction<SanitizedTransaction>>,
+        consume_work_receivers: Vec<crossbeam_channel::Receiver<ConsumeWork<RuntimeTransaction<SanitizedTransaction>>>>,
+        finished_consume_work_sender: crossbeam_channel::Sender<FinishedConsumeWork<RuntimeTransaction<SanitizedTransaction>>>,
+        response_receiver: crossbeam_channel::Receiver<StartSchedulerMessage>,
+    }
+
+    fn create_test_scheduler(num_threads: usize) -> TestScheduler {
+        let (consume_work_senders, consume_work_receivers) =
+            (0..num_threads).map(|_| unbounded()).unzip();
+        let (finished_consume_work_sender, finished_consume_work_receiver) = unbounded();
+        let (response_sender, response_receiver) = unbounded();
+        let scheduler = JssScheduler::new(
+            consume_work_senders,
+            finished_consume_work_receiver,
+            response_sender,
+        );
+        TestScheduler {
+            scheduler,
+            consume_work_receivers,
+            finished_consume_work_sender,
+            response_receiver,
+        }
+    }
+
+    fn prioritized_tranfers(
+        from_keypair: &Keypair,
+        to_pubkeys: impl IntoIterator<Item = impl Borrow<Pubkey>>,
+        lamports: u64,
+        priority: u64,
+    ) -> RuntimeTransaction<SanitizedTransaction> {
+        let to_pubkeys_lamports = to_pubkeys
+            .into_iter()
+            .map(|pubkey| *pubkey.borrow())
+            .zip(std::iter::repeat(lamports))
+            .collect_vec();
+        let mut ixs = transfer_many(&from_keypair.pubkey(), &to_pubkeys_lamports);
+        let prioritization = ComputeBudgetInstruction::set_compute_unit_price(priority);
+        ixs.push(prioritization);
+        let message = Message::new(&ixs, Some(&from_keypair.pubkey()));
+        let tx = Transaction::new(&[from_keypair], message, Hash::default());
+        RuntimeTransaction::from_transaction_for_tests(tx)
+    }
+
+    fn create_container(
+        tx_infos: impl IntoIterator<
+            Item = (
+                impl Borrow<Keypair>,
+                impl IntoIterator<Item = impl Borrow<Pubkey>>,
+                u64,
+                u64,
+            ),
+        >,
+    ) -> TransactionStateContainer<RuntimeTransaction<SanitizedTransaction>> {
+        let mut container = TransactionStateContainer::with_capacity(10 * 1024);
+        for (from_keypair, to_pubkeys, lamports, compute_unit_price) in tx_infos.into_iter() {
+            let transaction = prioritized_tranfers(
+                from_keypair.borrow(),
+                to_pubkeys,
+                lamports,
+                compute_unit_price,
+            );
+            let packet = Arc::new(
+                ImmutableDeserializedPacket::new(
+                    Packet::from_data(None, transaction.to_versioned_transaction()).unwrap(),
+                )
+                .unwrap(),
+            );
+            let transaction_ttl = SanitizedTransactionTTL {
+                transaction,
+                max_age: MaxAge::MAX,
+            };
+            const TEST_TRANSACTION_COST: u64 = 5000;
+            container.insert_new_batch(
+                vec![transaction_ttl],
+                vec![packet],
+                compute_unit_price,
+                TEST_TRANSACTION_COST,
+                false,
+            );
+        }
+
+        container
+    }
+
+    #[test]
+    fn test_scheduler_empty() {
+        let TestScheduler {
+            mut scheduler,
+            consume_work_receivers: _,
+            finished_consume_work_sender: _,
+            response_receiver: _,
+        } = create_test_scheduler(4);
+
+        let mut container = TransactionStateContainer::with_capacity(100);
+        let result = scheduler.schedule(&mut container, |_, _|{}, |_| true).unwrap();
+        assert_eq!(result.num_scheduled, 0);
+    }
+
+    #[test]
+    fn test_scheduler_basic() {
+        let TestScheduler {
+            mut scheduler,
+            consume_work_receivers,
+            finished_consume_work_sender,
+            response_receiver,
+        } = create_test_scheduler(4);
+
+        let keypair_a = Keypair::new();
+
+        let mut container = create_container(vec![
+            (&keypair_a, vec![Pubkey::new_unique()], 1000, 100),
+            (&keypair_a, vec![Pubkey::new_unique()], 1500, 200),
+            (&Keypair::new(), vec![Pubkey::new_unique()], 2000, 50),
+
+        ]);
+        scheduler.slot = Some(0);
+
+        // Schedule the transactions
+        let result = scheduler.schedule(&mut container, |_, _|{}, |_| true).unwrap();
+        
+        // Only two should have been scheduled as one is blocked
+        assert_eq!(result.num_scheduled, 2);
+
+        // Since both are not bundles; should be scheduled together to first worker
+        let work_1 = consume_work_receivers[0].try_recv().unwrap();
+        assert_eq!(work_1.ids.len(), 2);
+
+        // Check that the first transaction is from keypair_a
+        assert_eq!(work_1.transactions[0].message().account_keys()[0], keypair_a.pubkey());
+
+        // Try scheduling; nothing should be scheduled as the remaining transaction is blocked
+        let result = scheduler.schedule(&mut container, |_, _|{}, |_| true).unwrap();
+        assert_eq!(result.num_scheduled, 0);
+
+        // Respond with finsihed work
+        let finished_work = FinishedConsumeWork {
+            work: work_1,
+            retryable_indexes: vec![],
+            extra_info: Some(crate::banking_stage::scheduler_messages::FinishedConsumeWorkExtraInfo {
+                processed_results: vec![
+                    TransactionResult::Committed(TransactionCommittedResult {
+                        cus_consumed: 100,
+                        feepayer_balance_lamports: 1000,
+                        loaded_accounts_data_size: 10,
+                    }),
+                    TransactionResult::NotCommitted(NotCommittedReason::PohTimeout),
+                ],
+            }),
+        };
+        let _ = finished_consume_work_sender.send(finished_work);
+
+        // Receive the finished work
+        let (num_transactions, _) = scheduler.receive_completed(&mut container, &BufferedPacketsDecision::Hold).unwrap();
+        assert_eq!(num_transactions, 2);
+
+        let response = response_receiver.try_recv().unwrap();
+        let response = response_receiver.try_recv().unwrap();
+
+        scheduler.slot = Some(1); // Simulate a slot change
+        // Now try scheduling again; should schedule the remaining transaction
+        let result = scheduler.schedule(&mut container, |_, _|{}, |_| true).unwrap();
+        assert_eq!(result.num_scheduled, 1);
+        // Check that the remaining transaction is sent to the worker
+        let work_2 = consume_work_receivers[0].try_recv().unwrap();
+        assert_eq!(work_2.ids.len(), 1);
     }
 }
