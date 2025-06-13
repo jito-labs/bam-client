@@ -22,8 +22,6 @@ use {
     tokio::time::{interval, timeout},
 };
 
-const TICKS_PER_SLOT: u64 = 64;
-
 pub struct JssConnection {
     builder_config: Arc<Mutex<Option<BuilderConfigResp>>>,
     background_task: tokio::task::JoinHandle<()>,
