@@ -632,6 +632,18 @@ impl Consumer {
         pre_results: impl Iterator<Item = Result<(), TransactionError>>,
         reservation_cb: &impl Fn(&Bank) -> u64,
     ) -> ProcessTransactionBatchOutput {
+        // Check for duplicate transactions
+        let mut seen_messages = AHashSet::new();
+        let pre_results = txs.iter().zip(pre_results).map(|(tx, result)| {
+            if let Err(err) = result {
+                return Err(err);
+            }
+            if !seen_messages.insert(tx.message_hash()) {
+                return Err(TransactionError::AlreadyProcessed);
+            }
+            Ok(())
+        });
+
         let (
             (transaction_qos_cost_results, cost_model_throttled_transactions_count),
             cost_model_us,
