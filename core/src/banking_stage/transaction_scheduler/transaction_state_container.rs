@@ -54,6 +54,7 @@ pub(crate) struct TransactionStateContainer<Tx: TransactionWithMeta> {
 struct BatchInfo {
     batch_id: usize,
     revert_on_error: bool,
+    valid_for_slot: u64,
 }
 
 enum BatchIdOrTransactionState<Tx: TransactionWithMeta> {
@@ -80,7 +81,7 @@ pub(crate) trait StateContainer<Tx: TransactionWithMeta> {
     fn get_transaction_ttl(&self, id: TransactionId) -> Option<&SanitizedTransactionTTL<Tx>>;
 
     /// Get the batch id and revert_on_error flag for a transaction.
-    fn get_batch(&self, id: TransactionId) -> Option<(Vec<TransactionId>, bool)>;
+    fn get_batch(&self, id: TransactionId) -> Option<(Vec<TransactionId>, bool, u64)>;
 
     /// Retries a transaction - inserts transaction back into map (but not packet).
     /// This transitions the transaction to `Unprocessed` state.
@@ -156,7 +157,7 @@ impl<Tx: TransactionWithMeta> StateContainer<Tx> for TransactionStateContainer<T
             })
     }
 
-    fn get_batch(&self, id: TransactionId) -> Option<(Vec<TransactionId>, bool)> {
+    fn get_batch(&self, id: TransactionId) -> Option<(Vec<TransactionId>, bool, u64)> {
         let Some(BatchIdOrTransactionState::Batch(batch_info)) =
             self.id_to_transaction_state.get(id)
         else {
@@ -164,8 +165,11 @@ impl<Tx: TransactionWithMeta> StateContainer<Tx> for TransactionStateContainer<T
         };
 
         let ids = self.batch_id_to_transaction_ids.get(&batch_info.batch_id)?;
-        let revert_on_error = batch_info.revert_on_error;
-        Some((ids.clone(), revert_on_error))
+        Some((
+            ids.clone(),
+            batch_info.revert_on_error,
+            batch_info.valid_for_slot,
+        ))
     }
 
     fn push_ids_into_queue(
@@ -249,12 +253,14 @@ impl<Tx: TransactionWithMeta> TransactionStateContainer<Tx> {
         priority: u64,
         cost: u64,
         revert_on_error: bool,
+        valid_for_slot: u64,
     ) -> Option<usize> {
         let entry = self.get_vacant_map_entry();
         let batch_id = entry.key();
         entry.insert(BatchIdOrTransactionState::Batch(BatchInfo {
             batch_id,
             revert_on_error,
+            valid_for_slot,
         }));
 
         let mut transaction_ids = Vec::with_capacity(transaction_ttls.len());
@@ -388,7 +394,7 @@ impl StateContainer<RuntimeTransactionView> for TransactionViewStateContainer {
     }
 
     #[inline]
-    fn get_batch(&self, _: TransactionId) -> Option<(Vec<TransactionId>, bool)> {
+    fn get_batch(&self, _: TransactionId) -> Option<(Vec<TransactionId>, bool, u64)> {
         unimplemented!("get_batch not implemented for TransactionViewStateContainer");
     }
 
@@ -604,7 +610,7 @@ mod tests {
         }
 
         // Insert a batch of transactions.
-        let batch_id = container.insert_new_batch(transaction_ttls, packets, 10, 100, true);
+        let batch_id = container.insert_new_batch(transaction_ttls, packets, 10, 100, true, 0);
         assert!(batch_id.is_some());
         assert_eq!(container.priority_queue.len(), 1);
         assert_eq!(container.id_to_transaction_state.len(), 6);
@@ -612,9 +618,10 @@ mod tests {
 
         // Get the batch id and revert_on_error flag.
         let batch_id = batch_id.unwrap();
-        let (batch, revert_on_error) = container.get_batch(batch_id).unwrap();
+        let (batch, revert_on_error, slot) = container.get_batch(batch_id).unwrap();
         assert_eq!(batch.len(), 5);
         assert!(revert_on_error);
+        assert_eq!(slot, 0);
 
         // Remove a batch of transactions.
         let batch_id = container.pop().unwrap();
