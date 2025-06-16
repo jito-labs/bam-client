@@ -371,6 +371,7 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                             priority,
                             cost,
                             revert_on_error,
+                            bundle.slot,
                         )
                         .is_none()
                     {
@@ -474,7 +475,7 @@ mod tests {
     ) {
         let mut actual_length: usize = 0;
         while let Some(id) = container.pop() {
-            let Some((ids, _)) = container.get_batch(id.id) else {
+            let Some((ids, _, _)) = container.get_batch(id.id) else {
                 panic!(
                     "transaction in queue position {} with id {} must exist.",
                     actual_length, id.id
@@ -518,6 +519,7 @@ mod tests {
         let bundle = Bundle {
             seq_id: 1,
             packets: vec![Packet { data, meta: None }],
+            slot: 0,
         };
         sender.send(bundle).unwrap();
 
@@ -548,6 +550,7 @@ mod tests {
                 data: vec![],
                 meta: None,
             }],
+            slot: 0,
         };
         sender.send(bundle).unwrap();
 
@@ -586,6 +589,7 @@ mod tests {
                 .unwrap(),
                 meta: None,
             }],
+            slot: 0,
         };
         let result = JssReceiveAndBuffer::parse_bundle(&bundle, &bank_forks);
         assert!(result.is_ok());
@@ -600,6 +604,7 @@ mod tests {
         let bundle = Bundle {
             seq_id: 1,
             packets: vec![],
+            slot: 0,
         };
         let result = JssReceiveAndBuffer::parse_bundle(&bundle, &bank_forks);
         assert!(result.is_err());
@@ -621,6 +626,7 @@ mod tests {
                 data: vec![0; PACKET_DATA_SIZE + 1], // Invalid size
                 meta: None,
             }],
+            slot: 0,
         };
         let result = JssReceiveAndBuffer::parse_bundle(&bundle, &bank_forks);
         assert!(result.is_err());
@@ -649,6 +655,7 @@ mod tests {
                 .unwrap(),
                 meta: None,
             }],
+            slot: 0,
         };
         let result = JssReceiveAndBuffer::parse_bundle(&bundle, &bank_forks);
         assert!(result.is_err());
@@ -695,6 +702,7 @@ mod tests {
                     }),
                 },
             ],
+            slot: 0,
         };
         let result = JssReceiveAndBuffer::parse_bundle(&bundle, &bank_forks);
         assert!(result.is_err());

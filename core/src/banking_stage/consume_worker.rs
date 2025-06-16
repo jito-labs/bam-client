@@ -111,6 +111,13 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
                     return self.retry_drain(work);
                 }
             }
+
+            if let Some(schedulable_slot) = work.schedulable_slot {
+                if bank.slot() != schedulable_slot {
+                    return self.retry(work);
+                }
+            }
+
             self.consume(&bank, work, reservation_cb)?;
         }
 
@@ -995,6 +1002,7 @@ mod tests {
             max_ages: vec![max_age],
             revert_on_error: false,
             respond_with_extra_info: false,
+            schedulable_slot: None,
         };
         consume_sender.send(work).unwrap();
         let consumed = consumed_receiver.recv().unwrap();
@@ -1046,6 +1054,7 @@ mod tests {
             max_ages: vec![max_age],
             revert_on_error: false,
             respond_with_extra_info: false,
+            schedulable_slot: None,
         };
         consume_sender.send(work).unwrap();
         let consumed = consumed_receiver.recv().unwrap();
@@ -1099,6 +1108,7 @@ mod tests {
                 max_ages: vec![max_age, max_age],
                 revert_on_error: false,
                 respond_with_extra_info: false,
+                schedulable_slot: None,
             })
             .unwrap();
 
@@ -1162,6 +1172,7 @@ mod tests {
                 max_ages: vec![max_age],
                 revert_on_error: false,
                 respond_with_extra_info: false,
+                schedulable_slot: None,
             })
             .unwrap();
 
@@ -1173,6 +1184,7 @@ mod tests {
                 max_ages: vec![max_age],
                 revert_on_error: false,
                 respond_with_extra_info: false,
+                schedulable_slot: None,
             })
             .unwrap();
         let consumed = consumed_receiver.recv().unwrap();
@@ -1313,6 +1325,7 @@ mod tests {
                 ],
                 revert_on_error: false,
                 respond_with_extra_info: false,
+                schedulable_slot: None,
             })
             .unwrap();
 
