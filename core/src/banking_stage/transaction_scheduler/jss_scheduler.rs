@@ -112,7 +112,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
     /// Insert all incoming transactions into the `PrioGraph`.
     fn pull_into_prio_graph<S: StateContainer<Tx>>(&mut self, container: &mut S) {
         while let Some(next_batch_id) = container.pop() {
-            let Some((batch_ids, _)) = container.get_batch(next_batch_id.id) else {
+            let Some((batch_ids, _, _)) = container.get_batch(next_batch_id.id) else {
                 error!("Batch {} not found in container", next_batch_id.id);
                 continue;
             };
@@ -156,7 +156,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
 
         // Schedule any available transactions in prio-graph
         while let Some(worker_index) = self.get_best_available_worker() {
-            let batches_for_scheduling = self.get_batches_for_scheduling(container);
+            let batches_for_scheduling = self.get_batches_for_scheduling(container, slot);
             if batches_for_scheduling.is_empty() {
                 break;
             }
@@ -166,9 +166,9 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
                 let txn_ids = priority_ids
                     .iter()
                     .filter_map(|priority_id| container.get_batch(priority_id.id))
-                    .flat_map(|(batch_ids, _)| batch_ids.into_iter())
+                    .flat_map(|(batch_ids, _, _)| batch_ids.into_iter())
                     .collect::<Vec<_>>();
-                let work = Self::generate_work(batch_id, txn_ids, revert_on_error, container);
+                let work = Self::generate_work(batch_id, txn_ids, revert_on_error, container, slot);
                 self.send_to_worker(worker_index, priority_ids, work, slot);
                 *num_scheduled += len;
             }
@@ -182,14 +182,22 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
     fn get_batches_for_scheduling(
         &mut self,
         container: &mut impl StateContainer<Tx>,
+        current_slot: Slot,
     ) -> Vec<(Vec<TransactionPriorityId>, bool)> {
         const MAX_TXN_PER_BATCH: usize = 16;
         let mut result = vec![];
         let mut current_batch_ids = vec![];
         while let Some(next_batch_id) = self.prio_graph.pop() {
-            let Some((_, revert_on_error)) = container.get_batch(next_batch_id.id) else {
+            let Some((_, revert_on_error, slot)) = container.get_batch(next_batch_id.id) else {
                 continue;
             };
+
+            // These should be cleared out earlier; but if not, we remove them here
+            if slot != current_slot {
+                container.remove_by_id(next_batch_id.id);
+                self.send_no_leader_slot_bundle_result(priority_to_seq_id(next_batch_id.priority));
+                continue;
+            }
 
             if revert_on_error {
                 if !current_batch_ids.is_empty() {
@@ -243,6 +251,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
         ids: Vec<usize>,
         revert_on_error: bool,
         container: &mut impl StateContainer<Tx>,
+        slot: Slot,
     ) -> ConsumeWork<Tx> {
         let transactions = ids
             .iter()
@@ -270,6 +279,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
             max_ages,
             revert_on_error,
             respond_with_extra_info: true,
+            schedulable_slot: Some(slot),
         }
     }
 
@@ -657,6 +667,7 @@ mod tests {
                 compute_unit_price,
                 TEST_TRANSACTION_COST,
                 false,
+                0,
             );
         }
 

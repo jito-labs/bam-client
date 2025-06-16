@@ -361,6 +361,7 @@ impl<Tx: TransactionWithMeta> PrioGraphScheduler<Tx> {
                         max_ages,
                         revert_on_error: _,
                         respond_with_extra_info: _,
+                        schedulable_slot: _,
                     },
                 retryable_indexes,
                 extra_info: _,
@@ -454,6 +455,7 @@ impl<Tx: TransactionWithMeta> PrioGraphScheduler<Tx> {
             max_ages,
             revert_on_error: false,
             respond_with_extra_info: false,
+            schedulable_slot: None,
         };
         self.consume_work_senders[thread_index]
             .send(work)

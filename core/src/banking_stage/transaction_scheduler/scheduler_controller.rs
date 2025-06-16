@@ -729,6 +729,7 @@ mod tests {
                     max_ages: vec![],
                     revert_on_error: false,
                     respond_with_extra_info: false,
+                    schedulable_slot: None,
                 },
                 retryable_indexes: vec![],
                 extra_info: None,
