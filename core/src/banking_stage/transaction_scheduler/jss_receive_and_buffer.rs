@@ -371,7 +371,7 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                             priority,
                             cost,
                             revert_on_error,
-                            bundle.slot,
+                            bundle.max_schedule_slot,
                         )
                         .is_none()
                     {
