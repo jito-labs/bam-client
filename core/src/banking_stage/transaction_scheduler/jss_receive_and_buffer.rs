@@ -519,7 +519,7 @@ mod tests {
         let bundle = Bundle {
             seq_id: 1,
             packets: vec![Packet { data, meta: None }],
-            slot: 0,
+            max_schedule_slot: 0,
         };
         sender.send(bundle).unwrap();
 
@@ -550,7 +550,7 @@ mod tests {
                 data: vec![],
                 meta: None,
             }],
-            slot: 0,
+            max_schedule_slot: 0,
         };
         sender.send(bundle).unwrap();
 
@@ -589,7 +589,7 @@ mod tests {
                 .unwrap(),
                 meta: None,
             }],
-            slot: 0,
+            max_schedule_slot: 0,
         };
         let result = JssReceiveAndBuffer::parse_bundle(&bundle, &bank_forks);
         assert!(result.is_ok());
@@ -604,7 +604,7 @@ mod tests {
         let bundle = Bundle {
             seq_id: 1,
             packets: vec![],
-            slot: 0,
+            max_schedule_slot: 0,
         };
         let result = JssReceiveAndBuffer::parse_bundle(&bundle, &bank_forks);
         assert!(result.is_err());
@@ -626,7 +626,7 @@ mod tests {
                 data: vec![0; PACKET_DATA_SIZE + 1], // Invalid size
                 meta: None,
             }],
-            slot: 0,
+            max_schedule_slot: 0,
         };
         let result = JssReceiveAndBuffer::parse_bundle(&bundle, &bank_forks);
         assert!(result.is_err());
@@ -655,7 +655,7 @@ mod tests {
                 .unwrap(),
                 meta: None,
             }],
-            slot: 0,
+            max_schedule_slot: 0,
         };
         let result = JssReceiveAndBuffer::parse_bundle(&bundle, &bank_forks);
         assert!(result.is_err());
@@ -702,7 +702,7 @@ mod tests {
                     }),
                 },
             ],
-            slot: 0,
+            max_schedule_slot: 0,
         };
         let result = JssReceiveAndBuffer::parse_bundle(&bundle, &bank_forks);
         assert!(result.is_err());
