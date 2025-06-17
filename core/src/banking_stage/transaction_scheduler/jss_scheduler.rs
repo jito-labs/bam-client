@@ -194,6 +194,10 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
 
             // These should be cleared out earlier; but if not, we remove them here
             if slot != current_slot {
+                warn!(
+                    "Skipping batch {} (slot mismatch): expected {}, got {}",
+                    next_batch_id.id, current_slot, slot
+                );
                 container.remove_by_id(next_batch_id.id);
                 self.send_no_leader_slot_bundle_result(priority_to_seq_id(next_batch_id.priority));
                 continue;
