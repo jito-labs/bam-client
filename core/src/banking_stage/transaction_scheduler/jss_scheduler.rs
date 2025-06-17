@@ -199,6 +199,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
                     next_batch_id.id, current_slot, slot
                 );
                 container.remove_by_id(next_batch_id.id);
+                self.prio_graph.unblock(&next_batch_id);
                 self.send_no_leader_slot_bundle_result(priority_to_seq_id(next_batch_id.priority));
                 continue;
             }
