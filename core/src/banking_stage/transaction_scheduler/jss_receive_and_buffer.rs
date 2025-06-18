@@ -384,7 +384,7 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
             }
             BufferedPacketsDecision::ForwardAndHold | BufferedPacketsDecision::Forward => {
                 // Send back any bundles that were received while in Forward/Hold state
-                let deadline = Instant::now() + Duration::from_millis(5);
+                let deadline = Instant::now() + Duration::from_millis(10);
                 while let Ok(bundle) = self.bundle_receiver.recv_deadline(deadline) {
                     self.send_no_leader_slot_bundle_result(bundle.seq_id);
                 }
