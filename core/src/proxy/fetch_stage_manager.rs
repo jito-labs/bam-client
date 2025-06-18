@@ -88,6 +88,7 @@ impl FetchStageManager {
                     fetch_connected = false;
                     heartbeat_received = false;
                     pending_disconnect = false;
+                    while let Ok(_) = packet_intercept_rx.try_recv() {}
                     std::thread::sleep(Duration::from_millis(100));
                     continue;
                 }
