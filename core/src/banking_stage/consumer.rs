@@ -476,7 +476,7 @@ impl Consumer {
             cluster_info,
         } = tip_processing_dependencies;
 
-        // Check if any transactions touch the tip account
+        // Return true if no tip accounts touched
         let tip_accounts = tip_manager.get_tip_accounts();
         if !txs.iter().any(|tx| {
             tx.account_keys()
