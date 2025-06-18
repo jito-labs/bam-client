@@ -9,14 +9,24 @@ use {
             start_scheduler_response::Resp, BuilderConfigResp, GetBuilderConfigRequest,
             StartSchedulerMessage, StartSchedulerResponse,
         },
-        jss_types::{Bundle, ValidatorHeartBeat},
+        jss_types::{
+            Bundle, FeeCollectionRequest, FeeCollectionResponse, Meta, Packet, ValidatorHeartBeat,
+        },
     },
+    solana_entry::poh,
     solana_gossip::cluster_info::ClusterInfo,
     solana_poh::poh_recorder::PohRecorder,
-    solana_sdk::{signature::Keypair, signer::Signer},
-    std::sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
-        Arc, Mutex, RwLock,
+    solana_sdk::{
+        packet::PACKET_DATA_SIZE, signature::Keypair, signer::Signer,
+        transaction::VersionedTransaction,
+    },
+    std::{
+        cmp::min,
+        str::FromStr,
+        sync::{
+            atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
+            Arc, Mutex, RwLock,
+        },
     },
     thiserror::Error,
     tokio::time::{interval, timeout},
@@ -166,6 +176,15 @@ impl JssConnection {
                             });
                             metrics.bundle_received.fetch_add(1, Relaxed);
                         }
+                        StartSchedulerResponse { resp: Some(Resp::FeeCollectionRequest(fee_collection_request)), .. } => {
+                            Self::handle_fee_collection_request(
+                                fee_collection_request,
+                                &mut outbound_sender,
+                                &poh_recorder,
+                                &cluster_info,
+                                &metrics,
+                            );
+                        }
                         _ => {}
                     }
                 }
@@ -239,6 +258,81 @@ impl JssConnection {
         Some(slot_signature)
     }
 
+    fn handle_fee_collection_request(
+        fee_collection_request: FeeCollectionRequest,
+        outbound_sender: &mut mpsc::Sender<StartSchedulerMessage>,
+        poh_recorder: &RwLock<PohRecorder>,
+        cluster_info: &ClusterInfo,
+        metrics: &Arc<JssConnectionMetrics>,
+    ) {
+        // Update metrics
+        metrics
+            .fee_collection_request_received
+            .fetch_add(1, Relaxed);
+
+        // Get values
+        let FeeCollectionRequest {
+            slot,
+            destination_pubkey,
+            lamports,
+        } = fee_collection_request;
+        let Ok(destination_pubkey) = solana_sdk::pubkey::Pubkey::from_str(&destination_pubkey)
+        else {
+            return;
+        };
+
+        // Confirm fee amounts (and ensure this is not a duplicate request)
+        // TODO_DG
+
+        // Create transfer transaction and sign
+        let transfer_txn = solana_sdk::system_transaction::transfer(
+            &cluster_info.keypair(),
+            &destination_pubkey,
+            lamports,
+            poh_recorder
+                .read()
+                .unwrap()
+                .get_poh_recorder_bank()
+                .bank()
+                .last_blockhash(),
+        );
+        let versioned_tx = VersionedTransaction::from(transfer_txn);
+
+        info!(
+            "Sending fee of {} for slot {} to {}",
+            lamports, slot, destination_pubkey
+        );
+
+        // Send the transaction to the JSS Node
+        let packet = Self::jss_packet_from_versioned_tx(&versioned_tx);
+        let msg = StartSchedulerMessage {
+            msg: Some(Msg::FeeCollectionResponse(FeeCollectionResponse {
+                packet: Some(packet),
+            })),
+        };
+        if let Err(e) = outbound_sender.try_send(msg) {
+            error!("Failed to send fee collection response: {:?}", e);
+        } else {
+            metrics
+                .fee_collection_request_received
+                .fetch_add(1, Relaxed);
+        }
+    }
+
+    fn jss_packet_from_versioned_tx(tx: &VersionedTransaction) -> Packet {
+        let tx_data = bincode::serialize(tx).expect("serializes");
+        let mut data = [0; PACKET_DATA_SIZE];
+        let copy_len = min(tx_data.len(), data.len());
+        data[..copy_len].copy_from_slice(&tx_data[..copy_len]);
+        Packet {
+            meta: Some(Meta {
+                size: copy_len as u64,
+                ..Default::default()
+            }),
+            data: data.into(),
+        }
+    }
+
     pub fn is_healthy(&mut self) -> bool {
         self.is_healthy.load(Relaxed)
     }
@@ -266,6 +360,7 @@ struct JssConnectionMetrics {
     bundle_received: AtomicU64,
     heartbeat_received: AtomicU64,
     builder_config_received: AtomicU64,
+    fee_collection_request_received: AtomicU64,
 
     unhealthy_connection_count: AtomicU64,
 
@@ -292,6 +387,11 @@ impl JssConnectionMetrics {
             (
                 "builder_config_received",
                 self.builder_config_received.swap(0, Relaxed) as i64,
+                i64
+            ),
+            (
+                "fee_collection_request_received",
+                self.fee_collection_request_received.swap(0, Relaxed) as i64,
                 i64
             ),
             (
