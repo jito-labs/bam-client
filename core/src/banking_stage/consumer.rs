@@ -359,7 +359,7 @@ impl Consumer {
             let chunk_end = std::cmp::min(
                 transactions.len(),
                 if revert_on_error {
-                    chunk_start + transactions.len()
+                    transactions.len()
                 } else {
                     chunk_start + TARGET_NUM_TRANSACTIONS_PER_BATCH
                 },
