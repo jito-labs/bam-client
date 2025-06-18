@@ -519,7 +519,7 @@ mod tests {
         let bundle = Bundle {
             seq_id: 1,
             packets: vec![Packet { data, meta: None }],
-            max_schedule_max_schedule_slot: 0,
+            max_schedule_slot: 0,
         };
         sender.send(bundle).unwrap();
 
