@@ -13,7 +13,6 @@ use {
             Bundle, FeeCollectionRequest, FeeCollectionResponse, Meta, Packet, ValidatorHeartBeat,
         },
     },
-    solana_entry::poh,
     solana_gossip::cluster_info::ClusterInfo,
     solana_poh::poh_recorder::PohRecorder,
     solana_sdk::{
@@ -307,6 +306,7 @@ impl JssConnection {
         let packet = Self::jss_packet_from_versioned_tx(&versioned_tx);
         let msg = StartSchedulerMessage {
             msg: Some(Msg::FeeCollectionResponse(FeeCollectionResponse {
+                slot,
                 packet: Some(packet),
             })),
         };
