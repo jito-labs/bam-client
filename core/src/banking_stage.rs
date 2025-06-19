@@ -647,14 +647,13 @@ impl BankingStage {
             let consume_worker = ConsumeWorker::new(
                 id,
                 work_receiver,
-                Consumer::new_with_tip_processing(
+                Consumer::new(
                     committer.clone(),
                     poh_recorder.read().unwrap().new_recorder(),
                     QosService::new(id),
                     log_messages_bytes_limit,
                     blacklisted_accounts.clone(),
                     bundle_account_locker.clone(),
-                    tip_processing_dependencies.clone(),
                 ),
                 finished_work_sender.clone(),
                 poh_recorder.read().unwrap().new_leader_bank_notifier(),
