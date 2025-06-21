@@ -548,17 +548,12 @@ impl BankingStage {
                 transaction_struct
             };
 
-        let jss_enabled = jss_dependencies
-            .as_ref()
-            .map(|jss| jss.jss_enabled.clone())
-            .unwrap_or(Arc::new(AtomicBool::new(false)));
         match transaction_struct {
             TransactionStructure::Sdk => {
                 let receive_and_buffer = SanitizedTransactionReceiveAndBuffer::new(
                     PacketDeserializer::new(non_vote_receiver),
                     bank_forks.clone(),
                     enable_forwarding,
-                    jss_enabled,
                 );
                 Self::spawn_scheduler_and_workers(
                     &mut bank_thread_hdls,
@@ -585,7 +580,6 @@ impl BankingStage {
                 let receive_and_buffer = TransactionViewReceiveAndBuffer {
                     receiver: non_vote_receiver,
                     bank_forks: bank_forks.clone(),
-                    jss_enabled,
                 };
                 Self::spawn_scheduler_and_workers(
                     &mut bank_thread_hdls,
