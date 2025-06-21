@@ -8,21 +8,32 @@ use {
         accounts_index::{IndexKey, ScanConfig, ScanError, ScanResult},
         ancestors::Ancestors,
         storable_accounts::StorableAccounts,
-    }, dashmap::DashMap, log::*, solana_pubkey::Pubkey, solana_sdk::{
+    },
+    dashmap::DashMap,
+    log::*,
+    solana_pubkey::Pubkey,
+    solana_sdk::{
         account::{AccountSharedData, ReadableAccount},
         address_lookup_table::{self, error::AddressLookupError, state::AddressLookupTable},
         clock::{BankId, Slot},
         message::v0::LoadedAddresses,
         slot_hashes::SlotHashes,
         transaction::{Result, SanitizedTransaction, TransactionError},
-    }, solana_svm_transaction::{
+    },
+    solana_svm_transaction::{
         message_address_table_lookup::SVMMessageAddressTableLookup, svm_message::SVMMessage,
-    }, solana_transaction_context::TransactionAccount, std::{
-        cell::RefCell, cmp::Reverse, collections::{BinaryHeap, HashMap, HashSet}, ops::RangeBounds, sync::{
+    },
+    solana_transaction_context::TransactionAccount,
+    std::{
+        cell::RefCell,
+        cmp::Reverse,
+        collections::{BinaryHeap, HashMap, HashSet},
+        ops::RangeBounds,
+        sync::{
             atomic::{AtomicUsize, Ordering},
             Arc, Mutex,
-        }
-    }
+        },
+    },
 };
 
 thread_local! {
@@ -649,11 +660,11 @@ impl Accounts {
             );
             let account_locks = &mut self.account_locks.lock().unwrap();
             account_locks.try_lock_accounts(
-            deduped_locks
-                .iter()
-                .map(|(pubkey, is_writable)| (pubkey, *is_writable)),
-            additional_read_locks,
-            additional_write_locks,
+                deduped_locks
+                    .iter()
+                    .map(|(pubkey, is_writable)| (pubkey, *is_writable)),
+                additional_read_locks,
+                additional_write_locks,
             )
         });
 

@@ -48,7 +48,11 @@ use {
     },
     solana_transaction_status::PreBalanceInfo,
     std::{
-        cell::Cell, collections::HashSet, num::Saturating, sync::{atomic::Ordering, Arc, Mutex}, time::Instant
+        cell::Cell,
+        collections::HashSet,
+        num::Saturating,
+        sync::{atomic::Ordering, Arc, Mutex},
+        time::Instant,
     },
 };
 

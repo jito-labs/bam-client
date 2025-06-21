@@ -55,6 +55,7 @@ serde = { workspace = true }
 serde_bytes = { workspace = true }
 serde_derive = { workspace = true }
 slab = { workspace = true }
+smallvec = { workspace = true }
 solana-accounts-db = { workspace = true }
 solana-bloom = { workspace = true }
 solana-builtins-default-costs = { workspace = true }
