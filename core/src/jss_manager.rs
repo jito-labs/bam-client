@@ -18,7 +18,7 @@ use {
         proxy::block_engine_stage::BlockBuilderFeeInfo,
     },
     jito_protos::proto::{
-        jss_api::{start_scheduler_message::Msg, BuilderConfigResp, StartSchedulerMessage},
+        jss_api::{start_scheduler_message_v0::Msg, BuilderConfigResp, StartSchedulerMessageV0},
         jss_types::{LeaderState, Socket},
     },
     solana_gossip::cluster_info::ClusterInfo,
@@ -142,7 +142,7 @@ impl JssManager {
                     let leader_state = Self::generate_leader_state(&bank_start.working_bank);
                     let _ = dependencies
                         .outbound_sender
-                        .try_send(StartSchedulerMessage {
+                        .try_send(StartSchedulerMessageV0 {
                             msg: Some(Msg::LeaderState(leader_state)),
                         });
                 }
