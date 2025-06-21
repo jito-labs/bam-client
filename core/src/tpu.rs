@@ -10,6 +10,8 @@ pub use solana_sdk::net::DEFAULT_TPU_COALESCE;
 pub use solana_streamer::quic::DEFAULT_MAX_QUIC_CONNECTIONS_PER_PEER as MAX_QUIC_CONNECTIONS_PER_PEER;
 use {
     crate::{
+        bam_dependencies::BamDependencies,
+        bam_manager::BamManager,
         banking_stage::{consumer::TipProcessingDependencies, BankingStage},
         banking_trace::{Channels, TracerThread},
         bundle_stage::{bundle_account_locker::BundleAccountLocker, BundleStage},
@@ -18,8 +20,6 @@ use {
             VerifiedVoteSender, VoteTracker,
         },
         fetch_stage::FetchStage,
-        bam_dependencies::BamDependencies,
-        bam_manager::BamManager,
         proxy::{
             block_engine_stage::{BlockBuilderFeeInfo, BlockEngineConfig, BlockEngineStage},
             fetch_stage_manager::FetchStageManager,

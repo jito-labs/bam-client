@@ -5,8 +5,7 @@ use {
     crate::proxy::block_engine_stage::BlockBuilderFeeInfo,
     jito_protos::proto::{
         bam_api::{
-            start_scheduler_message::VersionedMsg,
-            StartSchedulerMessage, StartSchedulerMessageV0,
+            start_scheduler_message::VersionedMsg, StartSchedulerMessage, StartSchedulerMessageV0,
         },
         bam_types::AtomicTxnBatch,
     },

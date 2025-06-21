@@ -17,6 +17,7 @@ use {
         unprocessed_transaction_storage::UnprocessedTransactionStorage,
     },
     crate::{
+        bam_dependencies::BamDependencies,
         banking_stage::{
             consume_worker::ConsumeWorker,
             packet_deserializer::PacketDeserializer,
@@ -26,7 +27,6 @@ use {
             },
         },
         bundle_stage::bundle_account_locker::BundleAccountLocker,
-        bam_dependencies::BamDependencies,
         validator::{BlockProductionMethod, TransactionStructure},
     },
     agave_banking_stage_ingress_types::BankingPacketReceiver,
@@ -58,9 +58,9 @@ use {
         time::{Duration, Instant},
     },
     transaction_scheduler::{
-        greedy_scheduler::{GreedyScheduler, GreedySchedulerConfig},
         bam_receive_and_buffer::BamReceiveAndBuffer,
         bam_scheduler::BamScheduler,
+        greedy_scheduler::{GreedyScheduler, GreedySchedulerConfig},
         prio_graph_scheduler::PrioGraphSchedulerConfig,
         receive_and_buffer::{
             ReceiveAndBuffer, SanitizedTransactionReceiveAndBuffer, TransactionViewReceiveAndBuffer,
