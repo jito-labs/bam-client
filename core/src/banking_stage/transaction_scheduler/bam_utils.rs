@@ -1,6 +1,6 @@
 use {
     crate::banking_stage::immutable_deserialized_packet::DeserializedPacketError,
-    jito_protos::proto::jss_types::{DeserializationErrorReason, TransactionErrorReason},
+    jito_protos::proto::bam_types::{DeserializationErrorReason, TransactionErrorReason},
     solana_sdk::transaction::TransactionError,
 };
 

@@ -1,17 +1,17 @@
-// Maintains a connection to the JSS Node and handles sending and receiving messages
+// Maintains a connection to the BAM Node and handles sending and receiving messages
 // Keeps track of last received heartbeat 'behind the scenes' and will mark itself as unhealthy if no heartbeat is received
 
 use {
-    crate::jss_dependencies::v0_to_versioned_proto,
+    crate::bam_dependencies::v0_to_versioned_proto,
     futures::{channel::mpsc, StreamExt},
     jito_protos::proto::{
-        jss_api::{
-            jss_node_api_client::JssNodeApiClient, start_scheduler_message_v0::Msg,
+        bam_api::{
+            bam_node_api_client::BamNodeApiClient, start_scheduler_message_v0::Msg,
             start_scheduler_response::VersionedMsg, start_scheduler_response_v0::Resp,
             BuilderConfigResp, GetBuilderConfigRequest, StartSchedulerMessage,
             StartSchedulerMessageV0, StartSchedulerResponse, StartSchedulerResponseV0,
         },
-        jss_types::{Bundle, ValidatorHeartBeat},
+        bam_types::{Bundle, ValidatorHeartBeat},
     },
     solana_gossip::cluster_info::ClusterInfo,
     solana_poh::poh_recorder::PohRecorder,
@@ -24,7 +24,7 @@ use {
     tokio::time::{interval, timeout},
 };
 
-pub struct JssConnection {
+pub struct BamConnection {
     builder_config: Arc<Mutex<Option<BuilderConfigResp>>>,
     background_task: tokio::task::JoinHandle<()>,
     is_healthy: Arc<AtomicBool>,
@@ -32,8 +32,8 @@ pub struct JssConnection {
     exit: Arc<AtomicBool>,
 }
 
-impl JssConnection {
-    /// Try to initialize a connection to the JSS Node; if it is not possible to connect, it will return an error.
+impl BamConnection {
+    /// Try to initialize a connection to the BAM Node; if it is not possible to connect, it will return an error.
     pub async fn try_init(
         url: String,
         poh_recorder: Arc<RwLock<PohRecorder>>,
@@ -46,7 +46,7 @@ impl JssConnection {
 
         let channel = timeout(connection_timeout, backend_endpoint.connect()).await??;
 
-        let mut validator_client = JssNodeApiClient::new(channel);
+        let mut validator_client = BamNodeApiClient::new(channel);
 
         let (outbound_sender, outbound_receiver_internal) = mpsc::channel(100_000);
         let outbound_stream =
@@ -60,7 +60,7 @@ impl JssConnection {
             })?
             .into_inner();
 
-        let metrics = Arc::new(JssConnectionMetrics::default());
+        let metrics = Arc::new(BamConnectionMetrics::default());
         let is_healthy = Arc::new(AtomicBool::new(true));
         let builder_config = Arc::new(Mutex::new(None));
 
@@ -93,12 +93,12 @@ impl JssConnection {
         exit: Arc<AtomicBool>,
         mut inbound_stream: tonic::Streaming<StartSchedulerResponse>,
         mut outbound_sender: mpsc::Sender<StartSchedulerMessage>,
-        validator_client: JssNodeApiClient<tonic::transport::channel::Channel>,
+        validator_client: BamNodeApiClient<tonic::transport::channel::Channel>,
         builder_config: Arc<Mutex<Option<BuilderConfigResp>>>,
         bundle_sender: crossbeam_channel::Sender<Bundle>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         cluster_info: Arc<ClusterInfo>,
-        metrics: Arc<JssConnectionMetrics>,
+        metrics: Arc<BamConnectionMetrics>,
         is_healthy: Arc<AtomicBool>,
         outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessageV0>,
     ) {
@@ -202,8 +202,8 @@ impl JssConnection {
     async fn refresh_builder_config_task(
         exit: Arc<AtomicBool>,
         builder_config: Arc<Mutex<Option<BuilderConfigResp>>>,
-        mut validator_client: JssNodeApiClient<tonic::transport::channel::Channel>,
-        metrics: Arc<JssConnectionMetrics>,
+        mut validator_client: BamNodeApiClient<tonic::transport::channel::Channel>,
+        metrics: Arc<BamConnectionMetrics>,
     ) {
         let mut interval = interval(std::time::Duration::from_secs(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -259,7 +259,7 @@ impl JssConnection {
     }
 }
 
-impl Drop for JssConnection {
+impl Drop for BamConnection {
     fn drop(&mut self) {
         self.is_healthy.store(false, Relaxed);
         self.exit.store(true, Relaxed);
@@ -269,7 +269,7 @@ impl Drop for JssConnection {
 }
 
 #[derive(Default)]
-struct JssConnectionMetrics {
+struct BamConnectionMetrics {
     bundle_received: AtomicU64,
     heartbeat_received: AtomicU64,
     builder_config_received: AtomicU64,
@@ -282,10 +282,10 @@ struct JssConnectionMetrics {
     outbound_sent: AtomicU64,
 }
 
-impl JssConnectionMetrics {
+impl BamConnectionMetrics {
     pub fn report(&self) {
         datapoint_info!(
-            "jss_connection-metrics",
+            "bam_connection-metrics",
             (
                 "bundle_received",
                 self.bundle_received.swap(0, Relaxed) as i64,

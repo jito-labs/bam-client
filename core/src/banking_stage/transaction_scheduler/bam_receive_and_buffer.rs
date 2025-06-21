@@ -1,7 +1,7 @@
-/// An implementation of the `ReceiveAndBuffer` trait that receives messages from JSS
+/// An implementation of the `ReceiveAndBuffer` trait that receives messages from BAM
 /// and buffers from into the the `TransactionStateContainer`. Key thing to note:
 /// this implementation only functions during the `Consume/Hold` phase; otherwise it will send them back
-/// to JSS with a `Retryable` result.
+/// to BAM with a `Retryable` result.
 use std::{
     cmp::min,
     sync::{
@@ -20,7 +20,7 @@ use {
         decision_maker::BufferedPacketsDecision,
         immutable_deserialized_packet::{DeserializedPacketError, ImmutableDeserializedPacket},
         transaction_scheduler::{
-            jss_utils::{convert_deserialize_error_to_proto, convert_txn_error_to_proto},
+            bam_utils::{convert_deserialize_error_to_proto, convert_txn_error_to_proto},
             receive_and_buffer::{calculate_max_age, calculate_priority_and_cost},
             transaction_state::SanitizedTransactionTTL,
         },
@@ -28,8 +28,8 @@ use {
     crossbeam_channel::Sender,
     itertools::Itertools,
     jito_protos::proto::{
-        jss_api::{start_scheduler_message_v0::Msg, StartSchedulerMessageV0},
-        jss_types::{
+        bam_api::{start_scheduler_message_v0::Msg, StartSchedulerMessageV0},
+        bam_types::{
             bundle_result, not_committed::Reason, Bundle, DeserializationErrorReason, Packet,
             SchedulingError,
         },
@@ -47,29 +47,29 @@ use {
     solana_svm::transaction_error_metrics::TransactionErrorMetrics,
 };
 
-pub struct JssReceiveAndBuffer {
-    jss_enabled: Arc<AtomicBool>,
+pub struct BamReceiveAndBuffer {
+    bam_enabled: Arc<AtomicBool>,
     bundle_receiver: crossbeam_channel::Receiver<Bundle>,
     response_sender: Sender<StartSchedulerMessageV0>,
     bank_forks: Arc<RwLock<BankForks>>,
 }
 
-impl JssReceiveAndBuffer {
+impl BamReceiveAndBuffer {
     pub fn new(
-        jss_enabled: Arc<AtomicBool>,
+        bam_enabled: Arc<AtomicBool>,
         bundle_receiver: crossbeam_channel::Receiver<Bundle>,
         response_sender: Sender<StartSchedulerMessageV0>,
         bank_forks: Arc<RwLock<BankForks>>,
     ) -> Self {
         Self {
-            jss_enabled,
+            bam_enabled,
             bundle_receiver,
             response_sender,
             bank_forks,
         }
     }
 
-    fn deserialize_jss_packets<'a>(
+    fn deserialize_bam_packets<'a>(
         packets: impl Iterator<Item = &'a Packet>,
     ) -> Result<Vec<ImmutableDeserializedPacket>, (usize, DeserializedPacketError)> {
         let mut result = Vec::with_capacity(packets.size_hint().0);
@@ -113,10 +113,10 @@ impl JssReceiveAndBuffer {
     fn send_bundle_not_committed_result(&self, seq_id: u32, reason: Reason) {
         let _ = self.response_sender.try_send(StartSchedulerMessageV0 {
             msg: Some(Msg::BundleResult(
-                jito_protos::proto::jss_types::BundleResult {
+                jito_protos::proto::bam_types::BundleResult {
                     seq_id,
                     result: Some(bundle_result::Result::NotCommitted(
-                        jito_protos::proto::jss_types::NotCommitted {
+                        jito_protos::proto::bam_types::NotCommitted {
                             reason: Some(reason),
                         },
                     )),
@@ -128,10 +128,10 @@ impl JssReceiveAndBuffer {
     fn send_no_leader_slot_bundle_result(&self, seq_id: u32) {
         let _ = self.response_sender.try_send(StartSchedulerMessageV0 {
             msg: Some(Msg::BundleResult(
-                jito_protos::proto::jss_types::BundleResult {
+                jito_protos::proto::bam_types::BundleResult {
                     seq_id,
                     result: Some(bundle_result::Result::NotCommitted(
-                        jito_protos::proto::jss_types::NotCommitted {
+                        jito_protos::proto::bam_types::NotCommitted {
                             reason: Some(Reason::SchedulingError(
                                 SchedulingError::OutsideLeaderSlot as i32,
                             )),
@@ -145,10 +145,10 @@ impl JssReceiveAndBuffer {
     fn send_container_full_bundle_result(&self, seq_id: u32) {
         let _ = self.response_sender.try_send(StartSchedulerMessageV0 {
             msg: Some(Msg::BundleResult(
-                jito_protos::proto::jss_types::BundleResult {
+                jito_protos::proto::bam_types::BundleResult {
                     seq_id,
                     result: Some(bundle_result::Result::NotCommitted(
-                        jito_protos::proto::jss_types::NotCommitted {
+                        jito_protos::proto::bam_types::NotCommitted {
                             reason: Some(Reason::SchedulingError(
                                 SchedulingError::ContainerFull as i32,
                             )),
@@ -165,7 +165,7 @@ impl JssReceiveAndBuffer {
     ) -> Result<ParsedBundle, Reason> {
         if bundle.packets.is_empty() {
             return Err(Reason::DeserializationError(
-                jito_protos::proto::jss_types::DeserializationError {
+                jito_protos::proto::bam_types::DeserializationError {
                     index: 0,
                     reason: DeserializationErrorReason::Empty as i32,
                 },
@@ -174,7 +174,7 @@ impl JssReceiveAndBuffer {
 
         if bundle.packets.len() > 5 {
             return Err(Reason::DeserializationError(
-                jito_protos::proto::jss_types::DeserializationError {
+                jito_protos::proto::bam_types::DeserializationError {
                     index: 0,
                     reason: DeserializationErrorReason::SanitizeError as i32,
                 },
@@ -193,7 +193,7 @@ impl JssReceiveAndBuffer {
             .all_equal_value()
         else {
             return Err(Reason::DeserializationError(
-                jito_protos::proto::jss_types::DeserializationError {
+                jito_protos::proto::bam_types::DeserializationError {
                     index: 0,
                     reason: DeserializationErrorReason::InconsistentBundle as i32,
                 },
@@ -201,9 +201,9 @@ impl JssReceiveAndBuffer {
         };
 
         let mut parsed_packets =
-            Self::deserialize_jss_packets(bundle.packets.iter()).map_err(|(index, err)| {
+            Self::deserialize_bam_packets(bundle.packets.iter()).map_err(|(index, err)| {
                 let reason = convert_deserialize_error_to_proto(&err);
-                Reason::DeserializationError(jito_protos::proto::jss_types::DeserializationError {
+                Reason::DeserializationError(jito_protos::proto::bam_types::DeserializationError {
                     index: index as u32,
                     reason: reason as i32,
                 })
@@ -234,7 +234,7 @@ impl JssReceiveAndBuffer {
                 root_bank.get_reserved_account_keys(),
             ) else {
                 return Err(Reason::DeserializationError(
-                    jito_protos::proto::jss_types::DeserializationError {
+                    jito_protos::proto::bam_types::DeserializationError {
                         index: 0,
                         reason: DeserializationErrorReason::SanitizeError as i32,
                     },
@@ -247,7 +247,7 @@ impl JssReceiveAndBuffer {
             {
                 let reason = convert_txn_error_to_proto(err);
                 return Err(Reason::TransactionError(
-                    jito_protos::proto::jss_types::TransactionError {
+                    jito_protos::proto::bam_types::TransactionError {
                         index: index as u32,
                         reason: reason as i32,
                     },
@@ -263,7 +263,7 @@ impl JssReceiveAndBuffer {
                 Err(err) => {
                     let reason = convert_txn_error_to_proto(err);
                     return Err(Reason::TransactionError(
-                        jito_protos::proto::jss_types::TransactionError {
+                        jito_protos::proto::bam_types::TransactionError {
                             index: index as u32,
                             reason: reason as i32,
                         },
@@ -282,7 +282,7 @@ impl JssReceiveAndBuffer {
             if let Some(Err(err)) = check_results.first() {
                 let reason = convert_txn_error_to_proto(err.clone());
                 return Err(Reason::TransactionError(
-                    jito_protos::proto::jss_types::TransactionError {
+                    jito_protos::proto::bam_types::TransactionError {
                         index: index as u32,
                         reason: reason as i32,
                     },
@@ -297,7 +297,7 @@ impl JssReceiveAndBuffer {
             ) {
                 let reason = convert_txn_error_to_proto(err);
                 return Err(Reason::TransactionError(
-                    jito_protos::proto::jss_types::TransactionError {
+                    jito_protos::proto::bam_types::TransactionError {
                         index: index as u32,
                         reason: reason as i32,
                     },
@@ -336,7 +336,7 @@ struct ParsedBundle {
     pub revert_on_error: bool,
 }
 
-impl ReceiveAndBuffer for JssReceiveAndBuffer {
+impl ReceiveAndBuffer for BamReceiveAndBuffer {
     type Transaction = RuntimeTransaction<SanitizedTransaction>;
     type Container = TransactionStateContainer<Self::Transaction>;
 
@@ -347,7 +347,7 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
         _: &mut super::scheduler_metrics::SchedulerCountMetrics,
         decision: &crate::banking_stage::decision_maker::BufferedPacketsDecision,
     ) -> Result<usize, ()> {
-        if !self.jss_enabled.load(Ordering::Relaxed) {
+        if !self.bam_enabled.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(5));
             return Ok(0);
         }
@@ -455,17 +455,17 @@ mod tests {
         (bank_forks, mint_keypair)
     }
 
-    fn setup_jss_receive_and_buffer(
+    fn setup_bam_receive_and_buffer(
         receiver: crossbeam_channel::Receiver<Bundle>,
         bank_forks: Arc<RwLock<BankForks>>,
     ) -> (
-        JssReceiveAndBuffer,
+        BamReceiveAndBuffer,
         TransactionStateContainer<RuntimeTransaction<SanitizedTransaction>>,
         crossbeam_channel::Receiver<StartSchedulerMessageV0>,
     ) {
         let (response_sender, response_receiver) =
             crossbeam_channel::unbounded::<StartSchedulerMessageV0>();
-        let receive_and_buffer = JssReceiveAndBuffer::new(
+        let receive_and_buffer = BamReceiveAndBuffer::new(
             Arc::new(AtomicBool::new(true)),
             receiver,
             response_sender,
@@ -503,7 +503,7 @@ mod tests {
         assert_eq!(actual_length, expected_length);
     }
 
-    #[test_case(setup_jss_receive_and_buffer; "testcase-jss")]
+    #[test_case(setup_bam_receive_and_buffer; "testcase-bam")]
     fn test_receive_and_buffer_simple_transfer<R: ReceiveAndBuffer>(
         setup_receive_and_buffer: impl FnOnce(
             Receiver<Bundle>,
@@ -550,7 +550,7 @@ mod tests {
         let (bank_forks, _mint_keypair) = test_bank_forks();
         let (sender, receiver) = unbounded();
         let (mut receive_and_buffer, mut container, response_receiver) =
-            setup_jss_receive_and_buffer(receiver, bank_forks.clone());
+            setup_bam_receive_and_buffer(receiver, bank_forks.clone());
 
         // Create an invalid packet with no data
         let bundle = Bundle {
@@ -600,7 +600,7 @@ mod tests {
             }],
             max_schedule_slot: 0,
         };
-        let result = JssReceiveAndBuffer::parse_bundle(&bundle, &bank_forks);
+        let result = BamReceiveAndBuffer::parse_bundle(&bundle, &bank_forks);
         assert!(result.is_ok());
         let parsed_bundle = result.unwrap();
         assert_eq!(parsed_bundle.packets.len(), 1);
@@ -615,11 +615,11 @@ mod tests {
             packets: vec![],
             max_schedule_slot: 0,
         };
-        let result = JssReceiveAndBuffer::parse_bundle(&bundle, &bank_forks);
+        let result = BamReceiveAndBuffer::parse_bundle(&bundle, &bank_forks);
         assert!(result.is_err());
         assert_eq!(
             result.err().unwrap(),
-            Reason::DeserializationError(jito_protos::proto::jss_types::DeserializationError {
+            Reason::DeserializationError(jito_protos::proto::bam_types::DeserializationError {
                 index: 0,
                 reason: DeserializationErrorReason::Empty as i32,
             })
@@ -637,11 +637,11 @@ mod tests {
             }],
             max_schedule_slot: 0,
         };
-        let result = JssReceiveAndBuffer::parse_bundle(&bundle, &bank_forks);
+        let result = BamReceiveAndBuffer::parse_bundle(&bundle, &bank_forks);
         assert!(result.is_err());
         assert_eq!(
             result.err().unwrap(),
-            Reason::DeserializationError(jito_protos::proto::jss_types::DeserializationError {
+            Reason::DeserializationError(jito_protos::proto::bam_types::DeserializationError {
                 index: 0,
                 reason: DeserializationErrorReason::BincodeError as i32,
             })
@@ -666,13 +666,13 @@ mod tests {
             }],
             max_schedule_slot: 0,
         };
-        let result = JssReceiveAndBuffer::parse_bundle(&bundle, &bank_forks);
+        let result = BamReceiveAndBuffer::parse_bundle(&bundle, &bank_forks);
         assert!(result.is_err());
         assert_eq!(
             result.err().unwrap(),
-            Reason::TransactionError(jito_protos::proto::jss_types::TransactionError {
+            Reason::TransactionError(jito_protos::proto::bam_types::TransactionError {
                 index: 0,
-                reason: jito_protos::proto::jss_types::TransactionErrorReason::AccountNotFound
+                reason: jito_protos::proto::bam_types::TransactionErrorReason::AccountNotFound
                     as i32,
             })
         );
@@ -702,8 +702,8 @@ mod tests {
                         bank_forks.read().unwrap().root_bank().last_blockhash(),
                     ))
                     .unwrap(),
-                    meta: Some(jito_protos::proto::jss_types::Meta {
-                        flags: Some(jito_protos::proto::jss_types::PacketFlags {
+                    meta: Some(jito_protos::proto::bam_types::Meta {
+                        flags: Some(jito_protos::proto::bam_types::PacketFlags {
                             revert_on_error: true,
                             ..Default::default()
                         }),
@@ -713,11 +713,11 @@ mod tests {
             ],
             max_schedule_slot: 0,
         };
-        let result = JssReceiveAndBuffer::parse_bundle(&bundle, &bank_forks);
+        let result = BamReceiveAndBuffer::parse_bundle(&bundle, &bank_forks);
         assert!(result.is_err());
         assert_eq!(
             result.err().unwrap(),
-            Reason::DeserializationError(jito_protos::proto::jss_types::DeserializationError {
+            Reason::DeserializationError(jito_protos::proto::bam_types::DeserializationError {
                 index: 0,
                 reason: DeserializationErrorReason::InconsistentBundle as i32,
             })

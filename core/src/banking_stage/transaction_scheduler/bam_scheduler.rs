@@ -4,7 +4,7 @@
 use std::time::Instant;
 use {
     super::{
-        jss_receive_and_buffer::priority_to_seq_id,
+        bam_receive_and_buffer::priority_to_seq_id,
         scheduler::{Scheduler, SchedulingSummary},
         scheduler_error::SchedulerError,
         transaction_priority_id::TransactionPriorityId,
@@ -17,15 +17,15 @@ use {
             ConsumeWork, FinishedConsumeWork, NotCommittedReason, TransactionBatchId,
             TransactionResult,
         },
-        transaction_scheduler::jss_utils::convert_txn_error_to_proto,
+        transaction_scheduler::bam_utils::convert_txn_error_to_proto,
     },
     ahash::HashMap,
     crossbeam_channel::{Receiver, Sender},
     jito_protos::proto::{
-        jss_api::{
+        bam_api::{
             start_scheduler_message_v0::Msg, StartSchedulerMessage, StartSchedulerMessageV0,
         },
-        jss_types::{bundle_result, not_committed::Reason, SchedulingError},
+        bam_types::{bundle_result, not_committed::Reason, SchedulingError},
     },
     prio_graph::{AccessKind, GraphNode, PrioGraph},
     solana_pubkey::Pubkey,
@@ -52,7 +52,7 @@ fn passthrough_priority(
 const MAX_SCHEDULED_PER_WORKER: usize = 5;
 const MAX_TXN_PER_BATCH: usize = 16;
 
-pub struct JssScheduler<Tx: TransactionWithMeta> {
+pub struct BamScheduler<Tx: TransactionWithMeta> {
     workers_scheduled_count: Vec<usize>,
     consume_work_senders: Vec<Sender<ConsumeWork<Tx>>>,
     finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
@@ -78,7 +78,7 @@ struct InflightBatchInfo {
     pub slot: Slot,
 }
 
-impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
+impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
     pub fn new(
         consume_work_senders: Vec<Sender<ConsumeWork<Tx>>>,
         finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
@@ -337,10 +337,10 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
     fn send_no_leader_slot_bundle_result(&self, seq_id: u32) {
         let _ = self.response_sender.try_send(StartSchedulerMessageV0 {
             msg: Some(Msg::BundleResult(
-                jito_protos::proto::jss_types::BundleResult {
+                jito_protos::proto::bam_types::BundleResult {
                     seq_id,
                     result: Some(bundle_result::Result::NotCommitted(
-                        jito_protos::proto::jss_types::NotCommitted {
+                        jito_protos::proto::bam_types::NotCommitted {
                             reason: Some(Reason::SchedulingError(
                                 SchedulingError::OutsideLeaderSlot as i32,
                             )),
@@ -354,7 +354,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
     fn send_back_result(&self, seq_id: u32, result: bundle_result::Result) {
         let _ = self.response_sender.try_send(StartSchedulerMessageV0 {
             msg: Some(Msg::BundleResult(
-                jito_protos::proto::jss_types::BundleResult {
+                jito_protos::proto::bam_types::BundleResult {
                     seq_id,
                     result: Some(result),
                 },
@@ -380,7 +380,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
                     }
                 })
                 .collect();
-            bundle_result::Result::Committed(jito_protos::proto::jss_types::Committed {
+            bundle_result::Result::Committed(jito_protos::proto::bam_types::Committed {
                 transaction_results,
             })
         } else {
@@ -401,7 +401,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
                 })
                 .unwrap_or((0, NotCommittedReason::PohTimeout));
 
-            bundle_result::Result::NotCommitted(jito_protos::proto::jss_types::NotCommitted {
+            bundle_result::Result::NotCommitted(jito_protos::proto::bam_types::NotCommitted {
                 reason: Some(Self::convert_reason_to_proto(index, not_commit_reason)),
             })
         }
@@ -411,7 +411,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
     fn generate_bundle_result(processed: &TransactionResult) -> bundle_result::Result {
         match processed {
             TransactionResult::Committed(result) => {
-                bundle_result::Result::Committed(jito_protos::proto::jss_types::Committed {
+                bundle_result::Result::Committed(jito_protos::proto::bam_types::Committed {
                     transaction_results: vec![result.clone()],
                 })
             }
@@ -421,7 +421,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
                     NotCommittedReason::BatchRevert => (0, NotCommittedReason::BatchRevert),
                     NotCommittedReason::Error(err) => (0, NotCommittedReason::Error(err.clone())),
                 };
-                bundle_result::Result::NotCommitted(jito_protos::proto::jss_types::NotCommitted {
+                bundle_result::Result::NotCommitted(jito_protos::proto::bam_types::NotCommitted {
                     reason: Some(Self::convert_reason_to_proto(index, not_commit_reason)),
                 })
             }
@@ -431,22 +431,22 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
     fn convert_reason_to_proto(
         index: usize,
         reason: NotCommittedReason,
-    ) -> jito_protos::proto::jss_types::not_committed::Reason {
+    ) -> jito_protos::proto::bam_types::not_committed::Reason {
         match reason {
             NotCommittedReason::PohTimeout => {
-                jito_protos::proto::jss_types::not_committed::Reason::SchedulingError(
+                jito_protos::proto::bam_types::not_committed::Reason::SchedulingError(
                     SchedulingError::PohTimeout as i32,
                 )
             }
             // Should not happen, but just in case:
             NotCommittedReason::BatchRevert => {
-                jito_protos::proto::jss_types::not_committed::Reason::GenericInvalid(
-                    jito_protos::proto::jss_types::GenericInvalid {},
+                jito_protos::proto::bam_types::not_committed::Reason::GenericInvalid(
+                    jito_protos::proto::bam_types::GenericInvalid {},
                 )
             }
             NotCommittedReason::Error(err) => {
-                jito_protos::proto::jss_types::not_committed::Reason::TransactionError(
-                    jito_protos::proto::jss_types::TransactionError {
+                jito_protos::proto::bam_types::not_committed::Reason::TransactionError(
+                    jito_protos::proto::bam_types::TransactionError {
                         index: index as u32,
                         reason: convert_txn_error_to_proto(err) as i32,
                     },
@@ -501,7 +501,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
     }
 }
 
-impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
+impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
     fn schedule<S: StateContainer<Tx>>(
         &mut self,
         container: &mut S,
@@ -525,7 +525,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
     /// Receive completed batches of transactions without blocking.
     /// This also handles checking if the slot has ended and if so, it will
     /// drain the container and prio-graph, sending back 'retryable' results
-    /// back to JSS.
+    /// back to BAM.
     fn receive_completed(
         &mut self,
         container: &mut impl StateContainer<Tx>,
@@ -602,8 +602,8 @@ mod tests {
             },
             tests::create_slow_genesis_config,
             transaction_scheduler::{
-                jss_receive_and_buffer::seq_id_to_priority,
-                jss_scheduler::JssScheduler,
+                bam_receive_and_buffer::seq_id_to_priority,
+                bam_scheduler::BamScheduler,
                 scheduler::Scheduler,
                 transaction_state::SanitizedTransactionTTL,
                 transaction_state_container::{StateContainer, TransactionStateContainer},
@@ -612,8 +612,8 @@ mod tests {
         crossbeam_channel::unbounded,
         itertools::Itertools,
         jito_protos::proto::{
-            jss_api::{start_scheduler_message::Msg, StartSchedulerMessage},
-            jss_types::{
+            bam_api::{start_scheduler_message::Msg, StartSchedulerMessage},
+            bam_types::{
                 bundle_result::Result::{Committed, NotCommitted},
                 TransactionCommittedResult,
             },
@@ -641,7 +641,7 @@ mod tests {
     };
 
     struct TestScheduler {
-        scheduler: JssScheduler<RuntimeTransaction<SanitizedTransaction>>,
+        scheduler: BamScheduler<RuntimeTransaction<SanitizedTransaction>>,
         consume_work_receivers:
             Vec<crossbeam_channel::Receiver<ConsumeWork<RuntimeTransaction<SanitizedTransaction>>>>,
         finished_consume_work_sender: crossbeam_channel::Sender<
@@ -655,7 +655,7 @@ mod tests {
             (0..num_threads).map(|_| unbounded()).unzip();
         let (finished_consume_work_sender, finished_consume_work_receiver) = unbounded();
         let (response_sender, response_receiver) = unbounded();
-        let scheduler = JssScheduler::new(
+        let scheduler = BamScheduler::new(
             consume_work_senders,
             finished_consume_work_receiver,
             response_sender,
@@ -924,8 +924,8 @@ mod tests {
                 let reason = not_committed.reason.unwrap();
                 assert_eq!(
                     reason,
-                    jito_protos::proto::jss_types::not_committed::Reason::SchedulingError(
-                        jito_protos::proto::jss_types::SchedulingError::PohTimeout as i32
+                    jito_protos::proto::bam_types::not_committed::Reason::SchedulingError(
+                        jito_protos::proto::bam_types::SchedulingError::PohTimeout as i32
                     )
                 );
             }
@@ -1039,8 +1039,8 @@ mod tests {
                 let reason = not_committed.reason.unwrap();
                 assert_eq!(
                     reason,
-                    jito_protos::proto::jss_types::not_committed::Reason::SchedulingError(
-                        jito_protos::proto::jss_types::SchedulingError::OutsideLeaderSlot as i32
+                    jito_protos::proto::bam_types::not_committed::Reason::SchedulingError(
+                        jito_protos::proto::bam_types::SchedulingError::OutsideLeaderSlot as i32
                     )
                 );
             }
