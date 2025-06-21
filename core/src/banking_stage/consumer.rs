@@ -2106,15 +2106,14 @@ mod tests {
         // InstructionError::InsufficientFunds that is then committed. Needs to be
         // MAX_NUM_TRANSACTIONS_PER_BATCH at least so it doesn't conflict on account locks
         // with the below transaction
-        let mut transactions = vec![
+        let mut transactions = (0..TARGET_NUM_TRANSACTIONS_PER_BATCH).map(|_| {
             system_transaction::transfer(
                 &mint_keypair,
                 &Pubkey::new_unique(),
                 lamports + 1,
                 genesis_config.hash(),
-            );
-            TARGET_NUM_TRANSACTIONS_PER_BATCH
-        ];
+            )
+        }).collect_vec();
 
         // Make one transaction that will succeed.
         transactions.push(system_transaction::transfer(
@@ -2169,15 +2168,14 @@ mod tests {
             .set_limits(u64::MAX, u64::MAX, u64::MAX);
 
         // Make all repetitive transactions that conflict on the `mint_keypair`, so only 1 should be executed
-        let mut transactions = vec![
+        let mut transactions = (0..TARGET_NUM_TRANSACTIONS_PER_BATCH).map(|_| {
             system_transaction::transfer(
                 &mint_keypair,
                 &Pubkey::new_unique(),
                 1,
-                genesis_config.hash()
-            );
-            TARGET_NUM_TRANSACTIONS_PER_BATCH
-        ];
+                genesis_config.hash(),
+            )
+        }).collect_vec();
 
         // Make one more in separate batch that also conflicts, but because it's in a separate batch, it
         // should be executed
