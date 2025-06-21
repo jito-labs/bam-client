@@ -48,10 +48,7 @@ use {
     },
     solana_transaction_status::PreBalanceInfo,
     std::{
-        collections::HashSet,
-        num::Saturating,
-        sync::{atomic::Ordering, Arc, Mutex},
-        time::Instant,
+        cell::Cell, collections::HashSet, num::Saturating, sync::{atomic::Ordering, Arc, Mutex}, time::Instant
     },
 };
 
@@ -113,6 +110,8 @@ pub struct Consumer {
     bundle_account_locker: BundleAccountLocker,
 
     tip_processing_dependencies: Option<TipProcessingDependencies>,
+
+    reusable_seen_messages: Cell<AHashSet<solana_sdk::hash::Hash>>,
 }
 
 impl Consumer {
@@ -132,6 +131,7 @@ impl Consumer {
             blacklisted_accounts,
             bundle_account_locker,
             tip_processing_dependencies: None,
+            reusable_seen_messages: Cell::new(AHashSet::new()),
         }
     }
 
@@ -152,6 +152,7 @@ impl Consumer {
             blacklisted_accounts,
             bundle_account_locker,
             tip_processing_dependencies,
+            reusable_seen_messages: Cell::new(AHashSet::new()),
         }
     }
 
@@ -633,17 +634,17 @@ impl Consumer {
         reservation_cb: &impl Fn(&Bank) -> u64,
     ) -> ProcessTransactionBatchOutput {
         // Check for duplicate transactions
-        let mut seen_messages = AHashSet::new();
+        let mut seen_messages = self.reusable_seen_messages.take();
+        seen_messages.clear();
         let pre_results = txs.iter().zip(pre_results).map(|(tx, result)| {
             if let Err(err) = result {
                 return Err(err);
             }
-            if !seen_messages.insert(tx.message_hash()) {
+            if !seen_messages.insert(*tx.message_hash()) {
                 return Err(TransactionError::AlreadyProcessed);
             }
             Ok(())
         });
-
         let (
             (transaction_qos_cost_results, cost_model_throttled_transactions_count),
             cost_model_us,
@@ -653,6 +654,7 @@ impl Consumer {
             pre_results,
             reservation_cb
         ));
+        self.reusable_seen_messages.set(seen_messages);
 
         // Only lock accounts for those transactions are selected for the block;
         // Once accounts are locked, other threads cannot encode transactions that will modify the
