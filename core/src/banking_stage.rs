@@ -807,7 +807,7 @@ impl BankingStage {
                             );
                         let receive_and_buffer = BamReceiveAndBuffer::new(
                             bam_dependencies.bam_enabled.clone(),
-                            bam_dependencies.bundle_receiver.clone(),
+                            bam_dependencies.batch_receiver.clone(),
                             bam_dependencies.outbound_sender.clone(),
                             bank_forks.clone(),
                         );

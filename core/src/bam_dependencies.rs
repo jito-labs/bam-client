@@ -8,7 +8,7 @@ use {
             start_scheduler_message::VersionedMsg,
             StartSchedulerMessage, StartSchedulerMessageV0,
         },
-        bam_types::Bundle,
+        bam_types::AtomicTxnBatch,
     },
     solana_gossip::cluster_info::ClusterInfo,
 };
@@ -17,8 +17,8 @@ use {
 pub struct BamDependencies {
     pub bam_enabled: Arc<AtomicBool>,
 
-    pub bundle_sender: crossbeam_channel::Sender<Bundle>,
-    pub bundle_receiver: crossbeam_channel::Receiver<Bundle>,
+    pub batch_sender: crossbeam_channel::Sender<AtomicTxnBatch>,
+    pub batch_receiver: crossbeam_channel::Receiver<AtomicTxnBatch>,
 
     pub outbound_sender: crossbeam_channel::Sender<StartSchedulerMessageV0>,
     pub outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessageV0>,

@@ -347,12 +347,12 @@ impl Tpu {
             .saturating_mul(8)
             .saturating_div(10);
 
-        let (bam_bundle_sender, bam_bundle_receiver) = bounded(100_000);
+        let (bam_batch_sender, bam_batch_receiver) = bounded(100_000);
         let (bam_outbound_sender, bam_outbound_receiver) = bounded(100_000);
         let bam_dependencies = BamDependencies {
             bam_enabled: bam_enabled.clone(),
-            bundle_sender: bam_bundle_sender,
-            bundle_receiver: bam_bundle_receiver,
+            batch_sender: bam_batch_sender,
+            batch_receiver: bam_batch_receiver,
             outbound_sender: bam_outbound_sender,
             outbound_receiver: bam_outbound_receiver,
             cluster_info: cluster_info.clone(),

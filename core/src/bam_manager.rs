@@ -85,7 +85,7 @@ impl BamManager {
                         url,
                         poh_recorder.clone(),
                         dependencies.cluster_info.clone(),
-                        dependencies.bundle_sender.clone(),
+                        dependencies.batch_sender.clone(),
                         dependencies.outbound_receiver.clone(),
                     ));
                     match result {

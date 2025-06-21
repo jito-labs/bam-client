@@ -2,6 +2,7 @@
 /// schedules them to workers in a FIFO, account-aware manner. This is facilitated by the
 /// `PrioGraph` data structure, which is a directed graph that tracks the dependencies.
 use std::time::Instant;
+
 use {
     super::{
         bam_receive_and_buffer::priority_to_seq_id,
@@ -25,7 +26,7 @@ use {
         bam_api::{
             start_scheduler_message_v0::Msg, StartSchedulerMessageV0,
         },
-        bam_types::{bundle_result, not_committed::Reason, SchedulingError},
+        bam_types::{atomic_txn_batch_result, not_committed::Reason, SchedulingError},
     },
     prio_graph::{AccessKind, GraphNode, PrioGraph},
     solana_pubkey::Pubkey,
@@ -336,10 +337,10 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
 
     fn send_no_leader_slot_bundle_result(&self, seq_id: u32) {
         let _ = self.response_sender.try_send(StartSchedulerMessageV0 {
-            msg: Some(Msg::BundleResult(
-                jito_protos::proto::bam_types::BundleResult {
+            msg: Some(Msg::AtomicTxnBatchResult(
+                jito_protos::proto::bam_types::AtomicTxnBatchResult {
                     seq_id,
-                    result: Some(bundle_result::Result::NotCommitted(
+                    result: Some(atomic_txn_batch_result::Result::NotCommitted(
                         jito_protos::proto::bam_types::NotCommitted {
                             reason: Some(Reason::SchedulingError(
                                 SchedulingError::OutsideLeaderSlot as i32,
@@ -351,10 +352,10 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         });
     }
 
-    fn send_back_result(&self, seq_id: u32, result: bundle_result::Result) {
+    fn send_back_result(&self, seq_id: u32, result: atomic_txn_batch_result::Result) {
         let _ = self.response_sender.try_send(StartSchedulerMessageV0 {
-            msg: Some(Msg::BundleResult(
-                jito_protos::proto::bam_types::BundleResult {
+            msg: Some(Msg::AtomicTxnBatchResult(
+                jito_protos::proto::bam_types::AtomicTxnBatchResult {
                     seq_id,
                     result: Some(result),
                 },
@@ -365,7 +366,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
     /// Generates a `bundle_result::Result` based on the processed results for 'revert_on_error' batches.
     fn generate_revert_on_error_bundle_result(
         processed_results: &[TransactionResult],
-    ) -> bundle_result::Result {
+    ) -> atomic_txn_batch_result::Result {
         if processed_results
             .iter()
             .all(|result| matches!(result, TransactionResult::Committed(_)))
@@ -380,7 +381,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                     }
                 })
                 .collect();
-            bundle_result::Result::Committed(jito_protos::proto::bam_types::Committed {
+            atomic_txn_batch_result::Result::Committed(jito_protos::proto::bam_types::Committed {
                 transaction_results,
             })
         } else {
@@ -401,17 +402,17 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 })
                 .unwrap_or((0, NotCommittedReason::PohTimeout));
 
-            bundle_result::Result::NotCommitted(jito_protos::proto::bam_types::NotCommitted {
+            atomic_txn_batch_result::Result::NotCommitted(jito_protos::proto::bam_types::NotCommitted {
                 reason: Some(Self::convert_reason_to_proto(index, not_commit_reason)),
             })
         }
     }
 
     /// Generates a `bundle_result::Result` based on the processed result of a single transaction.
-    fn generate_bundle_result(processed: &TransactionResult) -> bundle_result::Result {
+    fn generate_bundle_result(processed: &TransactionResult) -> atomic_txn_batch_result::Result {
         match processed {
             TransactionResult::Committed(result) => {
-                bundle_result::Result::Committed(jito_protos::proto::bam_types::Committed {
+                atomic_txn_batch_result::Result::Committed(jito_protos::proto::bam_types::Committed {
                     transaction_results: vec![result.clone()],
                 })
             }
@@ -421,7 +422,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                     NotCommittedReason::BatchRevert => (0, NotCommittedReason::BatchRevert),
                     NotCommittedReason::Error(err) => (0, NotCommittedReason::Error(err.clone())),
                 };
-                bundle_result::Result::NotCommitted(jito_protos::proto::bam_types::NotCommitted {
+                atomic_txn_batch_result::Result::NotCommitted(jito_protos::proto::bam_types::NotCommitted {
                     reason: Some(Self::convert_reason_to_proto(index, not_commit_reason)),
                 })
             }
@@ -613,7 +614,7 @@ mod tests {
         itertools::Itertools,
         jito_protos::proto::{
             bam_api::{start_scheduler_message_v0::Msg, StartSchedulerMessageV0}, bam_types::{
-                bundle_result::Result::{Committed, NotCommitted},
+                atomic_txn_batch_result::Result::{Committed, NotCommitted},
                 TransactionCommittedResult,
             }
         },
@@ -876,8 +877,8 @@ mod tests {
         let response = response_receiver.try_recv().unwrap();
         assert!(response.msg.is_some(), "Response should contain a message");
         let msg = response.msg.unwrap();
-        let Msg::BundleResult(bundle_result) = msg else {
-            panic!("Expected BundleResult message");
+        let Msg::AtomicTxnBatchResult(bundle_result) = msg else {
+            panic!("Expected AtomicTxnBatchResult message");
         };
         assert_eq!(bundle_result.seq_id, 0);
         assert!(
@@ -902,8 +903,8 @@ mod tests {
         let response = response_receiver.try_recv().unwrap();
         assert!(response.msg.is_some(), "Response should contain a message");
         let msg = response.msg.unwrap();
-        let Msg::BundleResult(bundle_result) = msg else {
-            panic!("Expected BundleResult message");
+        let Msg::AtomicTxnBatchResult(bundle_result) = msg else {
+            panic!("Expected AtomicTxnBatchResult message");
         };
         assert_eq!(bundle_result.seq_id, 3);
         assert!(
@@ -975,8 +976,8 @@ mod tests {
         let response = response_receiver.try_recv().unwrap();
         assert!(response.msg.is_some(), "Response should contain a message");
         let msg = response.msg.unwrap();
-        let Msg::BundleResult(bundle_result) = msg else {
-            panic!("Expected BundleResult message");
+        let Msg::AtomicTxnBatchResult(bundle_result) = msg else {
+            panic!("Expected AtomicTxnBatchResult message");
         };
         assert_eq!(bundle_result.seq_id, 1);
         assert!(
@@ -1017,8 +1018,8 @@ mod tests {
         let response = response_receiver.try_recv().unwrap();
         assert!(response.msg.is_some(), "Response should contain a message");
         let msg = response.msg.unwrap();
-        let Msg::BundleResult(bundle_result) = msg else {
-            panic!("Expected BundleResult message");
+        let Msg::AtomicTxnBatchResult(bundle_result) = msg else {
+            panic!("Expected AtomicTxnBatchResult message");
         };
         assert_eq!(bundle_result.seq_id, 2);
         assert!(

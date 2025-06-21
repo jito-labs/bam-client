@@ -11,7 +11,7 @@ use {
             BuilderConfigResp, GetBuilderConfigRequest, StartSchedulerMessage,
             StartSchedulerMessageV0, StartSchedulerResponse, StartSchedulerResponseV0,
         },
-        bam_types::{Bundle, ValidatorHeartBeat},
+        bam_types::{AtomicTxnBatch, ValidatorHeartBeat},
     },
     solana_gossip::cluster_info::ClusterInfo,
     solana_poh::poh_recorder::PohRecorder,
@@ -38,7 +38,7 @@ impl BamConnection {
         url: String,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         cluster_info: Arc<ClusterInfo>,
-        bundle_sender: crossbeam_channel::Sender<Bundle>,
+        batch_sender: crossbeam_channel::Sender<AtomicTxnBatch>,
         outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessageV0>,
     ) -> Result<Self, TryInitError> {
         let backend_endpoint = tonic::transport::Endpoint::from_shared(url.clone())?;
@@ -71,7 +71,7 @@ impl BamConnection {
             outbound_sender,
             validator_client,
             builder_config.clone(),
-            bundle_sender,
+            batch_sender,
             poh_recorder,
             cluster_info,
             metrics.clone(),
@@ -95,7 +95,7 @@ impl BamConnection {
         mut outbound_sender: mpsc::Sender<StartSchedulerMessage>,
         validator_client: BamNodeApiClient<tonic::transport::channel::Channel>,
         builder_config: Arc<Mutex<Option<BuilderConfigResp>>>,
-        bundle_sender: crossbeam_channel::Sender<Bundle>,
+        batch_sender: crossbeam_channel::Sender<AtomicTxnBatch>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         cluster_info: Arc<ClusterInfo>,
         metrics: Arc<BamConnectionMetrics>,
@@ -167,8 +167,8 @@ impl BamConnection {
                             last_heartbeat = std::time::Instant::now();
                             metrics.heartbeat_received.fetch_add(1, Relaxed);
                         }
-                        StartSchedulerResponseV0 { resp: Some(Resp::Bundle(bundle)), .. } => {
-                            let _ = bundle_sender.try_send(bundle).inspect_err(|_| {
+                        StartSchedulerResponseV0 { resp: Some(Resp::AtomicTxnBatch(batch)), .. } => {
+                            let _ = batch_sender.try_send(batch).inspect_err(|_| {
                                 error!("Failed to send bundle to receiver");
                             });
                             metrics.bundle_received.fetch_add(1, Relaxed);
@@ -182,7 +182,7 @@ impl BamConnection {
                             Some(Msg::LeaderState(_)) => {
                                 metrics.leaderstate_sent.fetch_add(1, Relaxed);
                             }
-                            Some(Msg::BundleResult(_)) => {
+                            Some(Msg::AtomicTxnBatchResult(_)) => {
                                 metrics.bundleresult_sent.fetch_add(1, Relaxed);
                             }
                             _ => {}
