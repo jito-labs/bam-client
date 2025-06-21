@@ -40,6 +40,7 @@ use {
         time::{Duration, SystemTime},
     },
     tokio::runtime::Runtime,
+    tonic::transport::Endpoint,
 };
 
 #[derive(Clone)]
@@ -508,7 +509,24 @@ impl AdminRpc for AdminRpcImpl {
     }
 
     fn set_jss_url(&self, meta: Self::Metadata, jss_url: Option<String>) -> Result<()> {
-        debug!("set_jss_url request received");
+        let old_jss_url = meta.jss_url.lock().unwrap().clone();
+        let new_jss_url = jss_url.as_ref().map(|url| url.to_string());
+        debug!("set_jss_url old= {:?}, new={:?}", old_jss_url, new_jss_url);
+
+        if let Some(new_jss_url) = &new_jss_url {
+            if new_jss_url.is_empty() {
+                return Err(jsonrpc_core::error::Error::invalid_params(
+                    "JSS URL cannot be empty",
+                ));
+            }
+
+            if let Err(e) = Endpoint::from_str(new_jss_url) {
+                return Err(jsonrpc_core::error::Error::invalid_params(format!(
+                    "Could not create endpoint: {e}"
+                )));
+            }
+        }
+
         *meta.jss_url.lock().unwrap() = jss_url;
         Ok(())
     }

@@ -65,16 +65,15 @@ impl JssManager {
         let mut cached_builder_config = None;
         while !exit.load(Ordering::Relaxed) {
             // Check if we are in the startup grace period
-            if in_startup_grace_period {
-                if start.elapsed() > GRACE_PERIOD_DURATION {
-                    in_startup_grace_period = false;
-                }
+            if in_startup_grace_period && start.elapsed() > GRACE_PERIOD_DURATION {
+                in_startup_grace_period = false;
             }
 
             // Update if jss is enabled and sleep for a while before checking again
             // While in grace period, we allow JSS to be enabled even if no connection is established
             dependencies.jss_enabled.store(
-                in_startup_grace_period || (current_connection.is_some() && cached_builder_config.is_some()),
+                in_startup_grace_period
+                    || (current_connection.is_some() && cached_builder_config.is_some()),
                 Ordering::Relaxed,
             );
 

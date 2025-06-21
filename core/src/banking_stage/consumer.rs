@@ -117,7 +117,6 @@ pub struct Consumer {
 
     reusable_seen_messages: Cell<AHashSet<solana_sdk::hash::Hash>>,
     seq_not_conflict_batch_reusables: Cell<SeqNotConflictBatchReusables>,
-
 }
 
 #[derive(Default)]
@@ -155,7 +154,7 @@ impl Consumer {
         }
     }
 
-    pub fn new_with_tip_processing(
+    pub fn new_with_maybe_tip_processing(
         committer: Committer,
         transaction_recorder: TransactionRecorder,
         qos_service: QosService,
@@ -662,9 +661,7 @@ impl Consumer {
         let mut seen_messages = self.reusable_seen_messages.take();
         seen_messages.clear();
         let pre_results = txs.iter().zip(pre_results).map(|(tx, result)| {
-            if let Err(err) = result {
-                return Err(err);
-            }
+            result?;
             if !seen_messages.insert(*tx.message_hash()) {
                 return Err(TransactionError::AlreadyProcessed);
             }
@@ -1043,12 +1040,11 @@ impl Consumer {
                 .iter()
                 .enumerate()
                 .filter_map(|(index, key)| (!transaction_info.is_writable(index)).then_some(key));
-            let has_contention = write_account_locks
+            let has_contention = write_account_locks.clone().any(|key| {
+                aggregate_write_locks.contains(key) || aggregate_read_locks.contains(key)
+            }) || read_account_locks
                 .clone()
-                .any(|key| aggregate_write_locks.contains(key) || aggregate_read_locks.contains(key))
-                || read_account_locks
-                    .clone()
-                    .any(|key| aggregate_write_locks.contains(key));
+                .any(|key| aggregate_write_locks.contains(key));
             if has_contention {
                 result.push(std::mem::take(&mut current_batch));
                 aggregate_write_locks.clear();
@@ -1269,7 +1265,7 @@ mod tests {
             replay_vote_sender,
             Arc::new(PrioritizationFeeCache::new(0u64)),
         );
-        let consumer = Consumer::new_with_tip_processing(
+        let consumer = Consumer::new_with_maybe_tip_processing(
             committer,
             recorder,
             QosService::new(1),
@@ -2106,14 +2102,16 @@ mod tests {
         // InstructionError::InsufficientFunds that is then committed. Needs to be
         // MAX_NUM_TRANSACTIONS_PER_BATCH at least so it doesn't conflict on account locks
         // with the below transaction
-        let mut transactions = (0..TARGET_NUM_TRANSACTIONS_PER_BATCH).map(|_| {
-            system_transaction::transfer(
-                &mint_keypair,
-                &Pubkey::new_unique(),
-                lamports + 1,
-                genesis_config.hash(),
-            )
-        }).collect_vec();
+        let mut transactions = (0..TARGET_NUM_TRANSACTIONS_PER_BATCH)
+            .map(|_| {
+                system_transaction::transfer(
+                    &mint_keypair,
+                    &Pubkey::new_unique(),
+                    lamports + 1,
+                    genesis_config.hash(),
+                )
+            })
+            .collect_vec();
 
         // Make one transaction that will succeed.
         transactions.push(system_transaction::transfer(
@@ -2168,14 +2166,16 @@ mod tests {
             .set_limits(u64::MAX, u64::MAX, u64::MAX);
 
         // Make all repetitive transactions that conflict on the `mint_keypair`, so only 1 should be executed
-        let mut transactions = (0..TARGET_NUM_TRANSACTIONS_PER_BATCH).map(|_| {
-            system_transaction::transfer(
-                &mint_keypair,
-                &Pubkey::new_unique(),
-                1,
-                genesis_config.hash(),
-            )
-        }).collect_vec();
+        let mut transactions = (0..TARGET_NUM_TRANSACTIONS_PER_BATCH)
+            .map(|_| {
+                system_transaction::transfer(
+                    &mint_keypair,
+                    &Pubkey::new_unique(),
+                    1,
+                    genesis_config.hash(),
+                )
+            })
+            .collect_vec();
 
         // Make one more in separate batch that also conflicts, but because it's in a separate batch, it
         // should be executed
@@ -3319,7 +3319,7 @@ mod tests {
             Arc::new(PrioritizationFeeCache::new(0u64)),
         );
         let recorder = poh_recorder.read().unwrap().new_recorder();
-        let consumer = Consumer::new_with_tip_processing(
+        let consumer = Consumer::new_with_maybe_tip_processing(
             committer,
             recorder,
             QosService::new(1),
