@@ -256,7 +256,8 @@ impl Consumer {
                 &payload.sanitized_transactions,
                 banking_stage_stats,
                 payload.slot_metrics_tracker,
-                reservation_cb
+                reservation_cb,
+                false,
             ));
         payload
             .slot_metrics_tracker
@@ -305,6 +306,7 @@ impl Consumer {
         banking_stage_stats: &BankingStageStats,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
         reservation_cb: &impl Fn(&Bank) -> u64,
+        revert_on_error: bool,
     ) -> ProcessTransactionsSummary {
         let (mut process_transactions_summary, process_transactions_us) = measure_us!(self
             .process_transactions(
@@ -365,6 +367,7 @@ impl Consumer {
         bank_creation_time: &Instant,
         transactions: &[impl TransactionWithMeta],
         reservation_cb: &impl Fn(&Bank) -> u64,
+        revert_on_error: bool,
     ) -> ProcessTransactionsSummary {
         let mut chunk_start = 0;
         let mut all_retryable_tx_indexes = vec![];
@@ -401,6 +404,7 @@ impl Consumer {
                 txs,
                 chunk_start,
                 reservation_cb,
+                revert_on_error,
             );
 
             let ProcessTransactionBatchOutput {
@@ -554,6 +558,7 @@ impl Consumer {
         txs: &[impl TransactionWithMeta],
         chunk_offset: usize,
         reservation_cb: &impl Fn(&Bank) -> u64,
+        revert_on_error: bool,
     ) -> ProcessTransactionBatchOutput {
         let mut error_counters = TransactionErrorMetrics::default();
         let pre_results = vec![Ok(()); txs.len()];
@@ -585,6 +590,7 @@ impl Consumer {
             chunk_offset,
             check_results.into_iter(),
             reservation_cb,
+            revert_on_error,
         );
 
         // Accumulate error counters from the initial checks into final results
@@ -656,6 +662,7 @@ impl Consumer {
         chunk_offset: usize,
         pre_results: impl Iterator<Item = Result<(), TransactionError>>,
         reservation_cb: &impl Fn(&Bank) -> u64,
+        revert_on_error: bool,
     ) -> ProcessTransactionBatchOutput {
         // Check for duplicate transactions
         let mut seen_messages = self.reusable_seen_messages.take();
@@ -699,7 +706,7 @@ impl Consumer {
         // WouldExceedMaxAccountCostLimit, WouldExceedMaxVoteCostLimit
         // and WouldExceedMaxAccountDataCostLimit
         let mut execute_and_commit_transactions_output =
-            self.execute_and_commit_transactions_locked(bank, &batch);
+            self.execute_and_commit_transactions_locked(bank, &batch, revert_on_error);
 
         // Once the accounts are new transactions can enter the pipeline to process them
         let (_, unlock_us) = measure_us!(drop(batch));
@@ -753,6 +760,7 @@ impl Consumer {
         &self,
         bank: &Arc<Bank>,
         batch: &TransactionBatch<impl TransactionWithMeta>,
+        revert_on_error: bool,
     ) -> ExecuteAndCommitTransactionsOutput {
         let transaction_status_sender_enabled = self.committer.transaction_status_sender_enabled();
         let mut execute_and_commit_timings = LeaderExecuteAndCommitTimings::default();
