@@ -71,41 +71,43 @@ impl JssReceiveAndBuffer {
 
     fn deserialize_jss_packets<'a>(
         packets: impl Iterator<Item = &'a Packet>,
-    ) -> Vec<Result<ImmutableDeserializedPacket, DeserializedPacketError>> {
-        packets
-            .map(|packet| {
-                let mut solana_packet = solana_sdk::packet::Packet::default();
-                solana_packet.meta_mut().size = packet.data.len();
-                solana_packet.meta_mut().set_discard(false);
-                let len_to_copy = min(packet.data.len(), PACKET_DATA_SIZE);
-                solana_packet.buffer_mut()[0..len_to_copy]
-                    .copy_from_slice(&packet.data[0..len_to_copy]);
-                if let Some(meta) = &packet.meta {
-                    if let Some(addr) = &meta.addr.parse().ok() {
-                        solana_packet.meta_mut().addr = *addr;
+    ) -> Result<Vec<ImmutableDeserializedPacket>, (usize, DeserializedPacketError)> {
+        let mut result = Vec::with_capacity(packets.size_hint().0);
+        for (index, packet) in packets.enumerate() {
+            let mut solana_packet = solana_sdk::packet::Packet::default();
+            solana_packet.meta_mut().size = packet.data.len();
+            solana_packet.meta_mut().set_discard(false);
+            let len_to_copy = min(packet.data.len(), PACKET_DATA_SIZE);
+            solana_packet.buffer_mut()[0..len_to_copy]
+                .copy_from_slice(&packet.data[0..len_to_copy]);
+            if let Some(meta) = &packet.meta {
+                if let Some(addr) = &meta.addr.parse().ok() {
+                    solana_packet.meta_mut().addr = *addr;
+                }
+                solana_packet.meta_mut().port = meta.port as u16;
+                if let Some(flags) = &meta.flags {
+                    if flags.simple_vote_tx {
+                        solana_packet
+                            .meta_mut()
+                            .flags
+                            .insert(PacketFlags::SIMPLE_VOTE_TX);
                     }
-                    solana_packet.meta_mut().port = meta.port as u16;
-                    if let Some(flags) = &meta.flags {
-                        if flags.simple_vote_tx {
-                            solana_packet
-                                .meta_mut()
-                                .flags
-                                .insert(PacketFlags::SIMPLE_VOTE_TX);
-                        }
-                        if flags.forwarded {
-                            solana_packet
-                                .meta_mut()
-                                .flags
-                                .insert(PacketFlags::FORWARDED);
-                        }
-                        if flags.repair {
-                            solana_packet.meta_mut().flags.insert(PacketFlags::REPAIR);
-                        }
+                    if flags.forwarded {
+                        solana_packet
+                            .meta_mut()
+                            .flags
+                            .insert(PacketFlags::FORWARDED);
+                    }
+                    if flags.repair {
+                        solana_packet.meta_mut().flags.insert(PacketFlags::REPAIR);
                     }
                 }
-                ImmutableDeserializedPacket::new(solana_packet)
-            })
-            .collect_vec()
+            }
+            result
+                .push(ImmutableDeserializedPacket::new(solana_packet).map_err(|err| (index, err))?);
+        }
+
+        Ok(result)
     }
 
     fn send_bundle_not_committed_result(&self, seq_id: u32, reason: Reason) {
@@ -170,13 +172,11 @@ impl JssReceiveAndBuffer {
             ));
         }
 
-        let mut parsed_packets = Self::deserialize_jss_packets(bundle.packets.iter());
-        if let Some((index, Err(err))) = parsed_packets.iter().find_position(|r| r.is_err()) {
-            let reason = convert_deserialize_error_to_proto(err);
+        if bundle.packets.len() > 5 {
             return Err(Reason::DeserializationError(
                 jito_protos::proto::jss_types::DeserializationError {
-                    index: index as u32,
-                    reason: reason as i32,
+                    index: 0,
+                    reason: DeserializationErrorReason::SanitizeError as i32,
                 },
             ));
         }
@@ -200,6 +200,15 @@ impl JssReceiveAndBuffer {
             ));
         };
 
+        let mut parsed_packets =
+            Self::deserialize_jss_packets(bundle.packets.iter()).map_err(|(index, err)| {
+                let reason = convert_deserialize_error_to_proto(&err);
+                Reason::DeserializationError(jito_protos::proto::jss_types::DeserializationError {
+                    index: index as u32,
+                    reason: reason as i32,
+                })
+            })?;
+
         let (root_bank, working_bank) = {
             let bank_forks = bank_forks.read().unwrap();
             let root_bank = bank_forks.root_bank();
@@ -217,7 +226,7 @@ impl JssReceiveAndBuffer {
 
         // Checks are taken from receive_and_buffer.rs:
         // SanitizedTransactionReceiveAndBuffer::buffer_packets
-        for (index, parsed_packet) in parsed_packets.drain(..).filter_map(Result::ok).enumerate() {
+        for (index, parsed_packet) in parsed_packets.drain(..).enumerate() {
             // Check 1
             let Some((tx, deactivation_slot)) = parsed_packet.build_sanitized_transaction(
                 vote_only,
