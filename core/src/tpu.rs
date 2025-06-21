@@ -284,7 +284,8 @@ impl Tpu {
             block_builder_commission: 0,
         }));
 
-        let jss_enabled = Arc::new(AtomicBool::new(false));
+        // Will be set to false by JSSManager if JSS cannot be connected to
+        let jss_enabled = Arc::new(AtomicBool::new(true));
 
         let (bundle_sender, bundle_receiver) = unbounded();
         let block_engine_stage = BlockEngineStage::new(
