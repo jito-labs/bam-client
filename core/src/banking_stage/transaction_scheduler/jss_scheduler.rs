@@ -48,6 +48,7 @@ fn passthrough_priority(
 }
 
 const MAX_SCHEDULED_PER_WORKER: usize = 5;
+const MAX_TXN_PER_BATCH: usize = 16;
 
 pub struct JssScheduler<Tx: TransactionWithMeta> {
     workers_scheduled_count: Vec<usize>,
@@ -60,7 +61,10 @@ pub struct JssScheduler<Tx: TransactionWithMeta> {
     prio_graph: SchedulerPrioGraph,
     slot: Option<Slot>,
 
+    // Reusable objects to avoid allocations
     reusable_consume_work: Vec<ConsumeWork<Tx>>,
+    reusable_priority_ids: Vec<Vec<TransactionPriorityId>>,
+    reusable_batches_for_scheduling: Vec<(Vec<TransactionPriorityId>, bool)>,
 }
 
 // A structure to hold information about inflight batches.
@@ -88,6 +92,8 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
             prio_graph: PrioGraph::new(passthrough_priority),
             slot: None,
             reusable_consume_work: Vec::new(),
+            reusable_priority_ids: Vec::new(),
+            reusable_batches_for_scheduling: Vec::new(),
         }
     }
 
@@ -155,12 +161,13 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
         };
 
         // Schedule any available transactions in prio-graph
+        let mut batches_for_scheduling = std::mem::take(&mut self.reusable_batches_for_scheduling);
         while let Some(worker_index) = self.get_best_available_worker() {
-            let batches_for_scheduling = self.get_batches_for_scheduling(container, slot);
+            self.get_batches_for_scheduling(&mut batches_for_scheduling, container, slot);
             if batches_for_scheduling.is_empty() {
                 break;
             }
-            for (priority_ids, revert_on_error) in batches_for_scheduling {
+            for (priority_ids, revert_on_error) in batches_for_scheduling.drain(..) {
                 let len = priority_ids.len();
                 let batch_id = self.get_next_schedule_id();
                 let mut work = self.get_or_create_work_object();
@@ -168,11 +175,18 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
                     &mut work,
                     batch_id,
                     &priority_ids,
-                    revert_on_error, container, slot);
+                    revert_on_error,
+                    container,
+                    slot,
+                );
                 self.send_to_worker(worker_index, priority_ids, work, slot);
                 *num_scheduled += len;
             }
         }
+        std::mem::swap(
+            &mut self.reusable_batches_for_scheduling,
+            &mut batches_for_scheduling,
+        );
     }
 
     /// Get batches of transactions for scheduling.
@@ -181,12 +195,11 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
     /// and the 'revert_on_error' batch is appended to the result.
     fn get_batches_for_scheduling(
         &mut self,
+        result: &mut Vec<(Vec<TransactionPriorityId>, bool)>,
         container: &mut impl StateContainer<Tx>,
         current_slot: Slot,
-    ) -> Vec<(Vec<TransactionPriorityId>, bool)> {
-        const MAX_TXN_PER_BATCH: usize = 16;
-        let mut result = vec![];
-        let mut current_batch_ids = vec![];
+    ) {
+        let mut current_batch_ids = self.get_or_create_priority_ids();
         while let Some(next_batch_id) = self.prio_graph.pop() {
             let Some((_, revert_on_error, slot)) = container.get_batch(next_batch_id.id) else {
                 continue;
@@ -203,6 +216,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
             if revert_on_error {
                 if !current_batch_ids.is_empty() {
                     result.push((std::mem::take(&mut current_batch_ids), false));
+                    current_batch_ids =  self.get_or_create_priority_ids();
                 }
                 result.push((vec![next_batch_id], true));
                 break;
@@ -217,7 +231,6 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
         if !current_batch_ids.is_empty() {
             result.push((current_batch_ids, false));
         }
-        result
     }
 
     fn send_to_worker(
@@ -254,9 +267,9 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
             // These values will be overwritten by `generate_work`
             ConsumeWork {
                 batch_id: TransactionBatchId::new(0),
-                ids: Vec::new(),
-                transactions: Vec::new(),
-                max_ages: Vec::new(),
+                ids: Vec::with_capacity(MAX_TXN_PER_BATCH),
+                transactions: Vec::with_capacity(MAX_TXN_PER_BATCH),
+                max_ages: Vec::with_capacity(MAX_TXN_PER_BATCH),
                 revert_on_error: false,
                 respond_with_extra_info: false,
                 schedulable_slot: None,
@@ -272,6 +285,19 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
         self.reusable_consume_work.push(work);
     }
 
+    fn get_or_create_priority_ids(&mut self) -> Vec<TransactionPriorityId> {
+        if let Some(priority_ids) = self.reusable_priority_ids.pop() {
+            priority_ids
+        } else {
+            Vec::with_capacity(MAX_TXN_PER_BATCH)
+        }
+    }
+
+    fn recycle_priority_ids(&mut self, mut priority_ids: Vec<TransactionPriorityId>) {
+        priority_ids.clear();
+        self.reusable_priority_ids.push(priority_ids);
+    }
+
     fn generate_work(
         output: &mut ConsumeWork<Tx>,
         batch_id: TransactionBatchId,
@@ -282,23 +308,20 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
     ) {
         output.ids.clear();
         output.ids.extend(
-        priority_ids
+            priority_ids
                 .iter()
                 .filter_map(|priority_id| container.get_batch(priority_id.id))
                 .flat_map(|(batch_ids, _, _)| batch_ids.into_iter())
-                .cloned()
+                .cloned(),
         );
 
         output.transactions.clear();
         output.max_ages.clear();
-        for txn in output.ids
-            .iter()
-            .filter_map(|txn_id| {
-                let result = container.get_mut_transaction_state(*txn_id)?;
-                let result = result.transition_to_pending();
-                Some(result)
-            })
-        {
+        for txn in output.ids.iter().filter_map(|txn_id| {
+            let result = container.get_mut_transaction_state(*txn_id)?;
+            let result = result.transition_to_pending();
+            Some(result)
+        }) {
             output.transactions.push(txn.transaction);
             output.max_ages.push(txn.max_age);
         }
@@ -548,7 +571,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
                         };
                         Self::generate_bundle_result(txn_result)
                     };
-                    self.send_back_result(priority_to_seq_id(priority_id.priority) , bundle_result);
+                    self.send_back_result(priority_to_seq_id(priority_id.priority), bundle_result);
                 }
 
                 // If in the same slot, unblock the transaction
@@ -559,6 +582,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
                 // Remove the transaction from the container
                 container.remove_by_id(priority_id.id);
             }
+            self.recycle_priority_ids(inflight_batch_info.priority_ids);
         }
 
         Ok((num_transactions, 0))
