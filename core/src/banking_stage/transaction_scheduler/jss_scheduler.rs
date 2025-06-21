@@ -22,7 +22,9 @@ use {
     ahash::HashMap,
     crossbeam_channel::{Receiver, Sender},
     jito_protos::proto::{
-        jss_api::{start_scheduler_message::Msg, StartSchedulerMessage},
+        jss_api::{
+            start_scheduler_message_v0::Msg, StartSchedulerMessage, StartSchedulerMessageV0,
+        },
         jss_types::{bundle_result, not_committed::Reason, SchedulingError},
     },
     prio_graph::{AccessKind, GraphNode, PrioGraph},
@@ -54,7 +56,7 @@ pub struct JssScheduler<Tx: TransactionWithMeta> {
     workers_scheduled_count: Vec<usize>,
     consume_work_senders: Vec<Sender<ConsumeWork<Tx>>>,
     finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
-    response_sender: Sender<StartSchedulerMessage>,
+    response_sender: Sender<StartSchedulerMessageV0>,
 
     next_batch_id: u64,
     inflight_batch_info: HashMap<TransactionBatchId, InflightBatchInfo>,
@@ -80,7 +82,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
     pub fn new(
         consume_work_senders: Vec<Sender<ConsumeWork<Tx>>>,
         finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
-        response_sender: Sender<StartSchedulerMessage>,
+        response_sender: Sender<StartSchedulerMessageV0>,
     ) -> Self {
         Self {
             workers_scheduled_count: vec![0; consume_work_senders.len()],
@@ -216,7 +218,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
             if revert_on_error {
                 if !current_batch_ids.is_empty() {
                     result.push((std::mem::take(&mut current_batch_ids), false));
-                    current_batch_ids =  self.get_or_create_priority_ids();
+                    current_batch_ids = self.get_or_create_priority_ids();
                 }
                 result.push((vec![next_batch_id], true));
                 break;
@@ -333,7 +335,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
     }
 
     fn send_no_leader_slot_bundle_result(&self, seq_id: u32) {
-        let _ = self.response_sender.try_send(StartSchedulerMessage {
+        let _ = self.response_sender.try_send(StartSchedulerMessageV0 {
             msg: Some(Msg::BundleResult(
                 jito_protos::proto::jss_types::BundleResult {
                     seq_id,
@@ -350,7 +352,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
     }
 
     fn send_back_result(&self, seq_id: u32, result: bundle_result::Result) {
-        let _ = self.response_sender.try_send(StartSchedulerMessage {
+        let _ = self.response_sender.try_send(StartSchedulerMessageV0 {
             msg: Some(Msg::BundleResult(
                 jito_protos::proto::jss_types::BundleResult {
                     seq_id,

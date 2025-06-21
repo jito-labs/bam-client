@@ -28,7 +28,7 @@ use {
     crossbeam_channel::Sender,
     itertools::Itertools,
     jito_protos::proto::{
-        jss_api::{start_scheduler_message::Msg, StartSchedulerMessage},
+        jss_api::{start_scheduler_message_v0::Msg, StartSchedulerMessageV0},
         jss_types::{
             bundle_result, not_committed::Reason, Bundle, DeserializationErrorReason, Packet,
             SchedulingError,
@@ -50,7 +50,7 @@ use {
 pub struct JssReceiveAndBuffer {
     jss_enabled: Arc<AtomicBool>,
     bundle_receiver: crossbeam_channel::Receiver<Bundle>,
-    response_sender: Sender<StartSchedulerMessage>,
+    response_sender: Sender<StartSchedulerMessageV0>,
     bank_forks: Arc<RwLock<BankForks>>,
 }
 
@@ -58,7 +58,7 @@ impl JssReceiveAndBuffer {
     pub fn new(
         jss_enabled: Arc<AtomicBool>,
         bundle_receiver: crossbeam_channel::Receiver<Bundle>,
-        response_sender: Sender<StartSchedulerMessage>,
+        response_sender: Sender<StartSchedulerMessageV0>,
         bank_forks: Arc<RwLock<BankForks>>,
     ) -> Self {
         Self {
@@ -111,7 +111,7 @@ impl JssReceiveAndBuffer {
     }
 
     fn send_bundle_not_committed_result(&self, seq_id: u32, reason: Reason) {
-        let _ = self.response_sender.try_send(StartSchedulerMessage {
+        let _ = self.response_sender.try_send(StartSchedulerMessageV0 {
             msg: Some(Msg::BundleResult(
                 jito_protos::proto::jss_types::BundleResult {
                     seq_id,
@@ -126,7 +126,7 @@ impl JssReceiveAndBuffer {
     }
 
     fn send_no_leader_slot_bundle_result(&self, seq_id: u32) {
-        let _ = self.response_sender.try_send(StartSchedulerMessage {
+        let _ = self.response_sender.try_send(StartSchedulerMessageV0 {
             msg: Some(Msg::BundleResult(
                 jito_protos::proto::jss_types::BundleResult {
                     seq_id,
@@ -143,7 +143,7 @@ impl JssReceiveAndBuffer {
     }
 
     fn send_container_full_bundle_result(&self, seq_id: u32) {
-        let _ = self.response_sender.try_send(StartSchedulerMessage {
+        let _ = self.response_sender.try_send(StartSchedulerMessageV0 {
             msg: Some(Msg::BundleResult(
                 jito_protos::proto::jss_types::BundleResult {
                     seq_id,
@@ -461,10 +461,10 @@ mod tests {
     ) -> (
         JssReceiveAndBuffer,
         TransactionStateContainer<RuntimeTransaction<SanitizedTransaction>>,
-        crossbeam_channel::Receiver<StartSchedulerMessage>,
+        crossbeam_channel::Receiver<StartSchedulerMessageV0>,
     ) {
         let (response_sender, response_receiver) =
-            crossbeam_channel::unbounded::<StartSchedulerMessage>();
+            crossbeam_channel::unbounded::<StartSchedulerMessageV0>();
         let receive_and_buffer = JssReceiveAndBuffer::new(
             Arc::new(AtomicBool::new(true)),
             receiver,
@@ -509,7 +509,7 @@ mod tests {
             Receiver<Bundle>,
             Arc<RwLock<BankForks>>,
         )
-            -> (R, R::Container, Receiver<StartSchedulerMessage>),
+            -> (R, R::Container, Receiver<StartSchedulerMessageV0>),
     ) {
         let (sender, receiver) = unbounded();
         let (bank_forks, mint_keypair) = test_bank_forks();

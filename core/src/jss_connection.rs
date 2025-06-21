@@ -2,12 +2,14 @@
 // Keeps track of last received heartbeat 'behind the scenes' and will mark itself as unhealthy if no heartbeat is received
 
 use {
+    crate::jss_dependencies::v0_to_versioned_proto,
     futures::{channel::mpsc, StreamExt},
     jito_protos::proto::{
         jss_api::{
-            jss_node_api_client::JssNodeApiClient, start_scheduler_message::Msg,
-            start_scheduler_response::Resp, BuilderConfigResp, GetBuilderConfigRequest,
-            StartSchedulerMessage, StartSchedulerResponse,
+            jss_node_api_client::JssNodeApiClient, start_scheduler_message_v0::Msg,
+            start_scheduler_response::VersionedMsg, start_scheduler_response_v0::Resp,
+            BuilderConfigResp, GetBuilderConfigRequest, StartSchedulerMessage,
+            StartSchedulerMessageV0, StartSchedulerResponse, StartSchedulerResponseV0,
         },
         jss_types::{Bundle, ValidatorHeartBeat},
     },
@@ -37,7 +39,7 @@ impl JssConnection {
         poh_recorder: Arc<RwLock<PohRecorder>>,
         cluster_info: Arc<ClusterInfo>,
         bundle_sender: crossbeam_channel::Sender<Bundle>,
-        outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessage>,
+        outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessageV0>,
     ) -> Result<Self, TryInitError> {
         let backend_endpoint = tonic::transport::Endpoint::from_shared(url.clone())?;
         let connection_timeout = std::time::Duration::from_secs(5);
@@ -98,7 +100,7 @@ impl JssConnection {
         cluster_info: Arc<ClusterInfo>,
         metrics: Arc<JssConnectionMetrics>,
         is_healthy: Arc<AtomicBool>,
-        outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessage>,
+        outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessageV0>,
     ) {
         let mut last_heartbeat = std::time::Instant::now();
         let mut heartbeat_interval = interval(std::time::Duration::from_secs(5));
@@ -125,9 +127,9 @@ impl JssConnection {
                         error!("Failed to create signed heartbeat");
                         break;
                     };
-                    let _ = outbound_sender.try_send(StartSchedulerMessage {
+                    let _ = outbound_sender.try_send(v0_to_versioned_proto(StartSchedulerMessageV0 {
                         msg: Some(Msg::HeartBeat(signed_heartbeat)),
-                    });
+                    }));
                     metrics.heartbeat_sent.fetch_add(1, Relaxed);
                 }
                 _ = metrics_and_health_check_interval.tick() => {
@@ -155,12 +157,17 @@ impl JssConnection {
                         }
                     };
 
+                    let Some(VersionedMsg::V0(inbound)) = inbound.versioned_msg else {
+                        error!("Received unsupported versioned message: {:?}", inbound);
+                        break;
+                    };
+
                     match inbound {
-                        StartSchedulerResponse { resp: Some(Resp::HeartBeat(_)), .. } => {
+                        StartSchedulerResponseV0 { resp: Some(Resp::HeartBeat(_)), .. } => {
                             last_heartbeat = std::time::Instant::now();
                             metrics.heartbeat_received.fetch_add(1, Relaxed);
                         }
-                        StartSchedulerResponse { resp: Some(Resp::Bundle(bundle)), .. } => {
+                        StartSchedulerResponseV0 { resp: Some(Resp::Bundle(bundle)), .. } => {
                             let _ = bundle_sender.try_send(bundle).inspect_err(|_| {
                                 error!("Failed to send bundle to receiver");
                             });
@@ -180,7 +187,7 @@ impl JssConnection {
                             }
                             _ => {}
                         }
-                        let _ = outbound_sender.try_send(outbound).inspect_err(|_| {
+                        let _ = outbound_sender.try_send(v0_to_versioned_proto(outbound)).inspect_err(|_| {
                             error!("Failed to send outbound message");
                         });
                         metrics.outbound_sent.fetch_add(1, Relaxed);
