@@ -1,21 +1,21 @@
-/// Dependencies that are needed for the JSS (Jito Scheduler Service) to function.
+/// Dependencies that are needed for the BAM (Jito Scheduler Service) to function.
 /// All-in-one for convenience.
 use std::sync::{atomic::AtomicBool, Arc, Mutex};
 use {
     crate::proxy::block_engine_stage::BlockBuilderFeeInfo,
     jito_protos::proto::{
-        jss_api::{
+        bam_api::{
             start_scheduler_message::VersionedMsg, start_scheduler_message_v0::Msg,
             StartSchedulerMessage, StartSchedulerMessageV0,
         },
-        jss_types::{Bundle, BundleResult},
+        bam_types::{Bundle, BundleResult},
     },
     solana_gossip::cluster_info::ClusterInfo,
 };
 
 #[derive(Clone)]
-pub struct JssDependencies {
-    pub jss_enabled: Arc<AtomicBool>,
+pub struct BamDependencies {
+    pub bam_enabled: Arc<AtomicBool>,
 
     pub bundle_sender: crossbeam_channel::Sender<Bundle>,
     pub bundle_receiver: crossbeam_channel::Receiver<Bundle>,

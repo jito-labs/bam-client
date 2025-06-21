@@ -24,7 +24,7 @@ fn main() -> Result<(), std::io::Error> {
     }
 
     let proto_base_path_jds = std::path::PathBuf::from("jss-protos");
-    let proto_files = ["jss_api.proto", "jss_types.proto"];
+    let proto_files = ["bam_api.proto", "bam_types.proto"];
     for proto_file in &proto_files {
         let proto = proto_base_path_jds.join(proto_file);
         println!("cargo:rerun-if-changed={}", proto.display());

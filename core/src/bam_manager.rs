@@ -1,9 +1,9 @@
-/// Facilitates the JSS sub-system in the validator:
-/// - Tries to connect to JSS
-/// - Sends leader state to JSS
+/// Facilitates the BAM sub-system in the validator:
+/// - Tries to connect to BAM
+/// - Sends leader state to BAM
 /// - Updates TPU config
 /// - Updates block builder fee info
-/// - Sets `jss_enabled` flag that is used everywhere
+/// - Sets `bam_enabled` flag that is used everywhere
 use std::{
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     str::FromStr,
@@ -14,12 +14,12 @@ use std::{
 };
 use {
     crate::{
-        jss_connection::JssConnection, jss_dependencies::JssDependencies,
+        bam_connection::BamConnection, bam_dependencies::BamDependencies,
         proxy::block_engine_stage::BlockBuilderFeeInfo,
     },
     jito_protos::proto::{
-        jss_api::{start_scheduler_message_v0::Msg, BuilderConfigResp, StartSchedulerMessageV0},
-        jss_types::{LeaderState, Socket},
+        bam_api::{start_scheduler_message_v0::Msg, BuilderConfigResp, StartSchedulerMessageV0},
+        bam_types::{LeaderState, Socket},
     },
     solana_gossip::cluster_info::ClusterInfo,
     solana_poh::poh_recorder::PohRecorder,
@@ -27,28 +27,28 @@ use {
     solana_runtime::bank::Bank,
 };
 
-pub struct JssManager {
+pub struct BamManager {
     thread: std::thread::JoinHandle<()>,
 }
 
-impl JssManager {
+impl BamManager {
     pub fn new(
         exit: Arc<AtomicBool>,
-        jss_url: Arc<Mutex<Option<String>>>,
-        dependencies: JssDependencies,
+        bam_url: Arc<Mutex<Option<String>>>,
+        dependencies: BamDependencies,
         poh_recorder: Arc<RwLock<PohRecorder>>,
     ) -> Self {
         Self {
             thread: std::thread::spawn(move || {
-                Self::run(exit, jss_url, dependencies, poh_recorder)
+                Self::run(exit, bam_url, dependencies, poh_recorder)
             }),
         }
     }
 
     fn run(
         exit: Arc<AtomicBool>,
-        jss_url: Arc<Mutex<Option<String>>>,
-        dependencies: JssDependencies,
+        bam_url: Arc<Mutex<Option<String>>>,
+        dependencies: BamDependencies,
         poh_recorder: Arc<RwLock<PohRecorder>>,
     ) {
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -69,9 +69,9 @@ impl JssManager {
                 in_startup_grace_period = false;
             }
 
-            // Update if jss is enabled and sleep for a while before checking again
-            // While in grace period, we allow JSS to be enabled even if no connection is established
-            dependencies.jss_enabled.store(
+            // Update if bam is enabled and sleep for a while before checking again
+            // While in grace period, we allow BAM to be enabled even if no connection is established
+            dependencies.bam_enabled.store(
                 in_startup_grace_period
                     || (current_connection.is_some() && cached_builder_config.is_some()),
                 Ordering::Relaxed,
@@ -79,9 +79,9 @@ impl JssManager {
 
             // If no connection then try to create a new one
             if current_connection.is_none() {
-                let url = jss_url.lock().unwrap().clone();
+                let url = bam_url.lock().unwrap().clone();
                 if let Some(url) = url {
-                    let result = runtime.block_on(JssConnection::try_init(
+                    let result = runtime.block_on(BamConnection::try_init(
                         url,
                         poh_recorder.clone(),
                         dependencies.cluster_info.clone(),
@@ -91,12 +91,12 @@ impl JssManager {
                     match result {
                         Ok(connection) => {
                             current_connection = Some(connection);
-                            info!("JSS connection established");
+                            info!("BAM connection established");
                             // Sleep to let heartbeat come in
                             std::thread::sleep(std::time::Duration::from_secs(2));
                         }
                         Err(e) => {
-                            error!("Failed to connect to JSS: {}", e);
+                            error!("Failed to connect to BAM: {}", e);
                         }
                     }
                 }
@@ -111,16 +111,16 @@ impl JssManager {
             if !connection.is_healthy() {
                 current_connection = None;
                 cached_builder_config = None;
-                info!("JSS connection lost");
+                info!("BAM connection lost");
                 continue;
             }
 
             // Check if url changed; if yes then disconnect
-            let url = jss_url.lock().unwrap().clone();
+            let url = bam_url.lock().unwrap().clone();
             if Some(connection.url().to_string()) != url {
                 current_connection = None;
                 cached_builder_config = None;
-                info!("JSS URL changed");
+                info!("BAM URL changed");
                 continue;
             }
 

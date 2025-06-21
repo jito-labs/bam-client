@@ -26,7 +26,7 @@ use {
             },
         },
         bundle_stage::bundle_account_locker::BundleAccountLocker,
-        jss_dependencies::JssDependencies,
+        bam_dependencies::BamDependencies,
         validator::{BlockProductionMethod, TransactionStructure},
     },
     agave_banking_stage_ingress_types::BankingPacketReceiver,
@@ -59,8 +59,8 @@ use {
     },
     transaction_scheduler::{
         greedy_scheduler::{GreedyScheduler, GreedySchedulerConfig},
-        jss_receive_and_buffer::JssReceiveAndBuffer,
-        jss_scheduler::JssScheduler,
+        bam_receive_and_buffer::BamReceiveAndBuffer,
+        bam_scheduler::BamScheduler,
         prio_graph_scheduler::PrioGraphSchedulerConfig,
         receive_and_buffer::{
             ReceiveAndBuffer, SanitizedTransactionReceiveAndBuffer, TransactionViewReceiveAndBuffer,
@@ -382,7 +382,7 @@ impl BankingStage {
         // callback function for compute space reservation for BundleStage
         block_cost_limit_block_cost_limit_reservation_cb: impl Fn(&Bank) -> u64 + Clone + Send + 'static,
         tip_processing_dependencies: Option<TipProcessingDependencies>,
-        jss_dependencies: Option<JssDependencies>,
+        bam_dependencies: Option<BamDependencies>,
     ) -> Self {
         Self::new_num_threads(
             block_production_method,
@@ -404,7 +404,7 @@ impl BankingStage {
             bundle_account_locker,
             block_cost_limit_block_cost_limit_reservation_cb,
             tip_processing_dependencies,
-            jss_dependencies,
+            bam_dependencies,
         )
     }
 
@@ -429,7 +429,7 @@ impl BankingStage {
         bundle_account_locker: BundleAccountLocker,
         block_cost_limit_reservation_cb: impl Fn(&Bank) -> u64 + Clone + Send + 'static,
         tip_processing_dependencies: Option<TipProcessingDependencies>,
-        jss_dependencies: Option<JssDependencies>,
+        bam_dependencies: Option<BamDependencies>,
     ) -> Self {
         match block_production_method {
             BlockProductionMethod::CentralScheduler
@@ -458,7 +458,7 @@ impl BankingStage {
                     bundle_account_locker,
                     block_cost_limit_reservation_cb,
                     tip_processing_dependencies,
-                    jss_dependencies,
+                    bam_dependencies,
                 )
             }
         }
@@ -485,7 +485,7 @@ impl BankingStage {
         bundle_account_locker: BundleAccountLocker,
         block_cost_limit_reservation_cb: impl Fn(&Bank) -> u64 + Clone + Send + 'static,
         tip_processing_dependencies: Option<TipProcessingDependencies>,
-        jss_dependencies: Option<JssDependencies>,
+        bam_dependencies: Option<BamDependencies>,
     ) -> Self {
         assert!(num_threads >= MIN_TOTAL_THREADS);
         // Single thread to generate entries from many banks.
@@ -573,7 +573,7 @@ impl BankingStage {
                     bundle_account_locker.clone(),
                     block_cost_limit_reservation_cb.clone(),
                     tip_processing_dependencies.clone(),
-                    jss_dependencies,
+                    bam_dependencies,
                 );
             }
             TransactionStructure::View => {
@@ -599,7 +599,7 @@ impl BankingStage {
                     bundle_account_locker.clone(),
                     block_cost_limit_reservation_cb.clone(),
                     tip_processing_dependencies.clone(),
-                    jss_dependencies,
+                    bam_dependencies,
                 );
             }
         }
@@ -626,7 +626,7 @@ impl BankingStage {
         bundle_account_locker: BundleAccountLocker,
         block_cost_limit_reservation_cb: impl Fn(&Bank) -> u64 + Clone + Send + 'static,
         tip_processing_dependencies: Option<TipProcessingDependencies>,
-        jss_dependencies: Option<JssDependencies>,
+        bam_dependencies: Option<BamDependencies>,
     ) {
         // Create channels for communication between scheduler and workers
         let num_workers = (num_threads).saturating_sub(NUM_VOTE_PROCESSING_THREADS);
@@ -676,9 +676,9 @@ impl BankingStage {
         });
 
         // Spawn the central scheduler thread
-        let jss_enabled = jss_dependencies
+        let bam_enabled = bam_dependencies
             .as_ref()
-            .map(|jss| jss.jss_enabled.clone())
+            .map(|bam| bam.bam_enabled.clone())
             .unwrap_or(Arc::new(AtomicBool::new(false)));
         let scheduler_worker_senders = work_senders.clone();
         let scheduler_finished_work_receiver = finished_work_receiver.clone();
@@ -686,7 +686,7 @@ impl BankingStage {
         let scheduler_blacklisted_accounts = blacklisted_accounts.clone();
         let scheduler_bank_forks = bank_forks.clone();
         let scheduler_worker_metrics = worker_metrics.clone();
-        let scheduler_jss_enabled = jss_enabled.clone();
+        let scheduler_bam_enabled = bam_enabled.clone();
         if use_greedy_scheduler {
             bank_thread_hdls.push(
                 Builder::new()
@@ -706,7 +706,7 @@ impl BankingStage {
                             forwarder,
                             scheduler_blacklisted_accounts,
                             false,
-                            scheduler_jss_enabled,
+                            scheduler_bam_enabled,
                         );
 
                         match scheduler_controller.run() {
@@ -738,7 +738,7 @@ impl BankingStage {
                             forwarder,
                             scheduler_blacklisted_accounts,
                             false,
-                            scheduler_jss_enabled,
+                            scheduler_bam_enabled,
                         );
 
                         match scheduler_controller.run() {
@@ -753,8 +753,8 @@ impl BankingStage {
             );
         }
 
-        if let Some(jss_dependencies) = jss_dependencies {
-            // Spawn JSS workers
+        if let Some(bam_dependencies) = bam_dependencies {
+            // Spawn BAM workers
             // Create channels for communication between scheduler and workers
             let num_workers = num_threads;
             let (work_senders, work_receivers): (Vec<Sender<_>>, Vec<Receiver<_>>) =
@@ -794,21 +794,21 @@ impl BankingStage {
                 )
             }
 
-            // Spawn the JSS scheduler thread
+            // Spawn the BAM scheduler thread
             bank_thread_hdls.push(
                 Builder::new()
-                    .name("solJssSched".to_string())
+                    .name("solBamSched".to_string())
                     .spawn(move || {
                         let scheduler =
-                            JssScheduler::<RuntimeTransaction<SanitizedTransaction>>::new(
+                            BamScheduler::<RuntimeTransaction<SanitizedTransaction>>::new(
                                 work_senders,
                                 finished_work_receiver,
-                                jss_dependencies.outbound_sender.clone(),
+                                bam_dependencies.outbound_sender.clone(),
                             );
-                        let receive_and_buffer = JssReceiveAndBuffer::new(
-                            jss_dependencies.jss_enabled.clone(),
-                            jss_dependencies.bundle_receiver.clone(),
-                            jss_dependencies.outbound_sender.clone(),
+                        let receive_and_buffer = BamReceiveAndBuffer::new(
+                            bam_dependencies.bam_enabled.clone(),
+                            bam_dependencies.bundle_receiver.clone(),
+                            bam_dependencies.outbound_sender.clone(),
                             bank_forks.clone(),
                         );
 
@@ -821,7 +821,7 @@ impl BankingStage {
                             None::<Forwarder<Arc<ClusterInfo>>>,
                             blacklisted_accounts.clone(),
                             true,
-                            jss_enabled,
+                            bam_enabled,
                         );
 
                         match scheduler_controller.run() {

@@ -396,8 +396,8 @@ fn main() {
             (None, None)
         };
 
-    genesis.jss_url = Arc::new(Mutex::new(
-        matches.value_of("jss_url").map(|url| url.into()),
+    genesis.bam_url = Arc::new(Mutex::new(
+        matches.value_of("bam_url").map(|url| url.into()),
     ));
     admin_rpc_service::run(
         &ledger_path,
@@ -411,7 +411,7 @@ fn main() {
             post_init: admin_service_post_init,
             tower_storage: tower_storage.clone(),
             rpc_to_plugin_manager_sender,
-            jss_url: genesis.jss_url.clone(),
+            bam_url: genesis.bam_url.clone(),
         },
     );
     let dashboard = if output == Output::Dashboard {

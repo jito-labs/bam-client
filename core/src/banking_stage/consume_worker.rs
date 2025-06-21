@@ -9,7 +9,7 @@ use {
         },
     },
     crossbeam_channel::{Receiver, RecvError, SendError, Sender},
-    jito_protos::proto::jss_types::TransactionCommittedResult,
+    jito_protos::proto::bam_types::TransactionCommittedResult,
     solana_measure::measure_us,
     solana_poh::leader_bank_notifier::LeaderBankNotifier,
     solana_runtime::bank::Bank,

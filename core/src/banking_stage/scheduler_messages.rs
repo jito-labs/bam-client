@@ -1,5 +1,5 @@
 use {
-    jito_protos::proto::jss_types::TransactionCommittedResult,
+    jito_protos::proto::bam_types::TransactionCommittedResult,
     solana_sdk::{
         clock::{Epoch, Slot},
         transaction::TransactionError,
