@@ -30,7 +30,7 @@ use {
     jito_protos::proto::{
         bam_api::{start_scheduler_message_v0::Msg, StartSchedulerMessageV0},
         bam_types::{
-            bundle_result, not_committed::Reason, Bundle, DeserializationErrorReason, Packet,
+            atomic_txn_batch_result, not_committed::Reason, AtomicTxnBatch, DeserializationErrorReason, Packet,
             SchedulingError,
         },
     },
@@ -49,7 +49,7 @@ use {
 
 pub struct BamReceiveAndBuffer {
     bam_enabled: Arc<AtomicBool>,
-    bundle_receiver: crossbeam_channel::Receiver<Bundle>,
+    bundle_receiver: crossbeam_channel::Receiver<AtomicTxnBatch>,
     response_sender: Sender<StartSchedulerMessageV0>,
     bank_forks: Arc<RwLock<BankForks>>,
 }
@@ -57,7 +57,7 @@ pub struct BamReceiveAndBuffer {
 impl BamReceiveAndBuffer {
     pub fn new(
         bam_enabled: Arc<AtomicBool>,
-        bundle_receiver: crossbeam_channel::Receiver<Bundle>,
+        bundle_receiver: crossbeam_channel::Receiver<AtomicTxnBatch>,
         response_sender: Sender<StartSchedulerMessageV0>,
         bank_forks: Arc<RwLock<BankForks>>,
     ) -> Self {
@@ -112,10 +112,10 @@ impl BamReceiveAndBuffer {
 
     fn send_bundle_not_committed_result(&self, seq_id: u32, reason: Reason) {
         let _ = self.response_sender.try_send(StartSchedulerMessageV0 {
-            msg: Some(Msg::BundleResult(
-                jito_protos::proto::bam_types::BundleResult {
+            msg: Some(Msg::AtomicTxnBatchResult(
+                jito_protos::proto::bam_types::AtomicTxnBatchResult {
                     seq_id,
-                    result: Some(bundle_result::Result::NotCommitted(
+                    result: Some(atomic_txn_batch_result::Result::NotCommitted(
                         jito_protos::proto::bam_types::NotCommitted {
                             reason: Some(reason),
                         },
@@ -125,12 +125,12 @@ impl BamReceiveAndBuffer {
         });
     }
 
-    fn send_no_leader_slot_bundle_result(&self, seq_id: u32) {
+    fn send_no_leader_slot_txn_batch_result(&self, seq_id: u32) {
         let _ = self.response_sender.try_send(StartSchedulerMessageV0 {
-            msg: Some(Msg::BundleResult(
-                jito_protos::proto::bam_types::BundleResult {
+            msg: Some(Msg::AtomicTxnBatchResult(
+                jito_protos::proto::bam_types::AtomicTxnBatchResult {
                     seq_id,
-                    result: Some(bundle_result::Result::NotCommitted(
+                    result: Some(atomic_txn_batch_result::Result::NotCommitted(
                         jito_protos::proto::bam_types::NotCommitted {
                             reason: Some(Reason::SchedulingError(
                                 SchedulingError::OutsideLeaderSlot as i32,
@@ -142,12 +142,12 @@ impl BamReceiveAndBuffer {
         });
     }
 
-    fn send_container_full_bundle_result(&self, seq_id: u32) {
+    fn send_container_full_txn_batch_result(&self, seq_id: u32) {
         let _ = self.response_sender.try_send(StartSchedulerMessageV0 {
-            msg: Some(Msg::BundleResult(
-                jito_protos::proto::bam_types::BundleResult {
+            msg: Some(Msg::AtomicTxnBatchResult(
+                jito_protos::proto::bam_types::AtomicTxnBatchResult {
                     seq_id,
-                    result: Some(bundle_result::Result::NotCommitted(
+                    result: Some(atomic_txn_batch_result::Result::NotCommitted(
                         jito_protos::proto::bam_types::NotCommitted {
                             reason: Some(Reason::SchedulingError(
                                 SchedulingError::ContainerFull as i32,
@@ -159,11 +159,11 @@ impl BamReceiveAndBuffer {
         });
     }
 
-    fn parse_bundle(
-        bundle: &Bundle,
+    fn parse_batch(
+        batch: &AtomicTxnBatch,
         bank_forks: &Arc<RwLock<BankForks>>,
-    ) -> Result<ParsedBundle, Reason> {
-        if bundle.packets.is_empty() {
+    ) -> Result<ParsedBatch, Reason> {
+        if batch.packets.is_empty() {
             return Err(Reason::DeserializationError(
                 jito_protos::proto::bam_types::DeserializationError {
                     index: 0,
@@ -172,7 +172,7 @@ impl BamReceiveAndBuffer {
             ));
         }
 
-        if bundle.packets.len() > 5 {
+        if batch.packets.len() > 5 {
             return Err(Reason::DeserializationError(
                 jito_protos::proto::bam_types::DeserializationError {
                     index: 0,
@@ -181,7 +181,7 @@ impl BamReceiveAndBuffer {
             ));
         }
 
-        let Ok(revert_on_error) = bundle
+        let Ok(revert_on_error) = batch
             .packets
             .iter()
             .map(|p| {
@@ -201,7 +201,7 @@ impl BamReceiveAndBuffer {
         };
 
         let mut parsed_packets =
-            Self::deserialize_bam_packets(bundle.packets.iter()).map_err(|(index, err)| {
+            Self::deserialize_bam_packets(batch.packets.iter()).map_err(|(index, err)| {
                 let reason = convert_deserialize_error_to_proto(&err);
                 Reason::DeserializationError(jito_protos::proto::bam_types::DeserializationError {
                     index: index as u32,
@@ -316,9 +316,9 @@ impl BamReceiveAndBuffer {
             packets.push(Arc::new(parsed_packet));
         }
 
-        let priority = seq_id_to_priority(bundle.seq_id);
+        let priority = seq_id_to_priority(batch.seq_id);
 
-        Ok(ParsedBundle {
+        Ok(ParsedBatch {
             transaction_ttls,
             packets,
             cost,
@@ -328,7 +328,7 @@ impl BamReceiveAndBuffer {
     }
 }
 
-struct ParsedBundle {
+struct ParsedBatch {
     pub transaction_ttls: Vec<SanitizedTransactionTTL<RuntimeTransaction<SanitizedTransaction>>>,
     pub packets: Vec<Arc<ImmutableDeserializedPacket>>,
     pub cost: u64,
@@ -357,19 +357,19 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
         match decision {
             BufferedPacketsDecision::Consume(_) | BufferedPacketsDecision::Hold => {
                 while result < MAX_BUNDLES_PER_RECV {
-                    let Ok(bundle) = self.bundle_receiver.try_recv() else {
+                    let Ok(batch) = self.bundle_receiver.try_recv() else {
                         break;
                     };
-                    let ParsedBundle {
+                    let ParsedBatch {
                         transaction_ttls,
                         packets,
                         cost,
                         priority,
                         revert_on_error,
-                    } = match Self::parse_bundle(&bundle, &self.bank_forks) {
+                    } = match Self::parse_batch(&batch, &self.bank_forks) {
                         Ok(parsed) => parsed,
                         Err(reason) => {
-                            self.send_bundle_not_committed_result(bundle.seq_id, reason);
+                            self.send_bundle_not_committed_result(batch.seq_id, reason);
                             continue;
                         }
                     };
@@ -380,11 +380,11 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
                             priority,
                             cost,
                             revert_on_error,
-                            bundle.max_schedule_slot,
+                            batch.max_schedule_slot,
                         )
                         .is_none()
                     {
-                        self.send_container_full_bundle_result(bundle.seq_id);
+                        self.send_container_full_txn_batch_result(batch.seq_id);
                         continue;
                     };
 
@@ -392,10 +392,10 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
                 }
             }
             BufferedPacketsDecision::ForwardAndHold | BufferedPacketsDecision::Forward => {
-                // Send back any bundles that were received while in Forward/Hold state
+                // Send back any batches that were received while in Forward/Hold state
                 let deadline = Instant::now() + Duration::from_millis(100);
-                while let Ok(bundle) = self.bundle_receiver.recv_deadline(deadline) {
-                    self.send_no_leader_slot_bundle_result(bundle.seq_id);
+                while let Ok(batch) = self.bundle_receiver.recv_deadline(deadline) {
+                    self.send_no_leader_slot_txn_batch_result(batch.seq_id);
                 }
             }
         }
@@ -456,7 +456,7 @@ mod tests {
     }
 
     fn setup_bam_receive_and_buffer(
-        receiver: crossbeam_channel::Receiver<Bundle>,
+        receiver: crossbeam_channel::Receiver<AtomicTxnBatch>,
         bank_forks: Arc<RwLock<BankForks>>,
     ) -> (
         BamReceiveAndBuffer,
@@ -506,7 +506,7 @@ mod tests {
     #[test_case(setup_bam_receive_and_buffer; "testcase-bam")]
     fn test_receive_and_buffer_simple_transfer<R: ReceiveAndBuffer>(
         setup_receive_and_buffer: impl FnOnce(
-            Receiver<Bundle>,
+            Receiver<AtomicTxnBatch>,
             Arc<RwLock<BankForks>>,
         )
             -> (R, R::Container, Receiver<StartSchedulerMessageV0>),
@@ -525,7 +525,7 @@ mod tests {
             bank_forks.read().unwrap().root_bank().last_blockhash(),
         );
         let data = bincode::serialize(&transaction).expect("serializes");
-        let bundle = Bundle {
+        let bundle = AtomicTxnBatch {
             seq_id: 1,
             packets: vec![Packet { data, meta: None }],
             max_schedule_slot: 0,
@@ -553,7 +553,7 @@ mod tests {
             setup_bam_receive_and_buffer(receiver, bank_forks.clone());
 
         // Create an invalid packet with no data
-        let bundle = Bundle {
+        let bundle = AtomicTxnBatch {
             seq_id: 1,
             packets: vec![Packet {
                 data: vec![],
@@ -577,8 +577,8 @@ mod tests {
         let response = response_receiver.recv().unwrap();
         assert!(matches!(
             response.msg,
-            Some(Msg::BundleResult(bundle_result)) if bundle_result.seq_id == 1 &&
-            matches!(&bundle_result.result, Some(bundle_result::Result::NotCommitted(not_committed)) if
+            Some(Msg::AtomicTxnBatchResult(txn_batch_result)) if txn_batch_result.seq_id == 1 &&
+            matches!(&txn_batch_result.result, Some(atomic_txn_batch_result::Result::NotCommitted(not_committed)) if
                 matches!(not_committed.reason, Some(Reason::DeserializationError(_))))
         ));
     }
@@ -586,7 +586,7 @@ mod tests {
     #[test]
     fn test_parse_bundle_success() {
         let (bank_forks, mint_keypair) = test_bank_forks();
-        let bundle = Bundle {
+        let bundle = AtomicTxnBatch {
             seq_id: 1,
             packets: vec![Packet {
                 data: bincode::serialize(&transfer(
@@ -600,7 +600,7 @@ mod tests {
             }],
             max_schedule_slot: 0,
         };
-        let result = BamReceiveAndBuffer::parse_bundle(&bundle, &bank_forks);
+        let result = BamReceiveAndBuffer::parse_batch(&bundle, &bank_forks);
         assert!(result.is_ok());
         let parsed_bundle = result.unwrap();
         assert_eq!(parsed_bundle.packets.len(), 1);
@@ -610,12 +610,12 @@ mod tests {
     #[test]
     fn test_parse_bundle_empty() {
         let (bank_forks, _mint_keypair) = test_bank_forks();
-        let bundle = Bundle {
+        let batch = AtomicTxnBatch {
             seq_id: 1,
             packets: vec![],
             max_schedule_slot: 0,
         };
-        let result = BamReceiveAndBuffer::parse_bundle(&bundle, &bank_forks);
+        let result = BamReceiveAndBuffer::parse_batch(&batch, &bank_forks);
         assert!(result.is_err());
         assert_eq!(
             result.err().unwrap(),
@@ -629,7 +629,7 @@ mod tests {
     #[test]
     fn test_parse_bundle_invalid_packet() {
         let (bank_forks, _mint_keypair) = test_bank_forks();
-        let bundle = Bundle {
+        let batch = AtomicTxnBatch {
             seq_id: 1,
             packets: vec![Packet {
                 data: vec![0; PACKET_DATA_SIZE + 1], // Invalid size
@@ -637,7 +637,7 @@ mod tests {
             }],
             max_schedule_slot: 0,
         };
-        let result = BamReceiveAndBuffer::parse_bundle(&bundle, &bank_forks);
+        let result = BamReceiveAndBuffer::parse_batch(&batch, &bank_forks);
         assert!(result.is_err());
         assert_eq!(
             result.err().unwrap(),
@@ -652,7 +652,7 @@ mod tests {
     fn test_parse_bundle_fee_payer_doesnt_exist() {
         let (bank_forks, _) = test_bank_forks();
         let fee_payer = Keypair::new();
-        let bundle = Bundle {
+        let batch = AtomicTxnBatch {
             seq_id: 1,
             packets: vec![Packet {
                 data: bincode::serialize(&transfer(
@@ -666,7 +666,7 @@ mod tests {
             }],
             max_schedule_slot: 0,
         };
-        let result = BamReceiveAndBuffer::parse_bundle(&bundle, &bank_forks);
+        let result = BamReceiveAndBuffer::parse_batch(&batch, &bank_forks);
         assert!(result.is_err());
         assert_eq!(
             result.err().unwrap(),
@@ -681,7 +681,7 @@ mod tests {
     #[test]
     fn test_parse_bundle_inconsistent() {
         let (bank_forks, mint_keypair) = test_bank_forks();
-        let bundle = Bundle {
+        let bundle = AtomicTxnBatch {
             seq_id: 1,
             packets: vec![
                 Packet {
@@ -713,7 +713,7 @@ mod tests {
             ],
             max_schedule_slot: 0,
         };
-        let result = BamReceiveAndBuffer::parse_bundle(&bundle, &bank_forks);
+        let result = BamReceiveAndBuffer::parse_batch(&bundle, &bank_forks);
         assert!(result.is_err());
         assert_eq!(
             result.err().unwrap(),
