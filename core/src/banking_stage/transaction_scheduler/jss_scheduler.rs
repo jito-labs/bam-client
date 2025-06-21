@@ -59,6 +59,8 @@ pub struct JssScheduler<Tx: TransactionWithMeta> {
     inflight_batch_info: HashMap<TransactionBatchId, InflightBatchInfo>,
     prio_graph: SchedulerPrioGraph,
     slot: Option<Slot>,
+
+    reusable_consume_work: Vec<ConsumeWork<Tx>>,
 }
 
 // A structure to hold information about inflight batches.
@@ -85,6 +87,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
             inflight_batch_info: HashMap::default(),
             prio_graph: PrioGraph::new(passthrough_priority),
             slot: None,
+            reusable_consume_work: Vec::new(),
         }
     }
 
@@ -160,13 +163,12 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
             for (priority_ids, revert_on_error) in batches_for_scheduling {
                 let len = priority_ids.len();
                 let batch_id = self.get_next_schedule_id();
-                let txn_ids = priority_ids
-                    .iter()
-                    .filter_map(|priority_id| container.get_batch(priority_id.id))
-                    .flat_map(|(batch_ids, _, _)| batch_ids.into_iter())
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let work = Self::generate_work(batch_id, txn_ids, revert_on_error, container, slot);
+                let mut work = self.get_or_create_work_object();
+                Self::generate_work(
+                    &mut work,
+                    batch_id,
+                    &priority_ids,
+                    revert_on_error, container, slot);
                 self.send_to_worker(worker_index, priority_ids, work, slot);
                 *num_scheduled += len;
             }
@@ -245,41 +247,66 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
         result
     }
 
+    fn get_or_create_work_object(&mut self) -> ConsumeWork<Tx> {
+        if let Some(work) = self.reusable_consume_work.pop() {
+            work
+        } else {
+            // These values will be overwritten by `generate_work`
+            ConsumeWork {
+                batch_id: TransactionBatchId::new(0),
+                ids: Vec::new(),
+                transactions: Vec::new(),
+                max_ages: Vec::new(),
+                revert_on_error: false,
+                respond_with_extra_info: false,
+                schedulable_slot: None,
+            }
+        }
+    }
+
+    fn recycle_work_object(&mut self, mut work: ConsumeWork<Tx>) {
+        // Just in case, clear the work object
+        work.ids.clear();
+        work.transactions.clear();
+        work.max_ages.clear();
+        self.reusable_consume_work.push(work);
+    }
+
     fn generate_work(
+        output: &mut ConsumeWork<Tx>,
         batch_id: TransactionBatchId,
-        ids: Vec<usize>,
+        priority_ids: &[TransactionPriorityId],
         revert_on_error: bool,
         container: &mut impl StateContainer<Tx>,
         slot: Slot,
-    ) -> ConsumeWork<Tx> {
-        let transactions = ids
+    ) {
+        output.ids.clear();
+        output.ids.extend(
+        priority_ids
+                .iter()
+                .filter_map(|priority_id| container.get_batch(priority_id.id))
+                .flat_map(|(batch_ids, _, _)| batch_ids.into_iter())
+                .cloned()
+        );
+
+        output.transactions.clear();
+        output.max_ages.clear();
+        for txn in output.ids
             .iter()
             .filter_map(|txn_id| {
                 let result = container.get_mut_transaction_state(*txn_id)?;
                 let result = result.transition_to_pending();
                 Some(result)
             })
-            .collect::<Vec<_>>();
-
-        let max_ages = transactions
-            .iter()
-            .map(|txn| txn.max_age)
-            .collect::<Vec<_>>();
-
-        let transactions = transactions
-            .into_iter()
-            .map(|txn| txn.transaction)
-            .collect::<Vec<_>>();
-
-        ConsumeWork {
-            batch_id,
-            ids,
-            transactions,
-            max_ages,
-            revert_on_error,
-            respond_with_extra_info: true,
-            schedulable_slot: Some(slot),
+        {
+            output.transactions.push(txn.transaction);
+            output.max_ages.push(txn.max_age);
         }
+
+        output.batch_id = batch_id;
+        output.revert_on_error = revert_on_error;
+        output.schedulable_slot = Some(slot);
+        output.respond_with_extra_info = true;
     }
 
     fn send_no_leader_slot_bundle_result(&self, seq_id: u32) {
@@ -413,7 +440,6 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
         if bank_start.map(|bs| bs.working_bank.slot()) == self.slot {
             return;
         }
-
         if let Some(bank_start) = bank_start {
             info!(
                 "Bank boundary detected: slot changed from {:?} to {:?}",
@@ -489,11 +515,14 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
             num_transactions += result.work.ids.len();
             let batch_id = result.work.batch_id;
             let revert_on_error = result.work.revert_on_error;
+            self.recycle_work_object(result.work);
+
             let Some(inflight_batch_info) = self.inflight_batch_info.remove(&batch_id) else {
                 continue;
             };
             self.workers_scheduled_count[inflight_batch_info.worker_index] -= 1;
 
+            // Should never not be 1; but just in case
             let len = if revert_on_error {
                 1
             } else {
@@ -505,8 +534,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
                 .enumerate()
                 .take(len)
             {
-                let seq_id = priority_to_seq_id(priority_id.priority);
-
+                // If we got extra info, we can send back the result
                 if let Some(extra_info) = result.extra_info.as_ref() {
                     let bundle_result = if revert_on_error {
                         Self::generate_revert_on_error_bundle_result(&extra_info.processed_results)
@@ -520,13 +548,15 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
                         };
                         Self::generate_bundle_result(txn_result)
                     };
-                    self.send_back_result(seq_id, bundle_result);
+                    self.send_back_result(priority_to_seq_id(priority_id.priority) , bundle_result);
                 }
 
+                // If in the same slot, unblock the transaction
                 if Some(inflight_batch_info.slot) == self.slot {
                     self.prio_graph.unblock(priority_id);
                 }
 
+                // Remove the transaction from the container
                 container.remove_by_id(priority_id.id);
             }
         }
