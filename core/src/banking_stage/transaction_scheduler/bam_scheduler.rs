@@ -23,7 +23,7 @@ use {
     crossbeam_channel::{Receiver, Sender},
     jito_protos::proto::{
         bam_api::{
-            start_scheduler_message_v0::Msg, StartSchedulerMessage, StartSchedulerMessageV0,
+            start_scheduler_message_v0::Msg, StartSchedulerMessageV0,
         },
         bam_types::{bundle_result, not_committed::Reason, SchedulingError},
     },
@@ -612,11 +612,10 @@ mod tests {
         crossbeam_channel::unbounded,
         itertools::Itertools,
         jito_protos::proto::{
-            bam_api::{start_scheduler_message::Msg, StartSchedulerMessage},
-            bam_types::{
+            bam_api::{start_scheduler_message_v0::Msg, StartSchedulerMessageV0}, bam_types::{
                 bundle_result::Result::{Committed, NotCommitted},
                 TransactionCommittedResult,
-            },
+            }
         },
         solana_ledger::genesis_utils::GenesisConfigInfo,
         solana_perf::packet::Packet,
@@ -647,7 +646,7 @@ mod tests {
         finished_consume_work_sender: crossbeam_channel::Sender<
             FinishedConsumeWork<RuntimeTransaction<SanitizedTransaction>>,
         >,
-        response_receiver: crossbeam_channel::Receiver<StartSchedulerMessage>,
+        response_receiver: crossbeam_channel::Receiver<StartSchedulerMessageV0>,
     }
 
     fn create_test_scheduler(num_threads: usize) -> TestScheduler {
