@@ -492,7 +492,7 @@ mod tests {
             };
             for id in ids {
                 assert!(
-                    container.get_transaction_ttl(id).is_some(),
+                    container.get_transaction_ttl(*id).is_some(),
                     "Transaction ID {} not found in container",
                     id
                 );
