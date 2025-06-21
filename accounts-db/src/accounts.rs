@@ -674,9 +674,7 @@ impl Accounts {
             )
         });
 
-        std::iter::once(result)
-            .chain((0..len - 1).map(|_| Ok(())))
-            .collect()
+        (0..len).map(|_| result.clone()).collect()
     }
 
     /// Deduplicate the locks across all transactions in a batch; promoting read-only locks to writable
