@@ -770,7 +770,7 @@ impl BankingStage {
                 let consume_worker = ConsumeWorker::new(
                     id,
                     work_receiver,
-                    Consumer::new_with_tip_processing(
+                    Consumer::new_with_maybe_tip_processing(
                         committer.clone(),
                         poh_recorder.read().unwrap().new_recorder(),
                         QosService::new(id),
