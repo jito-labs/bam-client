@@ -164,6 +164,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
                     .iter()
                     .filter_map(|priority_id| container.get_batch(priority_id.id))
                     .flat_map(|(batch_ids, _, _)| batch_ids.into_iter())
+                    .cloned()
                     .collect::<Vec<_>>();
                 let work = Self::generate_work(batch_id, txn_ids, revert_on_error, container, slot);
                 self.send_to_worker(worker_index, priority_ids, work, slot);

@@ -12,6 +12,7 @@ use {
     itertools::{izip, MinMaxResult},
     min_max_heap::MinMaxHeap,
     slab::{Slab, VacantEntry},
+    smallvec::SmallVec,
     solana_runtime_transaction::{
         runtime_transaction::RuntimeTransaction, transaction_with_meta::TransactionWithMeta,
     },
@@ -48,7 +49,7 @@ pub(crate) struct TransactionStateContainer<Tx: TransactionWithMeta> {
     capacity: usize,
     priority_queue: MinMaxHeap<TransactionPriorityId>,
     id_to_transaction_state: Slab<BatchIdOrTransactionState<Tx>>,
-    batch_id_to_transaction_ids: HashMap<usize, Vec<TransactionId>>,
+    batch_id_to_transaction_ids: HashMap<usize, SmallVec<[TransactionId; 5]>>,
 }
 
 struct BatchInfo {
@@ -81,7 +82,7 @@ pub(crate) trait StateContainer<Tx: TransactionWithMeta> {
     fn get_transaction_ttl(&self, id: TransactionId) -> Option<&SanitizedTransactionTTL<Tx>>;
 
     /// Get the batch id and revert_on_error flag for a transaction.
-    fn get_batch(&self, id: TransactionId) -> Option<(Vec<TransactionId>, bool, u64)>;
+    fn get_batch(&self, id: TransactionId) -> Option<(&SmallVec<[TransactionId; 5]>, bool, u64)>;
 
     /// Retries a transaction - inserts transaction back into map (but not packet).
     /// This transitions the transaction to `Unprocessed` state.
@@ -157,16 +158,14 @@ impl<Tx: TransactionWithMeta> StateContainer<Tx> for TransactionStateContainer<T
             })
     }
 
-    fn get_batch(&self, id: TransactionId) -> Option<(Vec<TransactionId>, bool, u64)> {
+    fn get_batch(&self, id: TransactionId) -> Option<(&SmallVec<[TransactionId; 5]>, bool, u64)> {
         let Some(BatchIdOrTransactionState::Batch(batch_info)) =
             self.id_to_transaction_state.get(id)
         else {
             return None;
         };
-
-        let ids = self.batch_id_to_transaction_ids.get(&batch_info.batch_id)?;
         Some((
-            ids.clone(),
+            self.batch_id_to_transaction_ids.get(&batch_info.batch_id)?,
             batch_info.revert_on_error,
             batch_info.valid_for_slot,
         ))
@@ -263,7 +262,7 @@ impl<Tx: TransactionWithMeta> TransactionStateContainer<Tx> {
             valid_for_slot,
         }));
 
-        let mut transaction_ids = Vec::with_capacity(transaction_ttls.len());
+        let mut transaction_ids = SmallVec::with_capacity(transaction_ttls.len());
 
         for (transaction_ttl, packet) in izip!(transaction_ttls, packets) {
             let transaction_id = {
@@ -394,7 +393,7 @@ impl StateContainer<RuntimeTransactionView> for TransactionViewStateContainer {
     }
 
     #[inline]
-    fn get_batch(&self, _: TransactionId) -> Option<(Vec<TransactionId>, bool, u64)> {
+    fn get_batch(&self, _: TransactionId) -> Option<(&SmallVec<[TransactionId; 5]>, bool, u64)> {
         unimplemented!("get_batch not implemented for TransactionViewStateContainer");
     }
 
