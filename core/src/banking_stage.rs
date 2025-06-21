@@ -756,7 +756,7 @@ impl BankingStage {
         if let Some(jss_dependencies) = jss_dependencies {
             // Spawn JSS workers
             // Create channels for communication between scheduler and workers
-            let num_workers = (num_threads).saturating_sub(NUM_VOTE_PROCESSING_THREADS);
+            let num_workers = num_threads;
             let (work_senders, work_receivers): (Vec<Sender<_>>, Vec<Receiver<_>>) =
                 (0..num_workers).map(|_| unbounded()).unzip();
             let (finished_work_sender, finished_work_receiver) = unbounded();
