@@ -42,7 +42,7 @@ use {
     solana_svm::transaction_error_metrics::TransactionErrorMetrics,
     solana_svm_transaction::svm_message::SVMMessage,
     std::{
-        sync::{ Arc, RwLock },
+        sync::{Arc, RwLock},
         time::Instant,
     },
 };
