@@ -5,10 +5,10 @@ use {
     crate::proxy::block_engine_stage::BlockBuilderFeeInfo,
     jito_protos::proto::{
         bam_api::{
-            start_scheduler_message::VersionedMsg, start_scheduler_message_v0::Msg,
+            start_scheduler_message::VersionedMsg,
             StartSchedulerMessage, StartSchedulerMessageV0,
         },
-        bam_types::{Bundle, BundleResult},
+        bam_types::Bundle,
     },
     solana_gossip::cluster_info::ClusterInfo,
 };
