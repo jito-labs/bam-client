@@ -644,10 +644,16 @@ impl Accounts {
         additional_read_locks: Option<&HashSet<Pubkey>>,
         additional_write_locks: Option<&HashSet<Pubkey>>,
     ) -> Vec<Result<()>> {
-        if tx_account_locks_results.iter().any(|res| res.is_err()) {
+        if let Some(err) = tx_account_locks_results.iter().find_map(|res| {
+            if let Err(err) = res {
+                Some(err.clone())
+            } else {
+                None
+            }
+        }) {
             return tx_account_locks_results
                 .into_iter()
-                .map(|res| res.map(|_| ()))
+                .map(|_| Err(err.clone()))
                 .collect();
         }
 
