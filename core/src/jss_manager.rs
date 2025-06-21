@@ -137,6 +137,7 @@ impl JssManager {
                 }
             }
 
+            // Sleep for a short duration to avoid busy-waiting
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
     }
