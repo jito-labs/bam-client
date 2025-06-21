@@ -116,6 +116,21 @@ pub struct Consumer {
     tip_processing_dependencies: Option<TipProcessingDependencies>,
 
     reusable_seen_messages: Cell<AHashSet<solana_sdk::hash::Hash>>,
+    seq_not_conflict_batch_reusables: Cell<SeqNotConflictBatchReusables>,
+
+}
+
+#[derive(Default)]
+struct SeqNotConflictBatchReusables {
+    aggregate_write_locks: AHashSet<Pubkey>,
+    aggregate_read_locks: AHashSet<Pubkey>,
+}
+
+impl SeqNotConflictBatchReusables {
+    pub fn clear(&mut self) {
+        self.aggregate_write_locks.clear();
+        self.aggregate_read_locks.clear();
+    }
 }
 
 impl Consumer {
@@ -136,6 +151,7 @@ impl Consumer {
             bundle_account_locker,
             tip_processing_dependencies: None,
             reusable_seen_messages: Cell::new(AHashSet::new()),
+            seq_not_conflict_batch_reusables: Cell::new(SeqNotConflictBatchReusables::default()),
         }
     }
 
@@ -157,6 +173,7 @@ impl Consumer {
             bundle_account_locker,
             tip_processing_dependencies,
             reusable_seen_messages: Cell::new(AHashSet::new()),
+            seq_not_conflict_batch_reusables: Cell::new(SeqNotConflictBatchReusables::default()),
         }
     }
 
@@ -907,7 +924,9 @@ impl Consumer {
         let (freeze_lock, freeze_lock_us) = measure_us!(bank.freeze_lock());
         execute_and_commit_timings.freeze_lock_us = freeze_lock_us;
 
+        let mut reusables = self.seq_not_conflict_batch_reusables.take();
         let batches = Self::create_sequential_non_conflicting_batches(
+            &mut reusables,
             processed_transactions
                 .into_iter()
                 .zip(batch.sanitized_transactions().iter()),
@@ -1003,39 +1022,41 @@ impl Consumer {
     }
 
     fn create_sequential_non_conflicting_batches<'a>(
+        reusables: &mut SeqNotConflictBatchReusables,
         transactions: impl Iterator<Item = (VersionedTransaction, &'a (impl TransactionWithMeta + 'a))>,
     ) -> Vec<Vec<VersionedTransaction>> {
         let mut result = vec![];
         let mut current_batch = vec![];
-        let mut current_write_locks: AHashSet<Pubkey> = AHashSet::default();
-        let mut current_read_locks: AHashSet<Pubkey> = AHashSet::default();
+        reusables.clear();
+        let SeqNotConflictBatchReusables {
+            aggregate_write_locks,
+            aggregate_read_locks,
+        } = reusables;
 
         for (transaction, transaction_info) in transactions {
             let account_keys = transaction_info.account_keys();
             let write_account_locks = account_keys
                 .iter()
                 .enumerate()
-                .filter_map(|(index, key)| transaction_info.is_writable(index).then_some(key))
-                .collect_vec();
+                .filter_map(|(index, key)| transaction_info.is_writable(index).then_some(key));
             let read_account_locks = account_keys
                 .iter()
                 .enumerate()
-                .filter_map(|(index, key)| (!transaction_info.is_writable(index)).then_some(key))
-                .collect_vec();
+                .filter_map(|(index, key)| (!transaction_info.is_writable(index)).then_some(key));
             let has_contention = write_account_locks
-                .iter()
-                .any(|key| current_write_locks.contains(key) || current_read_locks.contains(key))
+                .clone()
+                .any(|key| aggregate_write_locks.contains(key) || aggregate_read_locks.contains(key))
                 || read_account_locks
-                    .iter()
-                    .any(|key| current_write_locks.contains(key));
+                    .clone()
+                    .any(|key| aggregate_write_locks.contains(key));
             if has_contention {
                 result.push(std::mem::take(&mut current_batch));
-                current_write_locks.clear();
-                current_read_locks.clear();
+                aggregate_write_locks.clear();
+                aggregate_read_locks.clear();
             }
             current_batch.push(transaction);
-            current_write_locks.extend(write_account_locks.iter().cloned());
-            current_read_locks.extend(read_account_locks.iter().cloned());
+            aggregate_write_locks.extend(write_account_locks.cloned());
+            aggregate_read_locks.extend(read_account_locks.cloned());
         }
 
         if !current_batch.is_empty() {
@@ -3399,7 +3420,9 @@ mod tests {
             .into_iter()
             .map(VersionedTransaction::from)
             .collect::<Vec<_>>();
+        let mut reusables = SeqNotConflictBatchReusables::default();
         let batches = Consumer::create_sequential_non_conflicting_batches(
+            &mut reusables,
             txns.into_iter().zip(txn_infos.iter()),
         );
 
