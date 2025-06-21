@@ -47,7 +47,7 @@ fn passthrough_priority(
     *id
 }
 
-const MAX_SCHEDULED_PER_WORKER: usize = 3;
+const MAX_SCHEDULED_PER_WORKER: usize = 5;
 
 pub struct JssScheduler<Tx: TransactionWithMeta> {
     workers_scheduled_count: Vec<usize>,
@@ -176,8 +176,8 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
 
     /// Get batches of transactions for scheduling.
     /// Build a normal txn batch up to a maximum of `MAX_TXN_PER_BATCH` transactions;
-    /// but if a 'revert_on_error' batch is encountered, the WIP batch is sent immediately
-    /// and the 'revert_on_error' batch is sent afterwards.
+    /// but if a 'revert_on_error' batch is encountered, the WIP batch is finalized
+    /// and the 'revert_on_error' batch is appended to the result.
     fn get_batches_for_scheduling(
         &mut self,
         container: &mut impl StateContainer<Tx>,
