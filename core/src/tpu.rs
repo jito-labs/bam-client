@@ -10,6 +10,8 @@ pub use solana_sdk::net::DEFAULT_TPU_COALESCE;
 pub use solana_streamer::quic::DEFAULT_MAX_QUIC_CONNECTIONS_PER_PEER as MAX_QUIC_CONNECTIONS_PER_PEER;
 use {
     crate::{
+        bam_dependencies::BamDependencies,
+        bam_manager::BamManager,
         banking_stage::{consumer::TipProcessingDependencies, BankingStage},
         banking_trace::{Channels, TracerThread},
         bundle_stage::{bundle_account_locker::BundleAccountLocker, BundleStage},
@@ -18,8 +20,6 @@ use {
             VerifiedVoteSender, VoteTracker,
         },
         fetch_stage::FetchStage,
-        jss_dependencies::JssDependencies,
-        jss_manager::JssManager,
         proxy::{
             block_engine_stage::{BlockBuilderFeeInfo, BlockEngineConfig, BlockEngineStage},
             fetch_stage_manager::FetchStageManager,
@@ -113,7 +113,7 @@ pub struct Tpu {
     block_engine_stage: BlockEngineStage,
     fetch_stage_manager: FetchStageManager,
     bundle_stage: BundleStage,
-    jss_manager: JssManager,
+    bam_manager: BamManager,
 }
 
 impl Tpu {
@@ -162,7 +162,7 @@ impl Tpu {
         tip_manager_config: TipManagerConfig,
         shred_receiver_address: Arc<RwLock<Option<SocketAddr>>>,
         preallocated_bundle_cost: u64,
-        jss_url: Arc<Mutex<Option<String>>>,
+        bam_url: Arc<Mutex<Option<String>>>,
     ) -> (Self, Vec<Arc<dyn NotifyKeyUpdate + Sync + Send>>) {
         let TpuSockets {
             transactions: transactions_sockets,
@@ -284,7 +284,8 @@ impl Tpu {
             block_builder_commission: 0,
         }));
 
-        let jss_enabled = Arc::new(AtomicBool::new(false));
+        // Will be set to false by BAMManager if BAM cannot be connected to
+        let bam_enabled = Arc::new(AtomicBool::new(true));
 
         let (bundle_sender, bundle_receiver) = unbounded();
         let block_engine_stage = BlockEngineStage::new(
@@ -295,7 +296,7 @@ impl Tpu {
             non_vote_sender.clone(),
             exit.clone(),
             &block_builder_fee_info,
-            jss_enabled.clone(),
+            bam_enabled.clone(),
         );
 
         let (heartbeat_tx, heartbeat_rx) = unbounded();
@@ -305,7 +306,7 @@ impl Tpu {
             packet_intercept_receiver,
             packet_sender.clone(),
             exit.clone(),
-            jss_enabled.clone(),
+            bam_enabled.clone(),
         );
 
         let relayer_stage = RelayerStage::new(
@@ -346,14 +347,14 @@ impl Tpu {
             .saturating_mul(8)
             .saturating_div(10);
 
-        let (jss_bundle_sender, jss_bundle_receiver) = bounded(100_000);
-        let (jss_outbound_sender, jss_outbound_receiver) = bounded(100_000);
-        let jss_dependencies = JssDependencies {
-            jss_enabled: jss_enabled.clone(),
-            bundle_sender: jss_bundle_sender,
-            bundle_receiver: jss_bundle_receiver,
-            outbound_sender: jss_outbound_sender,
-            outbound_receiver: jss_outbound_receiver,
+        let (bam_batch_sender, bam_batch_receiver) = bounded(100_000);
+        let (bam_outbound_sender, bam_outbound_receiver) = bounded(100_000);
+        let bam_dependencies = BamDependencies {
+            bam_enabled: bam_enabled.clone(),
+            batch_sender: bam_batch_sender,
+            batch_receiver: bam_batch_receiver,
+            outbound_sender: bam_outbound_sender,
+            outbound_receiver: bam_outbound_receiver,
             cluster_info: cluster_info.clone(),
             block_builder_fee_info: Arc::new(Mutex::new(BlockBuilderFeeInfo::default())),
         };
@@ -387,10 +388,10 @@ impl Tpu {
             Some(TipProcessingDependencies {
                 tip_manager: tip_manager.clone(),
                 last_tip_updated_slot: Arc::new(Mutex::new(0)),
-                block_builder_fee_info: jss_dependencies.block_builder_fee_info.clone(),
+                block_builder_fee_info: bam_dependencies.block_builder_fee_info.clone(),
                 cluster_info: cluster_info.clone(),
             }),
-            Some(jss_dependencies.clone()),
+            Some(bam_dependencies.clone()),
         );
 
         let bundle_stage = BundleStage::new(
@@ -407,10 +408,10 @@ impl Tpu {
             prioritization_fee_cache,
         );
 
-        let jss_manager = JssManager::new(
+        let bam_manager = BamManager::new(
             exit.clone(),
-            jss_url,
-            jss_dependencies,
+            bam_url,
+            bam_dependencies,
             poh_recorder.clone(),
         );
 
@@ -459,7 +460,7 @@ impl Tpu {
                 relayer_stage,
                 fetch_stage_manager,
                 bundle_stage,
-                jss_manager,
+                bam_manager,
             },
             vec![key_updater, forwards_key_updater, vote_streamer_key_updater],
         )
@@ -480,7 +481,7 @@ impl Tpu {
             self.relayer_stage.join(),
             self.block_engine_stage.join(),
             self.fetch_stage_manager.join(),
-            self.jss_manager.join(),
+            self.bam_manager.join(),
         ];
         let broadcast_result = self.broadcast_stage.join();
         for result in results {

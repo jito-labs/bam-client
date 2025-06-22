@@ -48,6 +48,7 @@ use {
     },
     solana_transaction_status::PreBalanceInfo,
     std::{
+        cell::Cell,
         collections::HashSet,
         num::Saturating,
         sync::{atomic::Ordering, Arc, Mutex},
@@ -113,6 +114,22 @@ pub struct Consumer {
     bundle_account_locker: BundleAccountLocker,
 
     tip_processing_dependencies: Option<TipProcessingDependencies>,
+
+    reusable_seen_messages: Cell<AHashSet<solana_sdk::hash::Hash>>,
+    seq_not_conflict_batch_reusables: Cell<SeqNotConflictBatchReusables>,
+}
+
+#[derive(Default)]
+struct SeqNotConflictBatchReusables {
+    aggregate_write_locks: AHashSet<Pubkey>,
+    aggregate_read_locks: AHashSet<Pubkey>,
+}
+
+impl SeqNotConflictBatchReusables {
+    pub fn clear(&mut self) {
+        self.aggregate_write_locks.clear();
+        self.aggregate_read_locks.clear();
+    }
 }
 
 impl Consumer {
@@ -132,10 +149,12 @@ impl Consumer {
             blacklisted_accounts,
             bundle_account_locker,
             tip_processing_dependencies: None,
+            reusable_seen_messages: Cell::new(AHashSet::new()),
+            seq_not_conflict_batch_reusables: Cell::new(SeqNotConflictBatchReusables::default()),
         }
     }
 
-    pub fn new_with_tip_processing(
+    pub fn new_with_maybe_tip_processing(
         committer: Committer,
         transaction_recorder: TransactionRecorder,
         qos_service: QosService,
@@ -152,6 +171,8 @@ impl Consumer {
             blacklisted_accounts,
             bundle_account_locker,
             tip_processing_dependencies,
+            reusable_seen_messages: Cell::new(AHashSet::new()),
+            seq_not_conflict_batch_reusables: Cell::new(SeqNotConflictBatchReusables::default()),
         }
     }
 
@@ -374,6 +395,10 @@ impl Consumer {
             // Update tip account receivers if needed
             if !self.run_tip_programs_if_needed(bank, txs, &reservation_cb) {
                 error!("Error running tip programs for transactions: {:?}", txs);
+                datapoint_error!(
+                    "process_transactions_error",
+                    ("error", "tip_programs_error", String),
+                );
             }
 
             let process_transaction_batch_output = self.process_and_record_transactions(
@@ -642,17 +667,15 @@ impl Consumer {
         revert_on_error: bool,
     ) -> ProcessTransactionBatchOutput {
         // Check for duplicate transactions
-        let mut seen_messages = AHashSet::new();
+        let mut seen_messages = self.reusable_seen_messages.take();
+        seen_messages.clear();
         let pre_results = txs.iter().zip(pre_results).map(|(tx, result)| {
-            if let Err(err) = result {
-                return Err(err);
-            }
-            if !seen_messages.insert(tx.message_hash()) {
+            result?;
+            if !seen_messages.insert(*tx.message_hash()) {
                 return Err(TransactionError::AlreadyProcessed);
             }
             Ok(())
         });
-
         let (
             (transaction_qos_cost_results, cost_model_throttled_transactions_count),
             cost_model_us,
@@ -662,6 +685,7 @@ impl Consumer {
             pre_results,
             reservation_cb
         ));
+        self.reusable_seen_messages.set(seen_messages);
 
         // Only lock accounts for those transactions are selected for the block;
         // Once accounts are locked, other threads cannot encode transactions that will modify the
@@ -907,7 +931,9 @@ impl Consumer {
         let (freeze_lock, freeze_lock_us) = measure_us!(bank.freeze_lock());
         execute_and_commit_timings.freeze_lock_us = freeze_lock_us;
 
+        let mut reusables = self.seq_not_conflict_batch_reusables.take();
         let batches = Self::create_sequential_non_conflicting_batches(
+            &mut reusables,
             processed_transactions
                 .into_iter()
                 .zip(batch.sanitized_transactions().iter()),
@@ -999,39 +1025,40 @@ impl Consumer {
     }
 
     fn create_sequential_non_conflicting_batches<'a>(
+        reusables: &mut SeqNotConflictBatchReusables,
         transactions: impl Iterator<Item = (VersionedTransaction, &'a (impl TransactionWithMeta + 'a))>,
     ) -> Vec<Vec<VersionedTransaction>> {
         let mut result = vec![];
         let mut current_batch = vec![];
-        let mut current_write_locks: AHashSet<Pubkey> = AHashSet::default();
-        let mut current_read_locks: AHashSet<Pubkey> = AHashSet::default();
+        reusables.clear();
+        let SeqNotConflictBatchReusables {
+            aggregate_write_locks,
+            aggregate_read_locks,
+        } = reusables;
 
         for (transaction, transaction_info) in transactions {
             let account_keys = transaction_info.account_keys();
             let write_account_locks = account_keys
                 .iter()
                 .enumerate()
-                .filter_map(|(index, key)| transaction_info.is_writable(index).then_some(key))
-                .collect_vec();
+                .filter_map(|(index, key)| transaction_info.is_writable(index).then_some(key));
             let read_account_locks = account_keys
                 .iter()
                 .enumerate()
-                .filter_map(|(index, key)| (!transaction_info.is_writable(index)).then_some(key))
-                .collect_vec();
-            let has_contention = write_account_locks
-                .iter()
-                .any(|key| current_write_locks.contains(key) || current_read_locks.contains(key))
-                || read_account_locks
-                    .iter()
-                    .any(|key| current_write_locks.contains(key));
+                .filter_map(|(index, key)| (!transaction_info.is_writable(index)).then_some(key));
+            let has_contention = write_account_locks.clone().any(|key| {
+                aggregate_write_locks.contains(key) || aggregate_read_locks.contains(key)
+            }) || read_account_locks
+                .clone()
+                .any(|key| aggregate_write_locks.contains(key));
             if has_contention {
                 result.push(std::mem::take(&mut current_batch));
-                current_write_locks.clear();
-                current_read_locks.clear();
+                aggregate_write_locks.clear();
+                aggregate_read_locks.clear();
             }
             current_batch.push(transaction);
-            current_write_locks.extend(write_account_locks.iter().cloned());
-            current_read_locks.extend(read_account_locks.iter().cloned());
+            aggregate_write_locks.extend(write_account_locks.cloned());
+            aggregate_read_locks.extend(read_account_locks.cloned());
         }
 
         if !current_batch.is_empty() {
@@ -1244,7 +1271,7 @@ mod tests {
             replay_vote_sender,
             Arc::new(PrioritizationFeeCache::new(0u64)),
         );
-        let consumer = Consumer::new_with_tip_processing(
+        let consumer = Consumer::new_with_maybe_tip_processing(
             committer,
             recorder,
             QosService::new(1),
@@ -2081,15 +2108,16 @@ mod tests {
         // InstructionError::InsufficientFunds that is then committed. Needs to be
         // MAX_NUM_TRANSACTIONS_PER_BATCH at least so it doesn't conflict on account locks
         // with the below transaction
-        let mut transactions = vec![
-            system_transaction::transfer(
-                &mint_keypair,
-                &Pubkey::new_unique(),
-                lamports + 1,
-                genesis_config.hash(),
-            );
-            TARGET_NUM_TRANSACTIONS_PER_BATCH
-        ];
+        let mut transactions = (0..TARGET_NUM_TRANSACTIONS_PER_BATCH)
+            .map(|_| {
+                system_transaction::transfer(
+                    &mint_keypair,
+                    &Pubkey::new_unique(),
+                    lamports + 1,
+                    genesis_config.hash(),
+                )
+            })
+            .collect_vec();
 
         // Make one transaction that will succeed.
         transactions.push(system_transaction::transfer(
@@ -2144,15 +2172,16 @@ mod tests {
             .set_limits(u64::MAX, u64::MAX, u64::MAX);
 
         // Make all repetitive transactions that conflict on the `mint_keypair`, so only 1 should be executed
-        let mut transactions = vec![
-            system_transaction::transfer(
-                &mint_keypair,
-                &Pubkey::new_unique(),
-                1,
-                genesis_config.hash()
-            );
-            TARGET_NUM_TRANSACTIONS_PER_BATCH
-        ];
+        let mut transactions = (0..TARGET_NUM_TRANSACTIONS_PER_BATCH)
+            .map(|_| {
+                system_transaction::transfer(
+                    &mint_keypair,
+                    &Pubkey::new_unique(),
+                    1,
+                    genesis_config.hash(),
+                )
+            })
+            .collect_vec();
 
         // Make one more in separate batch that also conflicts, but because it's in a separate batch, it
         // should be executed
@@ -3296,7 +3325,7 @@ mod tests {
             Arc::new(PrioritizationFeeCache::new(0u64)),
         );
         let recorder = poh_recorder.read().unwrap().new_recorder();
-        let consumer = Consumer::new_with_tip_processing(
+        let consumer = Consumer::new_with_maybe_tip_processing(
             committer,
             recorder,
             QosService::new(1),
@@ -3395,7 +3424,9 @@ mod tests {
             .into_iter()
             .map(VersionedTransaction::from)
             .collect::<Vec<_>>();
+        let mut reusables = SeqNotConflictBatchReusables::default();
         let batches = Consumer::create_sequential_non_conflicting_batches(
+            &mut reusables,
             txns.into_iter().zip(txn_infos.iter()),
         );
 

@@ -1,17 +1,17 @@
-// Maintains a connection to the JSS Node and handles sending and receiving messages
+// Maintains a connection to the BAM Node and handles sending and receiving messages
 // Keeps track of last received heartbeat 'behind the scenes' and will mark itself as unhealthy if no heartbeat is received
 
 use {
+    crate::bam_dependencies::v0_to_versioned_proto,
     futures::{channel::mpsc, StreamExt},
     jito_protos::proto::{
-        jss_api::{
-            jss_node_api_client::JssNodeApiClient, start_scheduler_message::Msg,
-            start_scheduler_response::Resp, BuilderConfigResp, GetBuilderConfigRequest,
-            StartSchedulerMessage, StartSchedulerResponse,
+        bam_api::{
+            bam_node_api_client::BamNodeApiClient, start_scheduler_message_v0::Msg,
+            start_scheduler_response::VersionedMsg, start_scheduler_response_v0::Resp,
+            BuilderConfigResp, GetBuilderConfigRequest, StartSchedulerMessage,
+            StartSchedulerMessageV0, StartSchedulerResponse, StartSchedulerResponseV0,
         },
-        jss_types::{
-            Bundle, FeeCollectionRequest, FeeCollectionResponse, Meta, Packet, ValidatorHeartBeat,
-        },
+        bam_types::{AtomicTxnBatch, ValidatorHeartBeat, FeeCollectionRequest, FeeCollectionResponse, Packet, Meta},
     },
     solana_gossip::cluster_info::ClusterInfo,
     solana_poh::poh_recorder::PohRecorder,
@@ -31,7 +31,7 @@ use {
     tokio::time::{interval, timeout},
 };
 
-pub struct JssConnection {
+pub struct BamConnection {
     builder_config: Arc<Mutex<Option<BuilderConfigResp>>>,
     background_task: tokio::task::JoinHandle<()>,
     is_healthy: Arc<AtomicBool>,
@@ -39,21 +39,21 @@ pub struct JssConnection {
     exit: Arc<AtomicBool>,
 }
 
-impl JssConnection {
-    /// Try to initialize a connection to the JSS Node; if it is not possible to connect, it will return an error.
+impl BamConnection {
+    /// Try to initialize a connection to the BAM Node; if it is not possible to connect, it will return an error.
     pub async fn try_init(
         url: String,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         cluster_info: Arc<ClusterInfo>,
-        bundle_sender: crossbeam_channel::Sender<Bundle>,
-        outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessage>,
+        batch_sender: crossbeam_channel::Sender<AtomicTxnBatch>,
+        outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessageV0>,
     ) -> Result<Self, TryInitError> {
         let backend_endpoint = tonic::transport::Endpoint::from_shared(url.clone())?;
         let connection_timeout = std::time::Duration::from_secs(5);
 
         let channel = timeout(connection_timeout, backend_endpoint.connect()).await??;
 
-        let mut validator_client = JssNodeApiClient::new(channel);
+        let mut validator_client = BamNodeApiClient::new(channel);
 
         let (outbound_sender, outbound_receiver_internal) = mpsc::channel(100_000);
         let outbound_stream =
@@ -67,7 +67,7 @@ impl JssConnection {
             })?
             .into_inner();
 
-        let metrics = Arc::new(JssConnectionMetrics::default());
+        let metrics = Arc::new(BamConnectionMetrics::default());
         let is_healthy = Arc::new(AtomicBool::new(true));
         let builder_config = Arc::new(Mutex::new(None));
 
@@ -78,7 +78,7 @@ impl JssConnection {
             outbound_sender,
             validator_client,
             builder_config.clone(),
-            bundle_sender,
+            batch_sender,
             poh_recorder,
             cluster_info,
             metrics.clone(),
@@ -100,14 +100,14 @@ impl JssConnection {
         exit: Arc<AtomicBool>,
         mut inbound_stream: tonic::Streaming<StartSchedulerResponse>,
         mut outbound_sender: mpsc::Sender<StartSchedulerMessage>,
-        validator_client: JssNodeApiClient<tonic::transport::channel::Channel>,
+        validator_client: BamNodeApiClient<tonic::transport::channel::Channel>,
         builder_config: Arc<Mutex<Option<BuilderConfigResp>>>,
-        bundle_sender: crossbeam_channel::Sender<Bundle>,
+        batch_sender: crossbeam_channel::Sender<AtomicTxnBatch>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         cluster_info: Arc<ClusterInfo>,
-        metrics: Arc<JssConnectionMetrics>,
+        metrics: Arc<BamConnectionMetrics>,
         is_healthy: Arc<AtomicBool>,
-        outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessage>,
+        outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessageV0>,
     ) {
         let mut last_heartbeat = std::time::Instant::now();
         let mut heartbeat_interval = interval(std::time::Duration::from_secs(5));
@@ -134,9 +134,9 @@ impl JssConnection {
                         error!("Failed to create signed heartbeat");
                         break;
                     };
-                    let _ = outbound_sender.try_send(StartSchedulerMessage {
+                    let _ = outbound_sender.try_send(v0_to_versioned_proto(StartSchedulerMessageV0 {
                         msg: Some(Msg::HeartBeat(signed_heartbeat)),
-                    });
+                    }));
                     metrics.heartbeat_sent.fetch_add(1, Relaxed);
                 }
                 _ = metrics_and_health_check_interval.tick() => {
@@ -164,18 +164,23 @@ impl JssConnection {
                         }
                     };
 
+                    let Some(VersionedMsg::V0(inbound)) = inbound.versioned_msg else {
+                        error!("Received unsupported versioned message: {:?}", inbound);
+                        break;
+                    };
+
                     match inbound {
-                        StartSchedulerResponse { resp: Some(Resp::HeartBeat(_)), .. } => {
+                        StartSchedulerResponseV0 { resp: Some(Resp::HeartBeat(_)), .. } => {
                             last_heartbeat = std::time::Instant::now();
                             metrics.heartbeat_received.fetch_add(1, Relaxed);
                         }
-                        StartSchedulerResponse { resp: Some(Resp::Bundle(bundle)), .. } => {
-                            let _ = bundle_sender.try_send(bundle).inspect_err(|_| {
+                        StartSchedulerResponseV0 { resp: Some(Resp::AtomicTxnBatch(batch)), .. } => {
+                            let _ = batch_sender.try_send(batch).inspect_err(|_| {
                                 error!("Failed to send bundle to receiver");
                             });
                             metrics.bundle_received.fetch_add(1, Relaxed);
                         }
-                        StartSchedulerResponse { resp: Some(Resp::FeeCollectionRequest(fee_collection_request)), .. } => {
+                        StartSchedulerResponseV0 { resp: Some(Resp::FeeCollectionRequest(fee_collection_request)), .. } => {
                             Self::handle_fee_collection_request(
                                 fee_collection_request,
                                 &mut outbound_sender,
@@ -193,12 +198,12 @@ impl JssConnection {
                             Some(Msg::LeaderState(_)) => {
                                 metrics.leaderstate_sent.fetch_add(1, Relaxed);
                             }
-                            Some(Msg::BundleResult(_)) => {
+                            Some(Msg::AtomicTxnBatchResult(_)) => {
                                 metrics.bundleresult_sent.fetch_add(1, Relaxed);
                             }
                             _ => {}
                         }
-                        let _ = outbound_sender.try_send(outbound).inspect_err(|_| {
+                        let _ = outbound_sender.try_send(v0_to_versioned_proto(outbound)).inspect_err(|_| {
                             error!("Failed to send outbound message");
                         });
                         metrics.outbound_sent.fetch_add(1, Relaxed);
@@ -213,8 +218,8 @@ impl JssConnection {
     async fn refresh_builder_config_task(
         exit: Arc<AtomicBool>,
         builder_config: Arc<Mutex<Option<BuilderConfigResp>>>,
-        mut validator_client: JssNodeApiClient<tonic::transport::channel::Channel>,
-        metrics: Arc<JssConnectionMetrics>,
+        mut validator_client: BamNodeApiClient<tonic::transport::channel::Channel>,
+        metrics: Arc<BamConnectionMetrics>,
     ) {
         let mut interval = interval(std::time::Duration::from_secs(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -262,7 +267,7 @@ impl JssConnection {
         outbound_sender: &mut mpsc::Sender<StartSchedulerMessage>,
         poh_recorder: &RwLock<PohRecorder>,
         cluster_info: &ClusterInfo,
-        metrics: &Arc<JssConnectionMetrics>,
+        metrics: &Arc<BamConnectionMetrics>,
     ) {
         // Update metrics
         metrics
@@ -304,13 +309,13 @@ impl JssConnection {
 
         // Send the transaction to the JSS Node
         let packet = Self::jss_packet_from_versioned_tx(&versioned_tx);
-        let msg = StartSchedulerMessage {
+        let msg = StartSchedulerMessageV0 {
             msg: Some(Msg::FeeCollectionResponse(FeeCollectionResponse {
                 slot,
                 packet: Some(packet),
             })),
         };
-        if let Err(e) = outbound_sender.try_send(msg) {
+        if let Err(e) = outbound_sender.try_send(v0_to_versioned_proto(msg)) {
             error!("Failed to send fee collection response: {:?}", e);
         } else {
             metrics
@@ -346,7 +351,7 @@ impl JssConnection {
     }
 }
 
-impl Drop for JssConnection {
+impl Drop for BamConnection {
     fn drop(&mut self) {
         self.is_healthy.store(false, Relaxed);
         self.exit.store(true, Relaxed);
@@ -356,7 +361,7 @@ impl Drop for JssConnection {
 }
 
 #[derive(Default)]
-struct JssConnectionMetrics {
+struct BamConnectionMetrics {
     bundle_received: AtomicU64,
     heartbeat_received: AtomicU64,
     builder_config_received: AtomicU64,
@@ -370,10 +375,10 @@ struct JssConnectionMetrics {
     outbound_sent: AtomicU64,
 }
 
-impl JssConnectionMetrics {
+impl BamConnectionMetrics {
     pub fn report(&self) {
         datapoint_info!(
-            "jss_connection-metrics",
+            "bam_connection-metrics",
             (
                 "bundle_received",
                 self.bundle_received.swap(0, Relaxed) as i64,

@@ -65,10 +65,10 @@ where
     forwarder: Option<Forwarder<C>>,
     /// Blacklisted accounts
     blacklisted_accounts: HashSet<Pubkey>,
-    /// This is the JSS controller.
-    jss_controller: bool,
-    /// Whether JSS is enabled.
-    jss_enabled: Arc<AtomicBool>,
+    /// This is the BAM controller.
+    bam_controller: bool,
+    /// Whether BAM is enabled.
+    bam_enabled: Arc<AtomicBool>,
 }
 
 impl<C, R, S> SchedulerController<C, R, S>
@@ -85,8 +85,8 @@ where
         worker_metrics: Vec<Arc<ConsumeWorkerMetrics>>,
         forwarder: Option<Forwarder<C>>,
         blacklisted_accounts: HashSet<Pubkey>,
-        jss_controller: bool,
-        jss_enabled: Arc<AtomicBool>,
+        bam_controller: bool,
+        bam_enabled: Arc<AtomicBool>,
     ) -> Self {
         Self {
             decision_maker,
@@ -100,8 +100,8 @@ where
             worker_metrics,
             forwarder,
             blacklisted_accounts,
-            jss_controller,
-            jss_enabled,
+            bam_controller,
+            bam_enabled,
         }
     }
 
@@ -362,7 +362,7 @@ where
     /// Clears the transaction state container.
     /// This only clears pending transactions, and does **not** clear in-flight transactions.
     fn clear_container(&mut self) {
-        if self.jss_controller {
+        if self.bam_controller {
             return;
         }
 
@@ -381,7 +381,7 @@ where
     /// expired, already processed, or are no longer sanitizable.
     /// This only clears pending transactions, and does **not** clear in-flight transactions.
     fn clean_queue(&mut self) {
-        if self.jss_controller {
+        if self.bam_controller {
             return;
         }
 
@@ -488,7 +488,7 @@ where
     }
 
     fn scheduling_enabled(&self) -> bool {
-        self.jss_controller == self.jss_enabled.load(std::sync::atomic::Ordering::Relaxed)
+        self.bam_controller == self.bam_enabled.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -556,7 +556,6 @@ mod tests {
             PacketDeserializer::new(receiver),
             bank_forks,
             false,
-            Arc::new(AtomicBool::new(false)),
         )
     }
 
@@ -567,7 +566,6 @@ mod tests {
         TransactionViewReceiveAndBuffer {
             receiver,
             bank_forks,
-            jss_enabled: Arc::new(AtomicBool::new(false)),
         }
     }
 

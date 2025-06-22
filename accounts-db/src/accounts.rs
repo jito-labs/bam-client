@@ -25,6 +25,7 @@ use {
     },
     solana_transaction_context::TransactionAccount,
     std::{
+        cell::RefCell,
         cmp::Reverse,
         collections::{BinaryHeap, HashMap, HashSet},
         ops::RangeBounds,
@@ -34,6 +35,11 @@ use {
         },
     },
 };
+
+thread_local! {
+    /// Reusable deduped locks for batched account locking.
+    static REUSABLE_DEDUPED_LOCKS: RefCell<HashMap<Pubkey, bool>> = RefCell::new(HashMap::new());
+}
 
 pub type PubkeyAccountSlot = (Pubkey, AccountSharedData, Slot);
 
@@ -638,40 +644,47 @@ impl Accounts {
         additional_read_locks: Option<&HashSet<Pubkey>>,
         additional_write_locks: Option<&HashSet<Pubkey>>,
     ) -> Vec<Result<()>> {
-        if tx_account_locks_results.iter().any(|res| res.is_err()) {
+        if let Some(err) = tx_account_locks_results.iter().find_map(|res| {
+            if let Err(err) = res {
+                Some(err.clone())
+            } else {
+                None
+            }
+        }) {
             return tx_account_locks_results
                 .into_iter()
-                .map(|res| res.map(|_| ()))
+                .map(|_| Err(err.clone()))
                 .collect();
         }
 
         let len = tx_account_locks_results.len();
-        let deduped_locks = Self::get_deduped_batch_locks(
-            tx_account_locks_results.into_iter().map(|res| res.unwrap()),
-        );
+        let result = REUSABLE_DEDUPED_LOCKS.with_borrow_mut(|deduped_locks| {
+            deduped_locks.clear();
+            Self::get_deduped_batch_locks(
+                deduped_locks,
+                tx_account_locks_results.into_iter().map(|res| res.unwrap()),
+            );
+            let account_locks = &mut self.account_locks.lock().unwrap();
+            account_locks.try_lock_accounts(
+                deduped_locks
+                    .iter()
+                    .map(|(pubkey, is_writable)| (pubkey, *is_writable)),
+                additional_read_locks,
+                additional_write_locks,
+            )
+        });
 
-        let account_locks = &mut self.account_locks.lock().unwrap();
-        let result = account_locks.try_lock_accounts(
-            deduped_locks
-                .iter()
-                .map(|(pubkey, is_writable)| (pubkey, *is_writable)),
-            additional_read_locks,
-            additional_write_locks,
-        );
-
-        std::iter::once(result)
-            .chain((0..len - 1).map(|_| Ok(())))
-            .collect()
+        (0..len).map(|_| result.clone()).collect()
     }
 
     /// Deduplicate the locks across all transactions in a batch; promoting read-only locks to writable
     /// if a writable lock exists for the same pubkey.
     fn get_deduped_batch_locks<'a>(
+        deduped_locks: &mut HashMap<Pubkey, bool>,
         tx_account_locks: impl Iterator<
             Item = TransactionAccountLocksIterator<'a, impl SVMMessage + 'a>,
         >,
-    ) -> Vec<(Pubkey, bool)> {
-        let mut deduped_locks = HashMap::new();
+    ) {
         for tx_account_locks in tx_account_locks {
             for (pubkey, is_writable) in tx_account_locks.accounts_with_is_writable() {
                 if let Some(existing) = deduped_locks.get(pubkey) {
@@ -682,8 +695,6 @@ impl Accounts {
                 deduped_locks.insert(*pubkey, is_writable);
             }
         }
-        // Convert the HashMap to a Vec
-        deduped_locks.into_iter().collect()
     }
 
     /// Once accounts are unlocked, new transactions that modify that state can enter the pipeline
@@ -697,17 +708,21 @@ impl Accounts {
         }
 
         if batched {
-            let deduped_locks = Self::get_deduped_batch_locks(
-                txs_and_results
-                    .clone()
-                    .map(|(tx, _)| TransactionAccountLocksIterator::new(tx)),
-            );
-            let mut account_locks = self.account_locks.lock().unwrap();
-            account_locks.unlock_accounts(
-                deduped_locks
-                    .iter()
-                    .map(|(pubkey, is_writable)| (pubkey, *is_writable)),
-            );
+            REUSABLE_DEDUPED_LOCKS.with_borrow_mut(|deduped_locks| {
+                deduped_locks.clear();
+                Self::get_deduped_batch_locks(
+                    deduped_locks,
+                    txs_and_results
+                        .clone()
+                        .map(|(tx, _)| TransactionAccountLocksIterator::new(tx)),
+                );
+                let mut account_locks = self.account_locks.lock().unwrap();
+                account_locks.unlock_accounts(
+                    deduped_locks
+                        .iter()
+                        .map(|(pubkey, is_writable)| (pubkey, *is_writable)),
+                );
+            });
             return;
         }
 

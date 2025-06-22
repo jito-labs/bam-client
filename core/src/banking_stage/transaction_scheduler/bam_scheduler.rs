@@ -1,11 +1,10 @@
 /// A Scheduled implementation that pulls batches off the container, and then
 /// schedules them to workers in a FIFO, account-aware manner. This is facilitated by the
 /// `PrioGraph` data structure, which is a directed graph that tracks the dependencies.
-/// Currently a very simple implementation that probably under pipelines the workers.
 use std::time::Instant;
 use {
     super::{
-        jss_receive_and_buffer::priority_to_seq_id,
+        bam_receive_and_buffer::priority_to_seq_id,
         scheduler::{Scheduler, SchedulingSummary},
         scheduler_error::SchedulerError,
         transaction_priority_id::TransactionPriorityId,
@@ -18,13 +17,13 @@ use {
             ConsumeWork, FinishedConsumeWork, NotCommittedReason, TransactionBatchId,
             TransactionResult,
         },
-        transaction_scheduler::jss_utils::convert_txn_error_to_proto,
+        transaction_scheduler::bam_utils::convert_txn_error_to_proto,
     },
     ahash::HashMap,
     crossbeam_channel::{Receiver, Sender},
     jito_protos::proto::{
-        jss_api::{start_scheduler_message::Msg, StartSchedulerMessage},
-        jss_types::{bundle_result, not_committed::Reason, SchedulingError},
+        bam_api::{start_scheduler_message_v0::Msg, StartSchedulerMessageV0},
+        bam_types::{atomic_txn_batch_result, not_committed::Reason, SchedulingError},
     },
     prio_graph::{AccessKind, GraphNode, PrioGraph},
     solana_pubkey::Pubkey,
@@ -48,18 +47,24 @@ fn passthrough_priority(
     *id
 }
 
-const MAX_SCHEDULED_PER_WORKER: usize = 3;
+const MAX_SCHEDULED_PER_WORKER: usize = 5;
+const MAX_TXN_PER_BATCH: usize = 16;
 
-pub struct JssScheduler<Tx: TransactionWithMeta> {
+pub struct BamScheduler<Tx: TransactionWithMeta> {
     workers_scheduled_count: Vec<usize>,
     consume_work_senders: Vec<Sender<ConsumeWork<Tx>>>,
     finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
-    response_sender: Sender<StartSchedulerMessage>,
+    response_sender: Sender<StartSchedulerMessageV0>,
 
     next_batch_id: u64,
     inflight_batch_info: HashMap<TransactionBatchId, InflightBatchInfo>,
     prio_graph: SchedulerPrioGraph,
     slot: Option<Slot>,
+
+    // Reusable objects to avoid allocations
+    reusable_consume_work: Vec<ConsumeWork<Tx>>,
+    reusable_priority_ids: Vec<Vec<TransactionPriorityId>>,
+    reusable_batches_for_scheduling: Vec<(Vec<TransactionPriorityId>, bool)>,
 }
 
 // A structure to hold information about inflight batches.
@@ -71,11 +76,11 @@ struct InflightBatchInfo {
     pub slot: Slot,
 }
 
-impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
+impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
     pub fn new(
         consume_work_senders: Vec<Sender<ConsumeWork<Tx>>>,
         finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
-        response_sender: Sender<StartSchedulerMessage>,
+        response_sender: Sender<StartSchedulerMessageV0>,
     ) -> Self {
         Self {
             workers_scheduled_count: vec![0; consume_work_senders.len()],
@@ -86,6 +91,9 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
             inflight_batch_info: HashMap::default(),
             prio_graph: PrioGraph::new(passthrough_priority),
             slot: None,
+            reusable_consume_work: Vec::new(),
+            reusable_priority_ids: Vec::new(),
+            reusable_batches_for_scheduling: Vec::new(),
         }
     }
 
@@ -134,9 +142,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
             if *count == 0 {
                 return Some(worker_index);
             }
-            if *count < MAX_SCHEDULED_PER_WORKER
-                && (best_worker_index.is_none() || *count < best_worker_count)
-            {
+            if best_worker_index.is_none() || *count < best_worker_count {
                 best_worker_index = Some(worker_index);
                 best_worker_count = *count;
             }
@@ -155,38 +161,45 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
         };
 
         // Schedule any available transactions in prio-graph
+        let mut batches_for_scheduling = std::mem::take(&mut self.reusable_batches_for_scheduling);
         while let Some(worker_index) = self.get_best_available_worker() {
-            let batches_for_scheduling = self.get_batches_for_scheduling(container, slot);
+            self.get_batches_for_scheduling(&mut batches_for_scheduling, container, slot);
             if batches_for_scheduling.is_empty() {
                 break;
             }
-            for (priority_ids, revert_on_error) in batches_for_scheduling {
+            for (priority_ids, revert_on_error) in batches_for_scheduling.drain(..) {
                 let len = priority_ids.len();
                 let batch_id = self.get_next_schedule_id();
-                let txn_ids = priority_ids
-                    .iter()
-                    .filter_map(|priority_id| container.get_batch(priority_id.id))
-                    .flat_map(|(batch_ids, _, _)| batch_ids.into_iter())
-                    .collect::<Vec<_>>();
-                let work = Self::generate_work(batch_id, txn_ids, revert_on_error, container, slot);
+                let mut work = self.get_or_create_work_object();
+                Self::generate_work(
+                    &mut work,
+                    batch_id,
+                    &priority_ids,
+                    revert_on_error,
+                    container,
+                    slot,
+                );
                 self.send_to_worker(worker_index, priority_ids, work, slot);
                 *num_scheduled += len;
             }
         }
+        std::mem::swap(
+            &mut self.reusable_batches_for_scheduling,
+            &mut batches_for_scheduling,
+        );
     }
 
     /// Get batches of transactions for scheduling.
     /// Build a normal txn batch up to a maximum of `MAX_TXN_PER_BATCH` transactions;
-    /// but if a 'revert_on_error' batch is encountered, the WIP batch is sent immediately
-    /// and the 'revert_on_error' batch is sent afterwards.
+    /// but if a 'revert_on_error' batch is encountered, the WIP batch is finalized
+    /// and the 'revert_on_error' batch is appended to the result.
     fn get_batches_for_scheduling(
         &mut self,
+        result: &mut Vec<(Vec<TransactionPriorityId>, bool)>,
         container: &mut impl StateContainer<Tx>,
         current_slot: Slot,
-    ) -> Vec<(Vec<TransactionPriorityId>, bool)> {
-        const MAX_TXN_PER_BATCH: usize = 16;
-        let mut result = vec![];
-        let mut current_batch_ids = vec![];
+    ) {
+        let mut current_batch_ids = self.get_or_create_priority_ids();
         while let Some(next_batch_id) = self.prio_graph.pop() {
             let Some((_, revert_on_error, slot)) = container.get_batch(next_batch_id.id) else {
                 continue;
@@ -203,6 +216,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
             if revert_on_error {
                 if !current_batch_ids.is_empty() {
                     result.push((std::mem::take(&mut current_batch_ids), false));
+                    current_batch_ids = self.get_or_create_priority_ids();
                 }
                 result.push((vec![next_batch_id], true));
                 break;
@@ -217,7 +231,6 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
         if !current_batch_ids.is_empty() {
             result.push((current_batch_ids, false));
         }
-        result
     }
 
     fn send_to_worker(
@@ -247,50 +260,85 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
         result
     }
 
-    fn generate_work(
-        batch_id: TransactionBatchId,
-        ids: Vec<usize>,
-        revert_on_error: bool,
-        container: &mut impl StateContainer<Tx>,
-        slot: Slot,
-    ) -> ConsumeWork<Tx> {
-        let transactions = ids
-            .iter()
-            .filter_map(|txn_id| {
-                let result = container.get_mut_transaction_state(*txn_id)?;
-                let result = result.transition_to_pending();
-                Some(result)
-            })
-            .collect::<Vec<_>>();
-
-        let max_ages = transactions
-            .iter()
-            .map(|txn| txn.max_age)
-            .collect::<Vec<_>>();
-
-        let transactions = transactions
-            .into_iter()
-            .map(|txn| txn.transaction)
-            .collect::<Vec<_>>();
-
-        ConsumeWork {
-            batch_id,
-            ids,
-            transactions,
-            max_ages,
-            revert_on_error,
-            respond_with_extra_info: true,
-            schedulable_slot: Some(slot),
+    fn get_or_create_work_object(&mut self) -> ConsumeWork<Tx> {
+        if let Some(work) = self.reusable_consume_work.pop() {
+            work
+        } else {
+            // These values will be overwritten by `generate_work`
+            ConsumeWork {
+                batch_id: TransactionBatchId::new(0),
+                ids: Vec::with_capacity(MAX_TXN_PER_BATCH),
+                transactions: Vec::with_capacity(MAX_TXN_PER_BATCH),
+                max_ages: Vec::with_capacity(MAX_TXN_PER_BATCH),
+                revert_on_error: false,
+                respond_with_extra_info: false,
+                schedulable_slot: None,
+            }
         }
     }
 
+    fn recycle_work_object(&mut self, mut work: ConsumeWork<Tx>) {
+        // Just in case, clear the work object
+        work.ids.clear();
+        work.transactions.clear();
+        work.max_ages.clear();
+        self.reusable_consume_work.push(work);
+    }
+
+    fn get_or_create_priority_ids(&mut self) -> Vec<TransactionPriorityId> {
+        if let Some(priority_ids) = self.reusable_priority_ids.pop() {
+            priority_ids
+        } else {
+            Vec::with_capacity(MAX_TXN_PER_BATCH)
+        }
+    }
+
+    fn recycle_priority_ids(&mut self, mut priority_ids: Vec<TransactionPriorityId>) {
+        priority_ids.clear();
+        self.reusable_priority_ids.push(priority_ids);
+    }
+
+    fn generate_work(
+        output: &mut ConsumeWork<Tx>,
+        batch_id: TransactionBatchId,
+        priority_ids: &[TransactionPriorityId],
+        revert_on_error: bool,
+        container: &mut impl StateContainer<Tx>,
+        slot: Slot,
+    ) {
+        output.ids.clear();
+        output.ids.extend(
+            priority_ids
+                .iter()
+                .filter_map(|priority_id| container.get_batch(priority_id.id))
+                .flat_map(|(batch_ids, _, _)| batch_ids.into_iter())
+                .cloned(),
+        );
+
+        output.transactions.clear();
+        output.max_ages.clear();
+        for txn in output.ids.iter().filter_map(|txn_id| {
+            let result = container.get_mut_transaction_state(*txn_id)?;
+            let result = result.transition_to_pending();
+            Some(result)
+        }) {
+            output.transactions.push(txn.transaction);
+            output.max_ages.push(txn.max_age);
+        }
+
+        output.batch_id = batch_id;
+        output.revert_on_error = revert_on_error;
+        output.schedulable_slot = Some(slot);
+        output.respond_with_extra_info = true;
+    }
+
     fn send_no_leader_slot_bundle_result(&self, seq_id: u32) {
-        let _ = self.response_sender.try_send(StartSchedulerMessage {
-            msg: Some(Msg::BundleResult(
-                jito_protos::proto::jss_types::BundleResult {
+        let _ = self.response_sender.try_send(StartSchedulerMessageV0 {
+            msg: Some(Msg::AtomicTxnBatchResult(
+                jito_protos::proto::bam_types::AtomicTxnBatchResult {
                     seq_id,
-                    result: Some(bundle_result::Result::NotCommitted(
-                        jito_protos::proto::jss_types::NotCommitted {
+                    result: Some(atomic_txn_batch_result::Result::NotCommitted(
+                        jito_protos::proto::bam_types::NotCommitted {
                             reason: Some(Reason::SchedulingError(
                                 SchedulingError::OutsideLeaderSlot as i32,
                             )),
@@ -301,10 +349,10 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
         });
     }
 
-    fn send_back_result(&self, seq_id: u32, result: bundle_result::Result) {
-        let _ = self.response_sender.try_send(StartSchedulerMessage {
-            msg: Some(Msg::BundleResult(
-                jito_protos::proto::jss_types::BundleResult {
+    fn send_back_result(&self, seq_id: u32, result: atomic_txn_batch_result::Result) {
+        let _ = self.response_sender.try_send(StartSchedulerMessageV0 {
+            msg: Some(Msg::AtomicTxnBatchResult(
+                jito_protos::proto::bam_types::AtomicTxnBatchResult {
                     seq_id,
                     result: Some(result),
                 },
@@ -315,7 +363,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
     /// Generates a `bundle_result::Result` based on the processed results for 'revert_on_error' batches.
     fn generate_revert_on_error_bundle_result(
         processed_results: &[TransactionResult],
-    ) -> bundle_result::Result {
+    ) -> atomic_txn_batch_result::Result {
         if processed_results
             .iter()
             .all(|result| matches!(result, TransactionResult::Committed(_)))
@@ -330,7 +378,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
                     }
                 })
                 .collect();
-            bundle_result::Result::Committed(jito_protos::proto::jss_types::Committed {
+            atomic_txn_batch_result::Result::Committed(jito_protos::proto::bam_types::Committed {
                 transaction_results,
             })
         } else {
@@ -351,29 +399,33 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
                 })
                 .unwrap_or((0, NotCommittedReason::PohTimeout));
 
-            bundle_result::Result::NotCommitted(jito_protos::proto::jss_types::NotCommitted {
-                reason: Some(Self::convert_reason_to_proto(index, not_commit_reason)),
-            })
+            atomic_txn_batch_result::Result::NotCommitted(
+                jito_protos::proto::bam_types::NotCommitted {
+                    reason: Some(Self::convert_reason_to_proto(index, not_commit_reason)),
+                },
+            )
         }
     }
 
     /// Generates a `bundle_result::Result` based on the processed result of a single transaction.
-    fn generate_bundle_result(processed: &TransactionResult) -> bundle_result::Result {
+    fn generate_bundle_result(processed: &TransactionResult) -> atomic_txn_batch_result::Result {
         match processed {
-            TransactionResult::Committed(result) => {
-                bundle_result::Result::Committed(jito_protos::proto::jss_types::Committed {
+            TransactionResult::Committed(result) => atomic_txn_batch_result::Result::Committed(
+                jito_protos::proto::bam_types::Committed {
                     transaction_results: vec![result.clone()],
-                })
-            }
+                },
+            ),
             TransactionResult::NotCommitted(reason) => {
                 let (index, not_commit_reason) = match reason {
                     NotCommittedReason::PohTimeout => (0, NotCommittedReason::PohTimeout),
                     NotCommittedReason::BatchRevert => (0, NotCommittedReason::BatchRevert),
                     NotCommittedReason::Error(err) => (0, NotCommittedReason::Error(err.clone())),
                 };
-                bundle_result::Result::NotCommitted(jito_protos::proto::jss_types::NotCommitted {
-                    reason: Some(Self::convert_reason_to_proto(index, not_commit_reason)),
-                })
+                atomic_txn_batch_result::Result::NotCommitted(
+                    jito_protos::proto::bam_types::NotCommitted {
+                        reason: Some(Self::convert_reason_to_proto(index, not_commit_reason)),
+                    },
+                )
             }
         }
     }
@@ -381,22 +433,22 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
     fn convert_reason_to_proto(
         index: usize,
         reason: NotCommittedReason,
-    ) -> jito_protos::proto::jss_types::not_committed::Reason {
+    ) -> jito_protos::proto::bam_types::not_committed::Reason {
         match reason {
             NotCommittedReason::PohTimeout => {
-                jito_protos::proto::jss_types::not_committed::Reason::SchedulingError(
+                jito_protos::proto::bam_types::not_committed::Reason::SchedulingError(
                     SchedulingError::PohTimeout as i32,
                 )
             }
             // Should not happen, but just in case:
             NotCommittedReason::BatchRevert => {
-                jito_protos::proto::jss_types::not_committed::Reason::GenericInvalid(
-                    jito_protos::proto::jss_types::GenericInvalid {},
+                jito_protos::proto::bam_types::not_committed::Reason::GenericInvalid(
+                    jito_protos::proto::bam_types::GenericInvalid {},
                 )
             }
             NotCommittedReason::Error(err) => {
-                jito_protos::proto::jss_types::not_committed::Reason::TransactionError(
-                    jito_protos::proto::jss_types::TransactionError {
+                jito_protos::proto::bam_types::not_committed::Reason::TransactionError(
+                    jito_protos::proto::bam_types::TransactionError {
                         index: index as u32,
                         reason: convert_txn_error_to_proto(err) as i32,
                     },
@@ -415,7 +467,6 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
         if bank_start.map(|bs| bs.working_bank.slot()) == self.slot {
             return;
         }
-
         if let Some(bank_start) = bank_start {
             info!(
                 "Bank boundary detected: slot changed from {:?} to {:?}",
@@ -452,7 +503,7 @@ impl<Tx: TransactionWithMeta> JssScheduler<Tx> {
     }
 }
 
-impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
+impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
     fn schedule<S: StateContainer<Tx>>(
         &mut self,
         container: &mut S,
@@ -476,7 +527,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
     /// Receive completed batches of transactions without blocking.
     /// This also handles checking if the slot has ended and if so, it will
     /// drain the container and prio-graph, sending back 'retryable' results
-    /// back to JSS.
+    /// back to BAM.
     fn receive_completed(
         &mut self,
         container: &mut impl StateContainer<Tx>,
@@ -491,11 +542,14 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
             num_transactions += result.work.ids.len();
             let batch_id = result.work.batch_id;
             let revert_on_error = result.work.revert_on_error;
+            self.recycle_work_object(result.work);
+
             let Some(inflight_batch_info) = self.inflight_batch_info.remove(&batch_id) else {
                 continue;
             };
             self.workers_scheduled_count[inflight_batch_info.worker_index] -= 1;
 
+            // Should never not be 1; but just in case
             let len = if revert_on_error {
                 1
             } else {
@@ -507,8 +561,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
                 .enumerate()
                 .take(len)
             {
-                let seq_id = priority_to_seq_id(priority_id.priority);
-
+                // If we got extra info, we can send back the result
                 if let Some(extra_info) = result.extra_info.as_ref() {
                     let bundle_result = if revert_on_error {
                         Self::generate_revert_on_error_bundle_result(&extra_info.processed_results)
@@ -522,15 +575,18 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for JssScheduler<Tx> {
                         };
                         Self::generate_bundle_result(txn_result)
                     };
-                    self.send_back_result(seq_id, bundle_result);
+                    self.send_back_result(priority_to_seq_id(priority_id.priority), bundle_result);
                 }
 
+                // If in the same slot, unblock the transaction
                 if Some(inflight_batch_info.slot) == self.slot {
                     self.prio_graph.unblock(priority_id);
                 }
 
+                // Remove the transaction from the container
                 container.remove_by_id(priority_id.id);
             }
+            self.recycle_priority_ids(inflight_batch_info.priority_ids);
         }
 
         Ok((num_transactions, 0))
@@ -548,8 +604,8 @@ mod tests {
             },
             tests::create_slow_genesis_config,
             transaction_scheduler::{
-                jss_receive_and_buffer::seq_id_to_priority,
-                jss_scheduler::JssScheduler,
+                bam_receive_and_buffer::seq_id_to_priority,
+                bam_scheduler::BamScheduler,
                 scheduler::Scheduler,
                 transaction_state::SanitizedTransactionTTL,
                 transaction_state_container::{StateContainer, TransactionStateContainer},
@@ -558,9 +614,9 @@ mod tests {
         crossbeam_channel::unbounded,
         itertools::Itertools,
         jito_protos::proto::{
-            jss_api::{start_scheduler_message::Msg, StartSchedulerMessage},
-            jss_types::{
-                bundle_result::Result::{Committed, NotCommitted},
+            bam_api::{start_scheduler_message_v0::Msg, StartSchedulerMessageV0},
+            bam_types::{
+                atomic_txn_batch_result::Result::{Committed, NotCommitted},
                 TransactionCommittedResult,
             },
         },
@@ -587,13 +643,13 @@ mod tests {
     };
 
     struct TestScheduler {
-        scheduler: JssScheduler<RuntimeTransaction<SanitizedTransaction>>,
+        scheduler: BamScheduler<RuntimeTransaction<SanitizedTransaction>>,
         consume_work_receivers:
             Vec<crossbeam_channel::Receiver<ConsumeWork<RuntimeTransaction<SanitizedTransaction>>>>,
         finished_consume_work_sender: crossbeam_channel::Sender<
             FinishedConsumeWork<RuntimeTransaction<SanitizedTransaction>>,
         >,
-        response_receiver: crossbeam_channel::Receiver<StartSchedulerMessage>,
+        response_receiver: crossbeam_channel::Receiver<StartSchedulerMessageV0>,
     }
 
     fn create_test_scheduler(num_threads: usize) -> TestScheduler {
@@ -601,7 +657,7 @@ mod tests {
             (0..num_threads).map(|_| unbounded()).unzip();
         let (finished_consume_work_sender, finished_consume_work_receiver) = unbounded();
         let (response_sender, response_receiver) = unbounded();
-        let scheduler = JssScheduler::new(
+        let scheduler = BamScheduler::new(
             consume_work_senders,
             finished_consume_work_receiver,
             response_sender,
@@ -823,8 +879,8 @@ mod tests {
         let response = response_receiver.try_recv().unwrap();
         assert!(response.msg.is_some(), "Response should contain a message");
         let msg = response.msg.unwrap();
-        let Msg::BundleResult(bundle_result) = msg else {
-            panic!("Expected BundleResult message");
+        let Msg::AtomicTxnBatchResult(bundle_result) = msg else {
+            panic!("Expected AtomicTxnBatchResult message");
         };
         assert_eq!(bundle_result.seq_id, 0);
         assert!(
@@ -849,8 +905,8 @@ mod tests {
         let response = response_receiver.try_recv().unwrap();
         assert!(response.msg.is_some(), "Response should contain a message");
         let msg = response.msg.unwrap();
-        let Msg::BundleResult(bundle_result) = msg else {
-            panic!("Expected BundleResult message");
+        let Msg::AtomicTxnBatchResult(bundle_result) = msg else {
+            panic!("Expected AtomicTxnBatchResult message");
         };
         assert_eq!(bundle_result.seq_id, 3);
         assert!(
@@ -870,8 +926,8 @@ mod tests {
                 let reason = not_committed.reason.unwrap();
                 assert_eq!(
                     reason,
-                    jito_protos::proto::jss_types::not_committed::Reason::SchedulingError(
-                        jito_protos::proto::jss_types::SchedulingError::PohTimeout as i32
+                    jito_protos::proto::bam_types::not_committed::Reason::SchedulingError(
+                        jito_protos::proto::bam_types::SchedulingError::PohTimeout as i32
                     )
                 );
             }
@@ -922,8 +978,8 @@ mod tests {
         let response = response_receiver.try_recv().unwrap();
         assert!(response.msg.is_some(), "Response should contain a message");
         let msg = response.msg.unwrap();
-        let Msg::BundleResult(bundle_result) = msg else {
-            panic!("Expected BundleResult message");
+        let Msg::AtomicTxnBatchResult(bundle_result) = msg else {
+            panic!("Expected AtomicTxnBatchResult message");
         };
         assert_eq!(bundle_result.seq_id, 1);
         assert!(
@@ -964,8 +1020,8 @@ mod tests {
         let response = response_receiver.try_recv().unwrap();
         assert!(response.msg.is_some(), "Response should contain a message");
         let msg = response.msg.unwrap();
-        let Msg::BundleResult(bundle_result) = msg else {
-            panic!("Expected BundleResult message");
+        let Msg::AtomicTxnBatchResult(bundle_result) = msg else {
+            panic!("Expected AtomicTxnBatchResult message");
         };
         assert_eq!(bundle_result.seq_id, 2);
         assert!(
@@ -985,8 +1041,8 @@ mod tests {
                 let reason = not_committed.reason.unwrap();
                 assert_eq!(
                     reason,
-                    jito_protos::proto::jss_types::not_committed::Reason::SchedulingError(
-                        jito_protos::proto::jss_types::SchedulingError::OutsideLeaderSlot as i32
+                    jito_protos::proto::bam_types::not_committed::Reason::SchedulingError(
+                        jito_protos::proto::bam_types::SchedulingError::OutsideLeaderSlot as i32
                     )
                 );
             }

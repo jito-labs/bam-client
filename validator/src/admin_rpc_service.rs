@@ -40,6 +40,7 @@ use {
         time::{Duration, SystemTime},
     },
     tokio::runtime::Runtime,
+    tonic::transport::Endpoint,
 };
 
 #[derive(Clone)]
@@ -53,7 +54,7 @@ pub struct AdminRpcRequestMetadata {
     pub staked_nodes_overrides: Arc<RwLock<HashMap<Pubkey, u64>>>,
     pub post_init: Arc<RwLock<Option<AdminRpcRequestMetadataPostInit>>>,
     pub rpc_to_plugin_manager_sender: Option<Sender<GeyserPluginManagerRequest>>,
-    pub jss_url: Arc<Mutex<Option<String>>>,
+    pub bam_url: Arc<Mutex<Option<String>>>,
 }
 
 impl Metadata for AdminRpcRequestMetadata {}
@@ -258,8 +259,8 @@ pub trait AdminRpc {
         trust_packets: bool,
     ) -> Result<()>;
 
-    #[rpc(meta, name = "setJssUrl")]
-    fn set_jss_url(&self, meta: Self::Metadata, jss_url: Option<String>) -> Result<()>;
+    #[rpc(meta, name = "setBamUrl")]
+    fn set_bam_url(&self, meta: Self::Metadata, bam_url: Option<String>) -> Result<()>;
 
     #[rpc(meta, name = "setRelayerConfig")]
     fn set_relayer_config(
@@ -507,9 +508,26 @@ impl AdminRpc for AdminRpcImpl {
         }
     }
 
-    fn set_jss_url(&self, meta: Self::Metadata, jss_url: Option<String>) -> Result<()> {
-        debug!("set_jss_url request received");
-        *meta.jss_url.lock().unwrap() = jss_url;
+    fn set_bam_url(&self, meta: Self::Metadata, bam_url: Option<String>) -> Result<()> {
+        let old_bam_url = meta.bam_url.lock().unwrap().clone();
+        let new_bam_url = bam_url.as_ref().map(|url| url.to_string());
+        debug!("set_bam_url old= {:?}, new={:?}", old_bam_url, new_bam_url);
+
+        if let Some(new_bam_url) = &new_bam_url {
+            if new_bam_url.is_empty() {
+                return Err(jsonrpc_core::error::Error::invalid_params(
+                    "BAM URL cannot be empty",
+                ));
+            }
+
+            if let Err(e) = Endpoint::from_str(new_bam_url) {
+                return Err(jsonrpc_core::error::Error::invalid_params(format!(
+                    "Could not create endpoint: {e}"
+                )));
+            }
+        }
+
+        *meta.bam_url.lock().unwrap() = bam_url;
         Ok(())
     }
 
@@ -1112,7 +1130,7 @@ mod tests {
                 }))),
                 staked_nodes_overrides: Arc::new(RwLock::new(HashMap::new())),
                 rpc_to_plugin_manager_sender: None,
-                jss_url: Arc::new(Mutex::new(None)),
+                bam_url: Arc::new(Mutex::new(None)),
             };
             let mut io = MetaIoHandler::default();
             io.extend_with(AdminRpcImpl.to_delegate());
@@ -1532,7 +1550,7 @@ mod tests {
                 post_init: post_init.clone(),
                 staked_nodes_overrides: Arc::new(RwLock::new(HashMap::new())),
                 rpc_to_plugin_manager_sender: None,
-                jss_url: Arc::new(Mutex::new(None)),
+                bam_url: Arc::new(Mutex::new(None)),
             };
 
             let _validator = Validator::new(

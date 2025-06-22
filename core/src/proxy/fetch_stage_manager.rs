@@ -36,7 +36,7 @@ impl FetchStageManager {
         // Intercepted packets get piped through here.
         packet_tx: Sender<PacketBatch>,
         exit: Arc<AtomicBool>,
-        jss_enabled: Arc<AtomicBool>,
+        bam_enabled: Arc<AtomicBool>,
     ) -> Self {
         let t_hdl = Self::start(
             cluster_info,
@@ -44,7 +44,7 @@ impl FetchStageManager {
             packet_intercept_rx,
             packet_tx,
             exit,
-            jss_enabled,
+            bam_enabled,
         );
 
         Self { t_hdl }
@@ -68,7 +68,7 @@ impl FetchStageManager {
         packet_intercept_rx: Receiver<PacketBatch>,
         packet_tx: Sender<PacketBatch>,
         exit: Arc<AtomicBool>,
-        jss_enabled: Arc<AtomicBool>,
+        bam_enabled: Arc<AtomicBool>,
     ) -> JoinHandle<()> {
         Builder::new().name("fetch-stage-manager".into()).spawn(move || {
             let my_fallback_contact_info = cluster_info.my_contact_info();
@@ -84,11 +84,11 @@ impl FetchStageManager {
             let mut packets_forwarded = 0;
             let mut heartbeats_received = 0;
             while !exit.load(Ordering::Relaxed) {
-                if jss_enabled.load(Ordering::Relaxed) {
+                if bam_enabled.load(Ordering::Relaxed) {
                     fetch_connected = false;
                     heartbeat_received = false;
                     pending_disconnect = false;
-                    while let Ok(_) = packet_intercept_rx.try_recv() {}
+                    while packet_intercept_rx.try_recv().is_ok() {}
                     std::thread::sleep(Duration::from_millis(100));
                     continue;
                 }

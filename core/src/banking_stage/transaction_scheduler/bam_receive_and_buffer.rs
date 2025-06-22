@@ -1,7 +1,7 @@
-/// An implementation of the `ReceiveAndBuffer` trait that receives messages from JSS
+/// An implementation of the `ReceiveAndBuffer` trait that receives messages from BAM
 /// and buffers from into the the `TransactionStateContainer`. Key thing to note:
 /// this implementation only functions during the `Consume/Hold` phase; otherwise it will send them back
-/// to JSS with a `Retryable` result.
+/// to BAM with a `Retryable` result.
 use std::{
     cmp::min,
     sync::{
@@ -20,7 +20,7 @@ use {
         decision_maker::BufferedPacketsDecision,
         immutable_deserialized_packet::{DeserializedPacketError, ImmutableDeserializedPacket},
         transaction_scheduler::{
-            jss_utils::{convert_deserialize_error_to_proto, convert_txn_error_to_proto},
+            bam_utils::{convert_deserialize_error_to_proto, convert_txn_error_to_proto},
             receive_and_buffer::{calculate_max_age, calculate_priority_and_cost},
             transaction_state::SanitizedTransactionTTL,
         },
@@ -28,10 +28,10 @@ use {
     crossbeam_channel::Sender,
     itertools::Itertools,
     jito_protos::proto::{
-        jss_api::{start_scheduler_message::Msg, StartSchedulerMessage},
-        jss_types::{
-            bundle_result, not_committed::Reason, Bundle, DeserializationErrorReason, Packet,
-            SchedulingError,
+        bam_api::{start_scheduler_message_v0::Msg, StartSchedulerMessageV0},
+        bam_types::{
+            atomic_txn_batch_result, not_committed::Reason, AtomicTxnBatch,
+            DeserializationErrorReason, Packet, SchedulingError,
         },
     },
     solana_accounts_db::account_locks::validate_account_locks,
@@ -47,74 +47,76 @@ use {
     solana_svm::transaction_error_metrics::TransactionErrorMetrics,
 };
 
-pub struct JssReceiveAndBuffer {
-    jss_enabled: Arc<AtomicBool>,
-    bundle_receiver: crossbeam_channel::Receiver<Bundle>,
-    response_sender: Sender<StartSchedulerMessage>,
+pub struct BamReceiveAndBuffer {
+    bam_enabled: Arc<AtomicBool>,
+    bundle_receiver: crossbeam_channel::Receiver<AtomicTxnBatch>,
+    response_sender: Sender<StartSchedulerMessageV0>,
     bank_forks: Arc<RwLock<BankForks>>,
 }
 
-impl JssReceiveAndBuffer {
+impl BamReceiveAndBuffer {
     pub fn new(
-        jss_enabled: Arc<AtomicBool>,
-        bundle_receiver: crossbeam_channel::Receiver<Bundle>,
-        response_sender: Sender<StartSchedulerMessage>,
+        bam_enabled: Arc<AtomicBool>,
+        bundle_receiver: crossbeam_channel::Receiver<AtomicTxnBatch>,
+        response_sender: Sender<StartSchedulerMessageV0>,
         bank_forks: Arc<RwLock<BankForks>>,
     ) -> Self {
         Self {
-            jss_enabled,
+            bam_enabled,
             bundle_receiver,
             response_sender,
             bank_forks,
         }
     }
 
-    fn deserialize_jss_packets<'a>(
+    fn deserialize_bam_packets<'a>(
         packets: impl Iterator<Item = &'a Packet>,
-    ) -> Vec<Result<ImmutableDeserializedPacket, DeserializedPacketError>> {
-        packets
-            .map(|packet| {
-                let mut solana_packet = solana_sdk::packet::Packet::default();
-                solana_packet.meta_mut().size = packet.data.len();
-                solana_packet.meta_mut().set_discard(false);
-                let len_to_copy = min(packet.data.len(), PACKET_DATA_SIZE);
-                solana_packet.buffer_mut()[0..len_to_copy]
-                    .copy_from_slice(&packet.data[0..len_to_copy]);
-                if let Some(meta) = &packet.meta {
-                    if let Some(addr) = &meta.addr.parse().ok() {
-                        solana_packet.meta_mut().addr = *addr;
+    ) -> Result<Vec<ImmutableDeserializedPacket>, (usize, DeserializedPacketError)> {
+        let mut result = Vec::with_capacity(packets.size_hint().0);
+        for (index, packet) in packets.enumerate() {
+            let mut solana_packet = solana_sdk::packet::Packet::default();
+            solana_packet.meta_mut().size = packet.data.len();
+            solana_packet.meta_mut().set_discard(false);
+            let len_to_copy = min(packet.data.len(), PACKET_DATA_SIZE);
+            solana_packet.buffer_mut()[0..len_to_copy]
+                .copy_from_slice(&packet.data[0..len_to_copy]);
+            if let Some(meta) = &packet.meta {
+                if let Some(addr) = &meta.addr.parse().ok() {
+                    solana_packet.meta_mut().addr = *addr;
+                }
+                solana_packet.meta_mut().port = meta.port as u16;
+                if let Some(flags) = &meta.flags {
+                    if flags.simple_vote_tx {
+                        solana_packet
+                            .meta_mut()
+                            .flags
+                            .insert(PacketFlags::SIMPLE_VOTE_TX);
                     }
-                    solana_packet.meta_mut().port = meta.port as u16;
-                    if let Some(flags) = &meta.flags {
-                        if flags.simple_vote_tx {
-                            solana_packet
-                                .meta_mut()
-                                .flags
-                                .insert(PacketFlags::SIMPLE_VOTE_TX);
-                        }
-                        if flags.forwarded {
-                            solana_packet
-                                .meta_mut()
-                                .flags
-                                .insert(PacketFlags::FORWARDED);
-                        }
-                        if flags.repair {
-                            solana_packet.meta_mut().flags.insert(PacketFlags::REPAIR);
-                        }
+                    if flags.forwarded {
+                        solana_packet
+                            .meta_mut()
+                            .flags
+                            .insert(PacketFlags::FORWARDED);
+                    }
+                    if flags.repair {
+                        solana_packet.meta_mut().flags.insert(PacketFlags::REPAIR);
                     }
                 }
-                ImmutableDeserializedPacket::new(solana_packet)
-            })
-            .collect_vec()
+            }
+            result
+                .push(ImmutableDeserializedPacket::new(solana_packet).map_err(|err| (index, err))?);
+        }
+
+        Ok(result)
     }
 
     fn send_bundle_not_committed_result(&self, seq_id: u32, reason: Reason) {
-        let _ = self.response_sender.try_send(StartSchedulerMessage {
-            msg: Some(Msg::BundleResult(
-                jito_protos::proto::jss_types::BundleResult {
+        let _ = self.response_sender.try_send(StartSchedulerMessageV0 {
+            msg: Some(Msg::AtomicTxnBatchResult(
+                jito_protos::proto::bam_types::AtomicTxnBatchResult {
                     seq_id,
-                    result: Some(bundle_result::Result::NotCommitted(
-                        jito_protos::proto::jss_types::NotCommitted {
+                    result: Some(atomic_txn_batch_result::Result::NotCommitted(
+                        jito_protos::proto::bam_types::NotCommitted {
                             reason: Some(reason),
                         },
                     )),
@@ -123,13 +125,13 @@ impl JssReceiveAndBuffer {
         });
     }
 
-    fn send_no_leader_slot_bundle_result(&self, seq_id: u32) {
-        let _ = self.response_sender.try_send(StartSchedulerMessage {
-            msg: Some(Msg::BundleResult(
-                jito_protos::proto::jss_types::BundleResult {
+    fn send_no_leader_slot_txn_batch_result(&self, seq_id: u32) {
+        let _ = self.response_sender.try_send(StartSchedulerMessageV0 {
+            msg: Some(Msg::AtomicTxnBatchResult(
+                jito_protos::proto::bam_types::AtomicTxnBatchResult {
                     seq_id,
-                    result: Some(bundle_result::Result::NotCommitted(
-                        jito_protos::proto::jss_types::NotCommitted {
+                    result: Some(atomic_txn_batch_result::Result::NotCommitted(
+                        jito_protos::proto::bam_types::NotCommitted {
                             reason: Some(Reason::SchedulingError(
                                 SchedulingError::OutsideLeaderSlot as i32,
                             )),
@@ -140,13 +142,13 @@ impl JssReceiveAndBuffer {
         });
     }
 
-    fn send_container_full_bundle_result(&self, seq_id: u32) {
-        let _ = self.response_sender.try_send(StartSchedulerMessage {
-            msg: Some(Msg::BundleResult(
-                jito_protos::proto::jss_types::BundleResult {
+    fn send_container_full_txn_batch_result(&self, seq_id: u32) {
+        let _ = self.response_sender.try_send(StartSchedulerMessageV0 {
+            msg: Some(Msg::AtomicTxnBatchResult(
+                jito_protos::proto::bam_types::AtomicTxnBatchResult {
                     seq_id,
-                    result: Some(bundle_result::Result::NotCommitted(
-                        jito_protos::proto::jss_types::NotCommitted {
+                    result: Some(atomic_txn_batch_result::Result::NotCommitted(
+                        jito_protos::proto::bam_types::NotCommitted {
                             reason: Some(Reason::SchedulingError(
                                 SchedulingError::ContainerFull as i32,
                             )),
@@ -157,31 +159,29 @@ impl JssReceiveAndBuffer {
         });
     }
 
-    fn parse_bundle(
-        bundle: &Bundle,
+    fn parse_batch(
+        batch: &AtomicTxnBatch,
         bank_forks: &Arc<RwLock<BankForks>>,
-    ) -> Result<ParsedBundle, Reason> {
-        if bundle.packets.is_empty() {
+    ) -> Result<ParsedBatch, Reason> {
+        if batch.packets.is_empty() {
             return Err(Reason::DeserializationError(
-                jito_protos::proto::jss_types::DeserializationError {
+                jito_protos::proto::bam_types::DeserializationError {
                     index: 0,
                     reason: DeserializationErrorReason::Empty as i32,
                 },
             ));
         }
 
-        let mut parsed_packets = Self::deserialize_jss_packets(bundle.packets.iter());
-        if let Some((index, Err(err))) = parsed_packets.iter().find_position(|r| r.is_err()) {
-            let reason = convert_deserialize_error_to_proto(err);
+        if batch.packets.len() > 5 {
             return Err(Reason::DeserializationError(
-                jito_protos::proto::jss_types::DeserializationError {
-                    index: index as u32,
-                    reason: reason as i32,
+                jito_protos::proto::bam_types::DeserializationError {
+                    index: 0,
+                    reason: DeserializationErrorReason::SanitizeError as i32,
                 },
             ));
         }
 
-        let Ok(revert_on_error) = bundle
+        let Ok(revert_on_error) = batch
             .packets
             .iter()
             .map(|p| {
@@ -193,12 +193,21 @@ impl JssReceiveAndBuffer {
             .all_equal_value()
         else {
             return Err(Reason::DeserializationError(
-                jito_protos::proto::jss_types::DeserializationError {
+                jito_protos::proto::bam_types::DeserializationError {
                     index: 0,
                     reason: DeserializationErrorReason::InconsistentBundle as i32,
                 },
             ));
         };
+
+        let mut parsed_packets =
+            Self::deserialize_bam_packets(batch.packets.iter()).map_err(|(index, err)| {
+                let reason = convert_deserialize_error_to_proto(&err);
+                Reason::DeserializationError(jito_protos::proto::bam_types::DeserializationError {
+                    index: index as u32,
+                    reason: reason as i32,
+                })
+            })?;
 
         let (root_bank, working_bank) = {
             let bank_forks = bank_forks.read().unwrap();
@@ -217,7 +226,7 @@ impl JssReceiveAndBuffer {
 
         // Checks are taken from receive_and_buffer.rs:
         // SanitizedTransactionReceiveAndBuffer::buffer_packets
-        for (index, parsed_packet) in parsed_packets.drain(..).filter_map(Result::ok).enumerate() {
+        for (index, parsed_packet) in parsed_packets.drain(..).enumerate() {
             // Check 1
             let Some((tx, deactivation_slot)) = parsed_packet.build_sanitized_transaction(
                 vote_only,
@@ -225,7 +234,7 @@ impl JssReceiveAndBuffer {
                 root_bank.get_reserved_account_keys(),
             ) else {
                 return Err(Reason::DeserializationError(
-                    jito_protos::proto::jss_types::DeserializationError {
+                    jito_protos::proto::bam_types::DeserializationError {
                         index: 0,
                         reason: DeserializationErrorReason::SanitizeError as i32,
                     },
@@ -238,7 +247,7 @@ impl JssReceiveAndBuffer {
             {
                 let reason = convert_txn_error_to_proto(err);
                 return Err(Reason::TransactionError(
-                    jito_protos::proto::jss_types::TransactionError {
+                    jito_protos::proto::bam_types::TransactionError {
                         index: index as u32,
                         reason: reason as i32,
                     },
@@ -254,7 +263,7 @@ impl JssReceiveAndBuffer {
                 Err(err) => {
                     let reason = convert_txn_error_to_proto(err);
                     return Err(Reason::TransactionError(
-                        jito_protos::proto::jss_types::TransactionError {
+                        jito_protos::proto::bam_types::TransactionError {
                             index: index as u32,
                             reason: reason as i32,
                         },
@@ -273,7 +282,7 @@ impl JssReceiveAndBuffer {
             if let Some(Err(err)) = check_results.first() {
                 let reason = convert_txn_error_to_proto(err.clone());
                 return Err(Reason::TransactionError(
-                    jito_protos::proto::jss_types::TransactionError {
+                    jito_protos::proto::bam_types::TransactionError {
                         index: index as u32,
                         reason: reason as i32,
                     },
@@ -288,7 +297,7 @@ impl JssReceiveAndBuffer {
             ) {
                 let reason = convert_txn_error_to_proto(err);
                 return Err(Reason::TransactionError(
-                    jito_protos::proto::jss_types::TransactionError {
+                    jito_protos::proto::bam_types::TransactionError {
                         index: index as u32,
                         reason: reason as i32,
                     },
@@ -307,9 +316,9 @@ impl JssReceiveAndBuffer {
             packets.push(Arc::new(parsed_packet));
         }
 
-        let priority = seq_id_to_priority(bundle.seq_id);
+        let priority = seq_id_to_priority(batch.seq_id);
 
-        Ok(ParsedBundle {
+        Ok(ParsedBatch {
             transaction_ttls,
             packets,
             cost,
@@ -319,7 +328,7 @@ impl JssReceiveAndBuffer {
     }
 }
 
-struct ParsedBundle {
+struct ParsedBatch {
     pub transaction_ttls: Vec<SanitizedTransactionTTL<RuntimeTransaction<SanitizedTransaction>>>,
     pub packets: Vec<Arc<ImmutableDeserializedPacket>>,
     pub cost: u64,
@@ -327,7 +336,7 @@ struct ParsedBundle {
     pub revert_on_error: bool,
 }
 
-impl ReceiveAndBuffer for JssReceiveAndBuffer {
+impl ReceiveAndBuffer for BamReceiveAndBuffer {
     type Transaction = RuntimeTransaction<SanitizedTransaction>;
     type Container = TransactionStateContainer<Self::Transaction>;
 
@@ -338,7 +347,7 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
         _: &mut super::scheduler_metrics::SchedulerCountMetrics,
         decision: &crate::banking_stage::decision_maker::BufferedPacketsDecision,
     ) -> Result<usize, ()> {
-        if !self.jss_enabled.load(Ordering::Relaxed) {
+        if !self.bam_enabled.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(5));
             return Ok(0);
         }
@@ -348,19 +357,19 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
         match decision {
             BufferedPacketsDecision::Consume(_) | BufferedPacketsDecision::Hold => {
                 while result < MAX_BUNDLES_PER_RECV {
-                    let Ok(bundle) = self.bundle_receiver.try_recv() else {
+                    let Ok(batch) = self.bundle_receiver.try_recv() else {
                         break;
                     };
-                    let ParsedBundle {
+                    let ParsedBatch {
                         transaction_ttls,
                         packets,
                         cost,
                         priority,
                         revert_on_error,
-                    } = match Self::parse_bundle(&bundle, &self.bank_forks) {
+                    } = match Self::parse_batch(&batch, &self.bank_forks) {
                         Ok(parsed) => parsed,
                         Err(reason) => {
-                            self.send_bundle_not_committed_result(bundle.seq_id, reason);
+                            self.send_bundle_not_committed_result(batch.seq_id, reason);
                             continue;
                         }
                     };
@@ -371,11 +380,11 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                             priority,
                             cost,
                             revert_on_error,
-                            bundle.max_schedule_slot,
+                            batch.max_schedule_slot,
                         )
                         .is_none()
                     {
-                        self.send_container_full_bundle_result(bundle.seq_id);
+                        self.send_container_full_txn_batch_result(batch.seq_id);
                         continue;
                     };
 
@@ -383,10 +392,10 @@ impl ReceiveAndBuffer for JssReceiveAndBuffer {
                 }
             }
             BufferedPacketsDecision::ForwardAndHold | BufferedPacketsDecision::Forward => {
-                // Send back any bundles that were received while in Forward/Hold state
+                // Send back any batches that were received while in Forward/Hold state
                 let deadline = Instant::now() + Duration::from_millis(100);
-                while let Ok(bundle) = self.bundle_receiver.recv_deadline(deadline) {
-                    self.send_no_leader_slot_bundle_result(bundle.seq_id);
+                while let Ok(batch) = self.bundle_receiver.recv_deadline(deadline) {
+                    self.send_no_leader_slot_txn_batch_result(batch.seq_id);
                 }
             }
         }
@@ -446,17 +455,17 @@ mod tests {
         (bank_forks, mint_keypair)
     }
 
-    fn setup_jss_receive_and_buffer(
-        receiver: crossbeam_channel::Receiver<Bundle>,
+    fn setup_bam_receive_and_buffer(
+        receiver: crossbeam_channel::Receiver<AtomicTxnBatch>,
         bank_forks: Arc<RwLock<BankForks>>,
     ) -> (
-        JssReceiveAndBuffer,
+        BamReceiveAndBuffer,
         TransactionStateContainer<RuntimeTransaction<SanitizedTransaction>>,
-        crossbeam_channel::Receiver<StartSchedulerMessage>,
+        crossbeam_channel::Receiver<StartSchedulerMessageV0>,
     ) {
         let (response_sender, response_receiver) =
-            crossbeam_channel::unbounded::<StartSchedulerMessage>();
-        let receive_and_buffer = JssReceiveAndBuffer::new(
+            crossbeam_channel::unbounded::<StartSchedulerMessageV0>();
+        let receive_and_buffer = BamReceiveAndBuffer::new(
             Arc::new(AtomicBool::new(true)),
             receiver,
             response_sender,
@@ -483,7 +492,7 @@ mod tests {
             };
             for id in ids {
                 assert!(
-                    container.get_transaction_ttl(id).is_some(),
+                    container.get_transaction_ttl(*id).is_some(),
                     "Transaction ID {} not found in container",
                     id
                 );
@@ -494,13 +503,13 @@ mod tests {
         assert_eq!(actual_length, expected_length);
     }
 
-    #[test_case(setup_jss_receive_and_buffer; "testcase-jss")]
+    #[test_case(setup_bam_receive_and_buffer; "testcase-bam")]
     fn test_receive_and_buffer_simple_transfer<R: ReceiveAndBuffer>(
         setup_receive_and_buffer: impl FnOnce(
-            Receiver<Bundle>,
+            Receiver<AtomicTxnBatch>,
             Arc<RwLock<BankForks>>,
         )
-            -> (R, R::Container, Receiver<StartSchedulerMessage>),
+            -> (R, R::Container, Receiver<StartSchedulerMessageV0>),
     ) {
         let (sender, receiver) = unbounded();
         let (bank_forks, mint_keypair) = test_bank_forks();
@@ -516,7 +525,7 @@ mod tests {
             bank_forks.read().unwrap().root_bank().last_blockhash(),
         );
         let data = bincode::serialize(&transaction).expect("serializes");
-        let bundle = Bundle {
+        let bundle = AtomicTxnBatch {
             seq_id: 1,
             packets: vec![Packet { data, meta: None }],
             max_schedule_slot: 0,
@@ -541,10 +550,10 @@ mod tests {
         let (bank_forks, _mint_keypair) = test_bank_forks();
         let (sender, receiver) = unbounded();
         let (mut receive_and_buffer, mut container, response_receiver) =
-            setup_jss_receive_and_buffer(receiver, bank_forks.clone());
+            setup_bam_receive_and_buffer(receiver, bank_forks.clone());
 
         // Create an invalid packet with no data
-        let bundle = Bundle {
+        let bundle = AtomicTxnBatch {
             seq_id: 1,
             packets: vec![Packet {
                 data: vec![],
@@ -568,8 +577,8 @@ mod tests {
         let response = response_receiver.recv().unwrap();
         assert!(matches!(
             response.msg,
-            Some(Msg::BundleResult(bundle_result)) if bundle_result.seq_id == 1 &&
-            matches!(&bundle_result.result, Some(bundle_result::Result::NotCommitted(not_committed)) if
+            Some(Msg::AtomicTxnBatchResult(txn_batch_result)) if txn_batch_result.seq_id == 1 &&
+            matches!(&txn_batch_result.result, Some(atomic_txn_batch_result::Result::NotCommitted(not_committed)) if
                 matches!(not_committed.reason, Some(Reason::DeserializationError(_))))
         ));
     }
@@ -577,7 +586,7 @@ mod tests {
     #[test]
     fn test_parse_bundle_success() {
         let (bank_forks, mint_keypair) = test_bank_forks();
-        let bundle = Bundle {
+        let bundle = AtomicTxnBatch {
             seq_id: 1,
             packets: vec![Packet {
                 data: bincode::serialize(&transfer(
@@ -591,7 +600,7 @@ mod tests {
             }],
             max_schedule_slot: 0,
         };
-        let result = JssReceiveAndBuffer::parse_bundle(&bundle, &bank_forks);
+        let result = BamReceiveAndBuffer::parse_batch(&bundle, &bank_forks);
         assert!(result.is_ok());
         let parsed_bundle = result.unwrap();
         assert_eq!(parsed_bundle.packets.len(), 1);
@@ -601,16 +610,16 @@ mod tests {
     #[test]
     fn test_parse_bundle_empty() {
         let (bank_forks, _mint_keypair) = test_bank_forks();
-        let bundle = Bundle {
+        let batch = AtomicTxnBatch {
             seq_id: 1,
             packets: vec![],
             max_schedule_slot: 0,
         };
-        let result = JssReceiveAndBuffer::parse_bundle(&bundle, &bank_forks);
+        let result = BamReceiveAndBuffer::parse_batch(&batch, &bank_forks);
         assert!(result.is_err());
         assert_eq!(
             result.err().unwrap(),
-            Reason::DeserializationError(jito_protos::proto::jss_types::DeserializationError {
+            Reason::DeserializationError(jito_protos::proto::bam_types::DeserializationError {
                 index: 0,
                 reason: DeserializationErrorReason::Empty as i32,
             })
@@ -620,7 +629,7 @@ mod tests {
     #[test]
     fn test_parse_bundle_invalid_packet() {
         let (bank_forks, _mint_keypair) = test_bank_forks();
-        let bundle = Bundle {
+        let batch = AtomicTxnBatch {
             seq_id: 1,
             packets: vec![Packet {
                 data: vec![0; PACKET_DATA_SIZE + 1], // Invalid size
@@ -628,11 +637,11 @@ mod tests {
             }],
             max_schedule_slot: 0,
         };
-        let result = JssReceiveAndBuffer::parse_bundle(&bundle, &bank_forks);
+        let result = BamReceiveAndBuffer::parse_batch(&batch, &bank_forks);
         assert!(result.is_err());
         assert_eq!(
             result.err().unwrap(),
-            Reason::DeserializationError(jito_protos::proto::jss_types::DeserializationError {
+            Reason::DeserializationError(jito_protos::proto::bam_types::DeserializationError {
                 index: 0,
                 reason: DeserializationErrorReason::BincodeError as i32,
             })
@@ -643,7 +652,7 @@ mod tests {
     fn test_parse_bundle_fee_payer_doesnt_exist() {
         let (bank_forks, _) = test_bank_forks();
         let fee_payer = Keypair::new();
-        let bundle = Bundle {
+        let batch = AtomicTxnBatch {
             seq_id: 1,
             packets: vec![Packet {
                 data: bincode::serialize(&transfer(
@@ -657,13 +666,13 @@ mod tests {
             }],
             max_schedule_slot: 0,
         };
-        let result = JssReceiveAndBuffer::parse_bundle(&bundle, &bank_forks);
+        let result = BamReceiveAndBuffer::parse_batch(&batch, &bank_forks);
         assert!(result.is_err());
         assert_eq!(
             result.err().unwrap(),
-            Reason::TransactionError(jito_protos::proto::jss_types::TransactionError {
+            Reason::TransactionError(jito_protos::proto::bam_types::TransactionError {
                 index: 0,
-                reason: jito_protos::proto::jss_types::TransactionErrorReason::AccountNotFound
+                reason: jito_protos::proto::bam_types::TransactionErrorReason::AccountNotFound
                     as i32,
             })
         );
@@ -672,7 +681,7 @@ mod tests {
     #[test]
     fn test_parse_bundle_inconsistent() {
         let (bank_forks, mint_keypair) = test_bank_forks();
-        let bundle = Bundle {
+        let bundle = AtomicTxnBatch {
             seq_id: 1,
             packets: vec![
                 Packet {
@@ -693,8 +702,8 @@ mod tests {
                         bank_forks.read().unwrap().root_bank().last_blockhash(),
                     ))
                     .unwrap(),
-                    meta: Some(jito_protos::proto::jss_types::Meta {
-                        flags: Some(jito_protos::proto::jss_types::PacketFlags {
+                    meta: Some(jito_protos::proto::bam_types::Meta {
+                        flags: Some(jito_protos::proto::bam_types::PacketFlags {
                             revert_on_error: true,
                             ..Default::default()
                         }),
@@ -704,11 +713,11 @@ mod tests {
             ],
             max_schedule_slot: 0,
         };
-        let result = JssReceiveAndBuffer::parse_bundle(&bundle, &bank_forks);
+        let result = BamReceiveAndBuffer::parse_batch(&bundle, &bank_forks);
         assert!(result.is_err());
         assert_eq!(
             result.err().unwrap(),
-            Reason::DeserializationError(jito_protos::proto::jss_types::DeserializationError {
+            Reason::DeserializationError(jito_protos::proto::bam_types::DeserializationError {
                 index: 0,
                 reason: DeserializationErrorReason::InconsistentBundle as i32,
             })
