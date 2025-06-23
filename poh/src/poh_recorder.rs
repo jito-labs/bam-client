@@ -400,6 +400,11 @@ impl PohRecorder {
             .map(|leader| (leader, target_slot))
     }
 
+    pub fn get_slot_leader(&self, slot: Slot) -> Option<Pubkey> {
+        self.leader_schedule_cache
+            .slot_leader_at(slot, Some(&self.start_bank))
+    }
+
     pub fn next_slot_leader(&self) -> Option<Pubkey> {
         self.leader_after_n_slots(1)
     }
@@ -1170,6 +1175,10 @@ impl PohRecorder {
         let GenesisConfigInfo { genesis_config, .. } = create_genesis_config(2);
         let bank = Arc::new(Bank::new_for_tests(&genesis_config));
         self.reset(bank, None);
+    }
+
+    pub fn get_blockstore(&self) -> Arc<Blockstore> {
+        self.blockstore.clone()
     }
 }
 

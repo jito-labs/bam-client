@@ -11,14 +11,18 @@ use {
             BuilderConfigResp, GetBuilderConfigRequest, StartSchedulerMessage,
             StartSchedulerMessageV0, StartSchedulerResponse, StartSchedulerResponseV0,
         },
-        bam_types::{AtomicTxnBatch, ValidatorHeartBeat, FeeCollectionRequest, FeeCollectionResponse, Packet, Meta},
+        bam_types::{
+            AtomicTxnBatch, FeeCollectionRequest, FeeCollectionResponse, Meta, Packet,
+            ValidatorHeartBeat,
+        },
     },
     solana_gossip::cluster_info::ClusterInfo,
     solana_poh::poh_recorder::PohRecorder,
     solana_sdk::{
         packet::PACKET_DATA_SIZE, signature::Keypair, signer::Signer,
-        transaction::VersionedTransaction,
+        system_instruction::SystemInstruction, transaction::VersionedTransaction,
     },
+    spl_memo,
     std::{
         cmp::min,
         str::FromStr,
@@ -26,6 +30,7 @@ use {
             atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
             Arc, Mutex, RwLock,
         },
+        usize,
     },
     thiserror::Error,
     tokio::time::{interval, timeout},
@@ -262,6 +267,19 @@ impl BamConnection {
         Some(slot_signature)
     }
 
+    fn was_my_leader_slot(
+        slot: u64,
+        poh_recorder: &RwLock<PohRecorder>,
+        cluster_info: &ClusterInfo,
+    ) -> bool {
+        let Some(leader_at_slot) = poh_recorder.read().unwrap().get_slot_leader(slot) else {
+            info!("No leader schedule cache found for slot {}", slot);
+            return false;
+        };
+        let my_pubkey = cluster_info.keypair().pubkey();
+        leader_at_slot == my_pubkey
+    }
+
     fn handle_fee_collection_request(
         fee_collection_request: FeeCollectionRequest,
         outbound_sender: &mut mpsc::Sender<StartSchedulerMessage>,
@@ -285,22 +303,64 @@ impl BamConnection {
             return;
         };
 
-        // Confirm fee amounts (and ensure this is not a duplicate request)
-        // TODO_DG
+        // Check this was my leader slot
+        if !Self::was_my_leader_slot(slot, poh_recorder, cluster_info) {
+            error!(
+                "Received fee collection request for my leader slot: {}",
+                slot
+            );
+            return;
+        }
 
-        // Create transfer transaction and sign
-        let transfer_txn = solana_sdk::system_transaction::transfer(
-            &cluster_info.keypair(),
+        // Validate the requested amount
+        const COMMISSION_PERCENTAGE: u64 = 1; // 1% commission
+        if !Self::valid_fee_amount(slot, lamports, poh_recorder, COMMISSION_PERCENTAGE) {
+            error!(
+                "Invalid fee amount for slot {}: {} lamports",
+                slot, lamports
+            );
+            return;
+        }
+
+        // Prevent double spending
+        if Self::already_paid(
+            slot,
+            destination_pubkey,
+            lamports,
+            poh_recorder,
+            cluster_info,
+        ) {
+            error!("Already paid for slot {}", slot);
+            return;
+        }
+
+        // Create transfer instruction
+        let transfer_instruction = solana_sdk::system_instruction::transfer(
+            &cluster_info.keypair().pubkey(),
             &destination_pubkey,
             lamports,
-            poh_recorder
-                .read()
-                .unwrap()
-                .get_poh_recorder_bank()
-                .bank()
-                .last_blockhash(),
         );
-        let versioned_tx = VersionedTransaction::from(transfer_txn);
+
+        // Create memo instruction
+        let memo = Self::create_slot_memo(slot);
+        let memo_instruction =
+            spl_memo::build_memo(memo.as_bytes(), &[&cluster_info.keypair().pubkey()]);
+
+        let payer = cluster_info.keypair();
+        let blockhash = poh_recorder
+            .read()
+            .unwrap()
+            .get_poh_recorder_bank()
+            .bank()
+            .last_blockhash();
+
+        let tx = solana_sdk::transaction::Transaction::new_signed_with_payer(
+            &[transfer_instruction, memo_instruction],
+            Some(&payer.pubkey()),
+            &[payer.as_ref()],
+            blockhash,
+        );
+        let versioned_tx = VersionedTransaction::from(tx);
 
         info!(
             "Sending fee of {} for slot {} to {}",
@@ -335,6 +395,127 @@ impl BamConnection {
                 ..Default::default()
             }),
             data: data.into(),
+        }
+    }
+
+    /// Validates the fee amount for a given slot.
+    fn valid_fee_amount(
+        slot: u64,
+        requested_lamports: u64,
+        poh_recorder: &std::sync::RwLock<PohRecorder>,
+        commission_percentage: u64,
+    ) -> bool {
+        let blockstore = poh_recorder.read().unwrap().get_blockstore();
+        let Ok(block) = blockstore.get_rooted_block(slot, false) else {
+            error!("No block found for slot {}", slot);
+            return false;
+        };
+
+        const BASE_FEE_LAMPORT_PER_SIGNATURE: u64 = 5_000;
+        let commission_lamports = block
+            .transactions
+            .iter()
+            .map(|tx| {
+                let fee = tx.meta.fee;
+                let base_fee = BASE_FEE_LAMPORT_PER_SIGNATURE
+                    .saturating_mul(tx.transaction.signatures.len() as u64);
+                fee.saturating_sub(base_fee)
+            })
+            .sum::<u64>()
+            .saturating_mul(commission_percentage)
+            .saturating_div(100);
+
+        requested_lamports == commission_lamports
+    }
+
+    fn already_paid(
+        slot: u64,
+        destination_pubkey: solana_sdk::pubkey::Pubkey,
+        requested_lamports: u64,
+        poh_recorder: &RwLock<PohRecorder>,
+        cluster_info: &ClusterInfo,
+    ) -> bool {
+        let blockstore = poh_recorder.read().unwrap().get_blockstore();
+        let pubkey = cluster_info.keypair().pubkey();
+        const LOOKUP_LIMIT: usize = 1000;
+        let Ok(sigs) = blockstore.get_confirmed_signatures_for_address2(
+            pubkey,
+            blockstore.max_root(),
+            None,
+            None,
+            LOOKUP_LIMIT,
+        ) else {
+            error!("Failed to get confirmed signatures for address {}", pubkey);
+            return false;
+        };
+
+        let expected_memo = Self::create_slot_memo(slot);
+        for sig in sigs.infos.iter() {
+            let Ok(Some(tx)) = blockstore.get_rooted_transaction(sig.signature) else {
+                continue;
+            };
+
+            // Validate signature
+            let Some(memos) = Self::extract_memos(&tx.get_transaction()) else {
+                continue;
+            };
+            if memos.iter().any(|memo| memo == &expected_memo) {
+                break;
+            }
+
+            // Parse out the transfer amount from the transaction
+            let transaction = tx.get_transaction();
+            let message = transaction.message;
+            let keys = message.static_account_keys();
+            let Some(from) = keys.get(0) else {
+                continue;
+            };
+            let Some(to) = keys.get(1) else {
+                continue;
+            };
+            if *from != pubkey || *to != destination_pubkey {
+                continue;
+            }
+            for system_instruction in tx
+                .get_transaction()
+                .message
+                .instructions()
+                .iter()
+                .filter(|ix| ix.program_id(keys) == &solana_sdk::system_program::id())
+            {
+                let Ok(SystemInstruction::Transfer { lamports }) =
+                    bincode::deserialize(&system_instruction.data)
+                else {
+                    continue;
+                };
+                if lamports == requested_lamports {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    fn create_slot_memo(slot: u64) -> String {
+        format!("bam{}", slot)
+    }
+
+    fn extract_memos(tx: &solana_sdk::transaction::VersionedTransaction) -> Option<Vec<String>> {
+        let memo_program_id = spl_memo::id();
+        let keys = tx.message.static_account_keys();
+        let mut memos = Vec::new();
+        for instruction in tx.message.instructions() {
+            if instruction.program_id(keys) == &memo_program_id {
+                if let Ok(memo) = std::str::from_utf8(&instruction.data) {
+                    memos.push(memo.to_string());
+                }
+            }
+        }
+        if memos.is_empty() {
+            None
+        } else {
+            Some(memos)
         }
     }
 
