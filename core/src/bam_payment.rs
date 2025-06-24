@@ -71,6 +71,12 @@ impl BamPaymentSender {
                     &payment_pubkey,
                 )
             });
+
+            info!(
+                "slots_unpaid={:?}", leader_slots_for_payment
+);
+
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
     }
 
@@ -89,12 +95,22 @@ impl BamPaymentSender {
             return false;
         };
 
+        if payment_amount == 0 {
+            info!("No payment amount for slot {}. Skipping payment.", slot);
+            return true;
+        }
+
         let transfer_txn = Self::create_transfer_transaction(
             cluster_info,
             poh_recorder,
             *bam_node_pubkey,
             payment_amount,
             slot,
+        );
+
+        info!(
+            "Sending payment of {} lamports for slot {} to BAM node {}",
+            payment_amount, slot, bam_node_pubkey
         );
 
         // Send it via RpcClient (loopback to the same node)
