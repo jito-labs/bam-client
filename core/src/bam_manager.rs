@@ -5,13 +5,15 @@
 /// - Updates block builder fee info
 /// - Sets `bam_enabled` flag that is used everywhere
 use std::{
-    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    str::FromStr,
-    sync::{
+    collections::HashSet, net::{Ipv4Addr, SocketAddr, SocketAddrV4}, str::FromStr, sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, RwLock,
-    },
+    }
 };
+use solana_ledger::blockstore::Blockstore;
+
+use crate::bam_payment::{calculate_payment_amount, create_transfer_transaction};
+
 use {
     crate::{
         bam_connection::BamConnection, bam_dependencies::BamDependencies,
@@ -63,6 +65,8 @@ impl BamManager {
 
         let mut current_connection = None;
         let mut cached_builder_config = None;
+        let mut leader_slots_for_payment = HashSet::new();
+
         while !exit.load(Ordering::Relaxed) {
             // Check if we are in the startup grace period
             if in_startup_grace_period && start.elapsed() > GRACE_PERIOD_DURATION {
@@ -87,6 +91,7 @@ impl BamManager {
                         dependencies.cluster_info.clone(),
                         dependencies.batch_sender.clone(),
                         dependencies.outbound_receiver.clone(),
+                        dependencies.bam_node_pubkey.clone(),
                     ));
                     match result {
                         Ok(connection) => {
@@ -140,6 +145,7 @@ impl BamManager {
             if let Some(bank_start) = poh_recorder.read().unwrap().bank_start() {
                 if bank_start.should_working_bank_still_be_processing_txs() {
                     let leader_state = Self::generate_leader_state(&bank_start.working_bank);
+                    leader_slots_for_payment.insert(leader_state.slot);
                     let _ = dependencies
                         .outbound_sender
                         .try_send(StartSchedulerMessageV0 {
@@ -147,6 +153,24 @@ impl BamManager {
                         });
                 }
             }
+
+            // Review the leader slots that need payment
+            let blockstore = poh_recorder.read().unwrap().get_blockstore();
+            let payment_pubkey = dependencies.bam_node_pubkey.lock().unwrap().clone();
+            let current_slot = poh_recorder.read().unwrap().get_current_slot();
+            leader_slots_for_payment.retain(|slot| {
+                // Will only be finalized  after 32 slots
+                if current_slot.saturating_sub(*slot) < 32 {
+                    return true;
+                }
+                Self::payment_successful(
+                    *slot,
+                    &blockstore,
+                    &dependencies.cluster_info,
+                    &poh_recorder,
+                    &payment_pubkey,
+                )
+            });
 
             // Sleep for a short duration to avoid busy-waiting
             std::thread::sleep(std::time::Duration::from_millis(5));
@@ -196,6 +220,31 @@ impl BamManager {
             block_builder_fee_info.block_builder = pubkey;
             block_builder_fee_info.block_builder_commission = commission;
         }
+    }
+
+    fn payment_successful(
+        slot: u64,
+        blockstore: &Blockstore,
+        cluster_info: &ClusterInfo,
+        poh_recorder: &Arc<RwLock<PohRecorder>>,
+        bam_node_pubkey: &Pubkey,
+    ) -> bool {
+        let Some(payment_amount) = calculate_payment_amount(&blockstore, slot) else {
+            return false;
+        };
+
+        let transfer_txn = create_transfer_transaction(
+            cluster_info,
+            poh_recorder,
+            *bam_node_pubkey,
+            payment_amount,
+            slot,
+        );
+
+        // TODO: send the transaction somehow; options:
+        // - Send via TPU forward
+        // - Send back to BAM and let it handle the transaction
+        true
     }
 
     pub fn join(self) -> std::thread::Result<()> {
