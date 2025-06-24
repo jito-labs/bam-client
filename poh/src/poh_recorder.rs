@@ -1171,6 +1171,10 @@ impl PohRecorder {
         let bank = Arc::new(Bank::new_for_tests(&genesis_config));
         self.reset(bank, None);
     }
+
+    pub fn get_blockstore(&self) -> Arc<Blockstore> {
+        self.blockstore.clone()
+    }
 }
 
 fn do_create_test_recorder(
