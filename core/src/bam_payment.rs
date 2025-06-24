@@ -1,35 +1,34 @@
-use std::sync::{Arc, RwLock};
-
-use solana_gossip::cluster_info::ClusterInfo;
-use solana_ledger::blockstore::Blockstore;
-use solana_poh::poh_recorder::PohRecorder;
-use solana_pubkey::Pubkey;
-use solana_sdk::{signer::Signer, transaction::VersionedTransaction};
+use {
+    solana_gossip::cluster_info::ClusterInfo,
+    solana_ledger::blockstore::Blockstore,
+    solana_poh::poh_recorder::PohRecorder,
+    solana_pubkey::Pubkey,
+    solana_sdk::{signer::Signer, transaction::VersionedTransaction},
+    std::sync::{Arc, RwLock},
+};
 
 const COMMISSION_PERCENTAGE: u64 = 1; // 1% commission
 
-pub fn calculate_payment_amount(
-    blockstore: &Blockstore,
-    slot: u64,
-) -> Option<u64>
-{
+pub fn calculate_payment_amount(blockstore: &Blockstore, slot: u64) -> Option<u64> {
     let Ok(block) = blockstore.get_rooted_block(slot, false) else {
         return None;
     };
 
     const BASE_FEE_LAMPORT_PER_SIGNATURE: u64 = 5_000;
-    Some(block
-        .transactions
-        .iter()
-        .map(|tx| {
-            let fee = tx.meta.fee;
-            let base_fee = BASE_FEE_LAMPORT_PER_SIGNATURE
-                .saturating_mul(tx.transaction.signatures.len() as u64);
-            fee.saturating_sub(base_fee)
-        })
-        .sum::<u64>()
-        .saturating_mul(COMMISSION_PERCENTAGE)
-        .saturating_div(100))
+    Some(
+        block
+            .transactions
+            .iter()
+            .map(|tx| {
+                let fee = tx.meta.fee;
+                let base_fee = BASE_FEE_LAMPORT_PER_SIGNATURE
+                    .saturating_mul(tx.transaction.signatures.len() as u64);
+                fee.saturating_sub(base_fee)
+            })
+            .sum::<u64>()
+            .saturating_mul(COMMISSION_PERCENTAGE)
+            .saturating_div(100),
+    )
 }
 
 pub fn create_transfer_transaction(

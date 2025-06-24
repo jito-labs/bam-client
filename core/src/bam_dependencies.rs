@@ -1,8 +1,6 @@
 /// Dependencies that are needed for the BAM (Jito Scheduler Service) to function.
 /// All-in-one for convenience.
 use std::sync::{atomic::AtomicBool, Arc, Mutex};
-use solana_pubkey::Pubkey;
-
 use {
     crate::proxy::block_engine_stage::BlockBuilderFeeInfo,
     jito_protos::proto::{
@@ -12,6 +10,7 @@ use {
         bam_types::AtomicTxnBatch,
     },
     solana_gossip::cluster_info::ClusterInfo,
+    solana_pubkey::Pubkey,
 };
 
 #[derive(Clone)]
