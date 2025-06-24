@@ -3,7 +3,6 @@
 /// It will calculate the payment amount based on the fees collected in that slot.
 /// The payment is sent as a transfer transaction with a memo indicating the slot.
 /// The payment is sent with a 1% commission.
-
 use {
     crate::bam_dependencies::BamDependencies,
     solana_client::rpc_client::RpcClient,
@@ -11,7 +10,9 @@ use {
     solana_ledger::blockstore::Blockstore,
     solana_poh::poh_recorder::PohRecorder,
     solana_pubkey::Pubkey,
-    solana_sdk::{commitment_config::CommitmentConfig, signer::Signer, transaction::VersionedTransaction},
+    solana_sdk::{
+        commitment_config::CommitmentConfig, signer::Signer, transaction::VersionedTransaction,
+    },
     std::{
         collections::HashSet,
         sync::{Arc, RwLock},
@@ -72,9 +73,7 @@ impl BamPaymentSender {
                 )
             });
 
-            info!(
-                "slots_unpaid={:?}", leader_slots_for_payment
-);
+            info!("slots_unpaid={:?}", leader_slots_for_payment);
 
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
@@ -114,7 +113,8 @@ impl BamPaymentSender {
         );
 
         // Send it via RpcClient (loopback to the same node)
-        let rpc_client = RpcClient::new_with_commitment("http://localhost:8899", CommitmentConfig::confirmed());
+        let rpc_client =
+            RpcClient::new_with_commitment("http://localhost:8899", CommitmentConfig::confirmed());
         rpc_client
             .send_and_confirm_transaction(&transfer_txn)
             .is_ok()
