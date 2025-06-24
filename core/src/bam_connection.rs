@@ -2,7 +2,9 @@
 // Keeps track of last received heartbeat 'behind the scenes' and will mark itself as unhealthy if no heartbeat is received
 
 use {
-    crate::bam_dependencies::v0_to_versioned_proto, futures::{channel::mpsc, StreamExt}, jito_protos::proto::{
+    crate::bam_dependencies::v0_to_versioned_proto,
+    futures::{channel::mpsc, StreamExt},
+    jito_protos::proto::{
         bam_api::{
             bam_node_api_client::BamNodeApiClient, start_scheduler_message_v0::Msg,
             start_scheduler_response::VersionedMsg, start_scheduler_response_v0::Resp,
@@ -10,10 +12,20 @@ use {
             StartSchedulerMessageV0, StartSchedulerResponse, StartSchedulerResponseV0,
         },
         bam_types::{AtomicTxnBatch, BuilderHeartBeat, ValidatorHeartBeat},
-    }, solana_gossip::cluster_info::ClusterInfo, solana_poh::poh_recorder::PohRecorder, solana_pubkey::Pubkey, solana_sdk::{signature::Keypair, signer::Signer}, std::{str::FromStr, sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
-        Arc, Mutex, RwLock,
-    }}, thiserror::Error, tokio::time::{interval, timeout}
+    },
+    solana_gossip::cluster_info::ClusterInfo,
+    solana_poh::poh_recorder::PohRecorder,
+    solana_pubkey::Pubkey,
+    solana_sdk::{signature::Keypair, signer::Signer},
+    std::{
+        str::FromStr,
+        sync::{
+            atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
+            Arc, Mutex, RwLock,
+        },
+    },
+    thiserror::Error,
+    tokio::time::{interval, timeout},
 };
 
 pub struct BamConnection {

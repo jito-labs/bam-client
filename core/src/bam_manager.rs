@@ -5,18 +5,19 @@
 /// - Updates block builder fee info
 /// - Sets `bam_enabled` flag that is used everywhere
 use std::{
-    collections::HashSet, net::{Ipv4Addr, SocketAddr, SocketAddrV4}, str::FromStr, sync::{
+    collections::HashSet,
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+    str::FromStr,
+    sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, RwLock,
-    }
+    },
 };
-use solana_ledger::blockstore::Blockstore;
-
-use crate::bam_payment::{calculate_payment_amount, create_transfer_transaction};
-
 use {
     crate::{
-        bam_connection::BamConnection, bam_dependencies::BamDependencies,
+        bam_connection::BamConnection,
+        bam_dependencies::BamDependencies,
+        bam_payment::{calculate_payment_amount, create_transfer_transaction},
         proxy::block_engine_stage::BlockBuilderFeeInfo,
     },
     jito_protos::proto::{
@@ -24,6 +25,7 @@ use {
         bam_types::{LeaderState, Socket},
     },
     solana_gossip::cluster_info::ClusterInfo,
+    solana_ledger::blockstore::Blockstore,
     solana_poh::poh_recorder::PohRecorder,
     solana_pubkey::Pubkey,
     solana_runtime::bank::Bank,
