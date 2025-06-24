@@ -111,7 +111,7 @@ impl BamManager {
             if !connection.is_healthy() {
                 current_connection = None;
                 cached_builder_config = None;
-                info!("BAM connection lost");
+                warn!("BAM connection lost");
                 continue;
             }
 
