@@ -63,7 +63,7 @@ impl BamManager {
 
         let mut current_connection = None;
         let mut cached_builder_config = None;
-        let payment_sender =
+        let mut payment_sender =
             BamPaymentSender::new(exit.clone(), poh_recorder.clone(), dependencies.clone());
 
         while !exit.load(Ordering::Relaxed) {
