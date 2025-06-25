@@ -6,20 +6,22 @@
 use {
     crate::bam_dependencies::BamDependencies,
     solana_client::rpc_client::RpcClient,
-    solana_gossip::cluster_info::ClusterInfo,
     solana_ledger::blockstore::Blockstore,
     solana_poh::poh_recorder::PohRecorder,
     solana_pubkey::Pubkey,
     solana_sdk::{
-        clock::Slot, commitment_config::CommitmentConfig, compute_budget::ComputeBudgetInstruction, signer::Signer, transaction::VersionedTransaction
+        clock::Slot, commitment_config::CommitmentConfig, compute_budget::ComputeBudgetInstruction,
+        signature::Keypair, signer::Signer, transaction::VersionedTransaction,
     },
     std::{
         collections::BTreeSet,
-        sync::{Arc, RwLock}, time::Instant,
+        sync::{Arc, RwLock},
+        time::Instant,
     },
 };
 
 const COMMISSION_PERCENTAGE: u64 = 1; // 1% commission
+const LOCALHOST: &str = "http://localhost:8899";
 
 pub struct BamPaymentSender {
     thread: std::thread::JoinHandle<()>,
@@ -59,10 +61,7 @@ impl BamPaymentSender {
             }
 
             let now = Instant::now();
-            if now
-                .duration_since(last_payment_time)
-                .as_secs()
-                < DURATION_BETWEEN_PAYMENTS.as_secs()
+            if now.duration_since(last_payment_time).as_secs() < DURATION_BETWEEN_PAYMENTS.as_secs()
             {
                 std::thread::sleep(std::time::Duration::from_millis(100));
                 continue;
@@ -70,17 +69,14 @@ impl BamPaymentSender {
 
             // Create batch
             let current_slot = poh_recorder.read().unwrap().get_current_slot();
-            let batch = Self::create_batch(
-                &blockstore,
-                &leader_slots_for_payment,
-                current_slot,
-            );
+            let batch = Self::create_batch(&blockstore, &leader_slots_for_payment, current_slot);
 
             // If no fees to pay, skip; otherwise, send payment
             let payment_pubkey = dependencies.bam_node_pubkey.lock().unwrap().clone();
             let total_payment = batch.iter().map(|(_, amount)| *amount).sum::<u64>();
             if total_payment > 0 {
-                let ((lowest_slot, _), (highest_slot, _)) = (batch.first().unwrap(), batch.last().unwrap());
+                let ((lowest_slot, _), (highest_slot, _)) =
+                    (batch.first().unwrap(), batch.last().unwrap());
                 info!(
                     "Sending payment for {} slots, range: ({}, {}), total payment: {}",
                     batch.len(),
@@ -88,9 +84,13 @@ impl BamPaymentSender {
                     highest_slot,
                     total_payment
                 );
+                let Some(blockhash) = Self::get_latest_blockhash() else {
+                    error!("Failed to get latest blockhash, skipping payment");
+                    continue;
+                };
                 let batch_txn = Self::create_transfer_transaction(
-                    &dependencies.cluster_info,
-                    &poh_recorder,
+                    dependencies.cluster_info.keypair().as_ref(),
+                    blockhash,
                     payment_pubkey,
                     total_payment,
                     *lowest_slot,
@@ -139,26 +139,28 @@ impl BamPaymentSender {
         batch
     }
 
-    fn payment_successful(
-        txn: &VersionedTransaction,
-        lowest_slot: u64,
-        highest_slot: u64,
-    ) -> bool {
+    fn get_latest_blockhash() -> Option<solana_sdk::hash::Hash> {
+        let rpc_client =
+            RpcClient::new_with_commitment(LOCALHOST, CommitmentConfig::confirmed());
+        rpc_client.get_latest_blockhash().ok()
+    }
 
+    fn payment_successful(txn: &VersionedTransaction, lowest_slot: u64, highest_slot: u64) -> bool {
         // Send it via RpcClient (loopback to the same node)
         let rpc_client =
-            RpcClient::new_with_commitment("http://localhost:8899", CommitmentConfig::confirmed());
+            RpcClient::new_with_commitment(LOCALHOST, CommitmentConfig::confirmed());
 
-        if let Err(err) = rpc_client
-            .send_and_confirm_transaction(txn)
-        {
+        if let Err(err) = rpc_client.send_and_confirm_transaction(txn) {
             error!(
                 "Failed to send payment transaction for slot range ({}, {}): {}",
                 lowest_slot, highest_slot, err
             );
             false
         } else {
-            info!("Payment for slot range ({}, {}) sent successfully", lowest_slot, highest_slot);
+            info!(
+                "Payment for slot range ({}, {}) sent successfully",
+                lowest_slot, highest_slot
+            );
             true
         }
     }
@@ -188,8 +190,8 @@ impl BamPaymentSender {
     }
 
     pub fn create_transfer_transaction(
-        cluster_info: &ClusterInfo,
-        poh_recorder: &Arc<RwLock<PohRecorder>>,
+        keypair: &Keypair,
+        blockhash: solana_sdk::hash::Hash,
         destination_pubkey: Pubkey,
         lamports: u64,
         lowest_slot: u64,
@@ -197,37 +199,30 @@ impl BamPaymentSender {
     ) -> VersionedTransaction {
         // Create transfer instruction
         let transfer_ix = solana_sdk::system_instruction::transfer(
-            &cluster_info.keypair().pubkey(),
+            &keypair.pubkey(),
             &destination_pubkey,
             lamports,
         );
 
         // Create memo instruction
         let memo = format!("bam_pay=({}, {})", lowest_slot, highest_slot);
-        let memo_ix =
-            spl_memo::build_memo(memo.as_bytes(), &[&cluster_info.keypair().pubkey()]);
+        let memo_ix = spl_memo::build_memo(memo.as_bytes(), &[&keypair.pubkey()]);
 
         // Set compute unit price
         let compute_unit_price_ix = ComputeBudgetInstruction::set_compute_unit_price(10_000);
-        let compute_unit_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(22_000);
+        let compute_unit_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(50_000);
 
-        let payer = cluster_info.keypair();
-        let blockhash = poh_recorder
-            .read()
-            .unwrap()
-            .get_poh_recorder_bank()
-            .bank()
-            .last_blockhash();
+        let payer = keypair;
 
         let tx = solana_sdk::transaction::Transaction::new_signed_with_payer(
             &[
-                transfer_ix,
-                memo_ix,
                 compute_unit_price_ix,
                 compute_unit_limit_ix,
+                transfer_ix,
+                memo_ix,
             ],
             Some(&payer.pubkey()),
-            &[payer.as_ref()],
+            &[payer],
             blockhash,
         );
         VersionedTransaction::from(tx)
