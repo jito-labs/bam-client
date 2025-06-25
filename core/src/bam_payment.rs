@@ -83,6 +83,10 @@ impl BamPaymentSender {
         self.slot_sender.try_send(slot).is_ok()
     }
 
+    pub fn join(self) -> std::thread::Result<()> {
+        self.thread.join()
+    }
+
     fn payment_successful(
         slot: u64,
         blockstore: &Blockstore,
