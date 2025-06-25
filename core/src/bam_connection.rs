@@ -3,33 +3,28 @@
 
 use {
     crate::bam_dependencies::v0_to_versioned_proto,
-    futures::{channel::mpsc, StreamExt},
+    futures::{channel::mpsc, SinkExt, StreamExt},
     jito_protos::proto::{
         bam_api::{
             bam_node_api_client::BamNodeApiClient, start_scheduler_message_v0::Msg,
             start_scheduler_response::VersionedMsg, start_scheduler_response_v0::Resp,
-            BuilderConfigResp, GetBuilderConfigRequest, StartSchedulerMessage,
+            AuthChallengeRequest, ConfigRequest, ConfigResponse, StartSchedulerMessage,
             StartSchedulerMessageV0, StartSchedulerResponse, StartSchedulerResponseV0,
         },
-        bam_types::{AtomicTxnBatch, BuilderHeartBeat, ValidatorHeartBeat},
+        bam_types::{AtomicTxnBatch, AuthProof, ValidatorHeartBeat},
     },
     solana_gossip::cluster_info::ClusterInfo,
-    solana_poh::poh_recorder::PohRecorder,
-    solana_pubkey::Pubkey,
     solana_sdk::{signature::Keypair, signer::Signer},
-    std::{
-        str::FromStr,
-        sync::{
-            atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
-            Arc, Mutex, RwLock,
-        },
+    std::sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
+        Arc, Mutex,
     },
     thiserror::Error,
     tokio::time::{interval, timeout},
 };
 
 pub struct BamConnection {
-    builder_config: Arc<Mutex<Option<BuilderConfigResp>>>,
+    config: Arc<Mutex<Option<ConfigResponse>>>,
     background_task: tokio::task::JoinHandle<()>,
     is_healthy: Arc<AtomicBool>,
     url: String,
@@ -40,11 +35,9 @@ impl BamConnection {
     /// Try to initialize a connection to the BAM Node; if it is not possible to connect, it will return an error.
     pub async fn try_init(
         url: String,
-        poh_recorder: Arc<RwLock<PohRecorder>>,
         cluster_info: Arc<ClusterInfo>,
         batch_sender: crossbeam_channel::Sender<AtomicTxnBatch>,
         outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessageV0>,
-        bam_node_pubkey: Arc<Mutex<Pubkey>>,
     ) -> Result<Self, TryInitError> {
         let backend_endpoint = tonic::transport::Endpoint::from_shared(url.clone())?;
         let connection_timeout = std::time::Duration::from_secs(5);
@@ -67,7 +60,7 @@ impl BamConnection {
 
         let metrics = Arc::new(BamConnectionMetrics::default());
         let is_healthy = Arc::new(AtomicBool::new(true));
-        let builder_config = Arc::new(Mutex::new(None));
+        let config = Arc::new(Mutex::new(None));
 
         let exit = Arc::new(AtomicBool::new(false));
         let background_task = tokio::spawn(Self::connection_task(
@@ -75,10 +68,8 @@ impl BamConnection {
             inbound_stream,
             outbound_sender,
             validator_client,
-            builder_config.clone(),
-            bam_node_pubkey.clone(),
+            config.clone(),
             batch_sender,
-            poh_recorder,
             cluster_info,
             metrics.clone(),
             is_healthy.clone(),
@@ -86,7 +77,7 @@ impl BamConnection {
         ));
 
         Ok(Self {
-            builder_config,
+            config,
             background_task,
             is_healthy,
             url,
@@ -99,11 +90,9 @@ impl BamConnection {
         exit: Arc<AtomicBool>,
         mut inbound_stream: tonic::Streaming<StartSchedulerResponse>,
         mut outbound_sender: mpsc::Sender<StartSchedulerMessage>,
-        validator_client: BamNodeApiClient<tonic::transport::channel::Channel>,
-        builder_config: Arc<Mutex<Option<BuilderConfigResp>>>,
-        bam_node_pubkey: Arc<Mutex<Pubkey>>,
+        mut validator_client: BamNodeApiClient<tonic::transport::channel::Channel>,
+        config: Arc<Mutex<Option<ConfigResponse>>>,
         batch_sender: crossbeam_channel::Sender<AtomicTxnBatch>,
-        poh_recorder: Arc<RwLock<PohRecorder>>,
         cluster_info: Arc<ClusterInfo>,
         metrics: Arc<BamConnectionMetrics>,
         is_healthy: Arc<AtomicBool>,
@@ -118,24 +107,40 @@ impl BamConnection {
         let mut outbound_tick_interval = interval(std::time::Duration::from_millis(1));
         outbound_tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Burst);
 
-        let builder_config_task = tokio::spawn(Self::refresh_builder_config_task(
+        // Create auth proof
+        let Some(auth_proof) = Self::prepare_auth_proof(&mut validator_client, cluster_info).await
+        else {
+            error!("Failed to prepare auth response");
+            return;
+        };
+
+        // Send it as first message
+        let start_message = StartSchedulerMessageV0 {
+            msg: Some(Msg::AuthProof(auth_proof)),
+        };
+        if outbound_sender
+            .send(v0_to_versioned_proto(start_message))
+            .await
+            .inspect_err(|_| {
+                error!("Failed to send initial auth proof message");
+            })
+            .is_err()
+        {
+            error!("Outbound sender channel closed before sending initial auth proof message");
+            return;
+        }
+
+        let builder_config_task = tokio::spawn(Self::refresh_config_task(
             exit.clone(),
-            builder_config.clone(),
+            config.clone(),
             validator_client.clone(),
             metrics.clone(),
         ));
         while !exit.load(Relaxed) {
             tokio::select! {
                 _ = heartbeat_interval.tick() => {
-                    let Some(signed_heartbeat) = Self::create_signed_heartbeat(
-                        poh_recorder.read().unwrap().get_current_slot(),
-                        cluster_info.as_ref()) else
-                    {
-                        error!("Failed to create signed heartbeat");
-                        break;
-                    };
                     let _ = outbound_sender.try_send(v0_to_versioned_proto(StartSchedulerMessageV0 {
-                        msg: Some(Msg::HeartBeat(signed_heartbeat)),
+                        msg: Some(Msg::HeartBeat(ValidatorHeartBeat {})),
                     }));
                     metrics.heartbeat_sent.fetch_add(1, Relaxed);
                 }
@@ -170,12 +175,7 @@ impl BamConnection {
                     };
 
                     match inbound {
-                        StartSchedulerResponseV0 { resp: Some(Resp::HeartBeat(BuilderHeartBeat { pubkey })), .. } => {
-                            let Ok(pubkey) = Pubkey::from_str(&pubkey) else {
-                                error!("Received invalid pubkey in heartbeat: {}", pubkey);
-                                continue;
-                            };
-                            *bam_node_pubkey.lock().unwrap() = pubkey;
+                        StartSchedulerResponseV0 { resp: Some(Resp::HeartBeat(_)), .. } => {
                             last_heartbeat = std::time::Instant::now();
                             metrics.heartbeat_received.fetch_add(1, Relaxed);
                         }
@@ -211,9 +211,9 @@ impl BamConnection {
         let _ = builder_config_task.await.ok();
     }
 
-    async fn refresh_builder_config_task(
+    async fn refresh_config_task(
         exit: Arc<AtomicBool>,
-        builder_config: Arc<Mutex<Option<BuilderConfigResp>>>,
+        config: Arc<Mutex<Option<ConfigResponse>>>,
         mut validator_client: BamNodeApiClient<tonic::transport::channel::Channel>,
         metrics: Arc<BamConnectionMetrics>,
     ) {
@@ -223,15 +223,15 @@ impl BamConnection {
         while !exit.load(Relaxed) {
             tokio::select! {
                 _ = interval.tick() => {
-                    let request = tonic::Request::new(GetBuilderConfigRequest {});
+                    let request = tonic::Request::new(ConfigRequest {});
                     match validator_client.get_builder_config(request).await {
                         Ok(response) => {
-                            let config = response.into_inner();
-                            *builder_config.lock().unwrap() = Some(config);
+                            let resp_config = response.into_inner();
+                            *config.lock().unwrap() = Some(resp_config);
                             metrics.builder_config_received.fetch_add(1, Relaxed);
                         }
                         Err(e) => {
-                            error!("Failed to get builder config: {:?}", e);
+                            error!("Failed to get config: {:?}", e);
                         }
                     }
                 }
@@ -239,21 +239,8 @@ impl BamConnection {
         }
     }
 
-    /// Create a signed heartbeat message for the given slot.
-    fn create_signed_heartbeat(
-        slot: u64,
-        cluster_info: &ClusterInfo,
-    ) -> Option<ValidatorHeartBeat> {
-        let slot_signature = Self::sign_slot(slot, cluster_info.keypair().as_ref())?;
-        Some(ValidatorHeartBeat {
-            pubkey: cluster_info.keypair().pubkey().to_string(),
-            slot,
-            slot_signature,
-        })
-    }
-
-    fn sign_slot(slot: u64, keypair: &Keypair) -> Option<String> {
-        let slot_signature = keypair.try_sign_message(&slot.to_le_bytes()).ok()?;
+    fn sign_message(keypair: &Keypair, message: &[u8]) -> Option<String> {
+        let slot_signature = keypair.try_sign_message(message).ok()?;
         let slot_signature = slot_signature.to_string();
         Some(slot_signature)
     }
@@ -262,12 +249,35 @@ impl BamConnection {
         self.is_healthy.load(Relaxed)
     }
 
-    pub fn get_builder_config(&self) -> Option<BuilderConfigResp> {
-        self.builder_config.lock().unwrap().clone()
+    pub fn get_latest_config(&self) -> Option<ConfigResponse> {
+        self.config.lock().unwrap().clone()
     }
 
     pub fn url(&self) -> &str {
         &self.url
+    }
+
+    async fn prepare_auth_proof(
+        validator_client: &mut BamNodeApiClient<tonic::transport::channel::Channel>,
+        cluster_info: Arc<ClusterInfo>,
+    ) -> Option<AuthProof> {
+        let request = tonic::Request::new(AuthChallengeRequest {});
+        let Ok(resp) = validator_client.get_auth_challenge(request).await else {
+            error!("Failed to get auth challenge");
+            return None;
+        };
+
+        let resp = resp.into_inner();
+        let challenge_to_sign = resp.challenge_to_sign;
+        let challenge_bytes = challenge_to_sign.as_bytes();
+
+        let signature = Self::sign_message(cluster_info.keypair().as_ref(), challenge_bytes)?;
+
+        Some(AuthProof {
+            challenge_to_sign,
+            validator_pubkey: cluster_info.keypair().pubkey().to_string(),
+            signature,
+        })
     }
 }
 
