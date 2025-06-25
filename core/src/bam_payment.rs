@@ -79,7 +79,7 @@ impl BamPaymentSender {
         }
     }
 
-    pub fn send_slot(&self, slot: u64) -> bool {
+    pub fn send_slot(&self, slot: Slot) -> bool {
         self.slot_sender.try_send(slot).is_ok()
     }
 
