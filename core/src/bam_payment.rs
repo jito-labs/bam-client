@@ -172,8 +172,8 @@ impl BamPaymentSender {
             false
         } else {
             info!(
-                "Payment for slot range ({}, {}) sent successfully",
-                lowest_slot, highest_slot
+                "Payment for slot range ({}, {}) sent successfully signature: {}",
+                lowest_slot, highest_slot, txn.signatures.first()
             );
             true
         }
