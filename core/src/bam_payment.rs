@@ -119,9 +119,18 @@ impl BamPaymentSender {
         // Send it via RpcClient (loopback to the same node)
         let rpc_client =
             RpcClient::new_with_commitment("http://localhost:8899", CommitmentConfig::confirmed());
-        rpc_client
+        if let Err(err) = rpc_client
             .send_and_confirm_transaction(&transfer_txn)
-            .is_ok()
+        {
+            error!(
+                "Failed to send payment transaction for slot {}: {}",
+                slot, err
+            );
+            false
+        } else {
+            info!("Payment for slot {} sent successfully", slot);
+            true
+        }
     }
 
     pub fn calculate_payment_amount(blockstore: &Blockstore, slot: u64) -> Option<u64> {
