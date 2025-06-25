@@ -102,6 +102,7 @@ impl BamPaymentSender {
                     for (slot, _) in batch.iter() {
                         leader_slots_for_payment.remove(slot);
                     }
+                    info!("Payment sent successfully for slots: {:?}", batch);
                 }
             } else {
                 for (slot, _) in batch.iter() {
@@ -233,5 +234,44 @@ impl BamPaymentSender {
             blockhash,
         );
         VersionedTransaction::from(tx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use {
+        crate::bam_payment::BamPaymentSender,
+        solana_client::rpc_client::RpcClient,
+        solana_sdk::signer::{EncodableKey, Signer},
+    };
+
+    #[test]
+    fn test_submission() {
+        let url = "https://api.testnet.solana.com";
+        let keypair = solana_sdk::signature::Keypair::read_from_file("/Users/david/work/repos/jito-solana-jds/DavdWGiLjrmdDCoqciM9sWm7gbDarcbQjJ5QPakt1dot.json").unwrap();
+        let block_hash = RpcClient::new_with_commitment(
+            url,
+            solana_sdk::commitment_config::CommitmentConfig::confirmed(),
+        )
+        .get_latest_blockhash()
+        .unwrap();
+        let txn = BamPaymentSender::create_transfer_transaction(
+            &keypair,
+            block_hash,
+            keypair.pubkey(),
+            100,
+            341699547,
+            341699547,
+        );
+        let rpc_client = RpcClient::new_with_commitment(
+            url,
+            solana_sdk::commitment_config::CommitmentConfig::confirmed(),
+        );
+        let result = rpc_client.send_and_confirm_transaction(&txn);
+        assert!(
+            result.is_ok(),
+            "Transaction submission failed: {:?}",
+            result.err()
+        );
     }
 }
