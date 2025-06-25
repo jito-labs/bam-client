@@ -140,15 +140,13 @@ impl BamPaymentSender {
     }
 
     fn get_latest_blockhash() -> Option<solana_sdk::hash::Hash> {
-        let rpc_client =
-            RpcClient::new_with_commitment(LOCALHOST, CommitmentConfig::confirmed());
+        let rpc_client = RpcClient::new_with_commitment(LOCALHOST, CommitmentConfig::confirmed());
         rpc_client.get_latest_blockhash().ok()
     }
 
     fn payment_successful(txn: &VersionedTransaction, lowest_slot: u64, highest_slot: u64) -> bool {
         // Send it via RpcClient (loopback to the same node)
-        let rpc_client =
-            RpcClient::new_with_commitment(LOCALHOST, CommitmentConfig::confirmed());
+        let rpc_client = RpcClient::new_with_commitment(LOCALHOST, CommitmentConfig::confirmed());
 
         if let Err(err) = rpc_client.send_and_confirm_transaction(txn) {
             error!(
