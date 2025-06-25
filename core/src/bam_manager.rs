@@ -12,6 +12,8 @@ use std::{
         Arc, Mutex, RwLock,
     },
 };
+use crate::bam_payment::COMMISSION_PERCENTAGE;
+
 use {
     crate::{
         bam_connection::BamConnection, bam_dependencies::BamDependencies,
@@ -227,6 +229,14 @@ impl BamManager {
         let Some(bam_info) = config.bam_config.as_ref() else {
             return false;
         };
+
+        if bam_info.commission_bps != COMMISSION_PERCENTAGE.saturating_mul(100) {
+            error!(
+                "BAM commission bps mismatch: expected {}, got {}",
+                COMMISSION_PERCENTAGE, bam_info.commission_bps
+            );
+            return false;
+        }
 
         let Some(pubkey) = Pubkey::from_str(&bam_info.prio_fee_recipient_pubkey).ok() else {
             return false;
