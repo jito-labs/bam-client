@@ -73,51 +73,66 @@ impl BamPaymentSender {
             let current_slot = poh_recorder.read().unwrap().get_current_slot();
             let batch = Self::create_batch(&blockstore, &leader_slots_for_payment, current_slot);
 
-            // If no fees to pay, skip; otherwise, send payment
-            let payment_pubkey = dependencies.bam_node_pubkey.lock().unwrap().clone();
-            let rpc_url = dependencies
-                .cluster_info
-                .my_contact_info()
-                .rpc()
-                .map_or_else(|| LOCALHOST.to_string(), |rpc| rpc.to_string());
-            let total_payment = batch.iter().map(|(_, amount)| *amount).sum::<u64>();
-            if total_payment > 0 {
-                let ((lowest_slot, _), (highest_slot, _)) =
-                    (batch.first().unwrap(), batch.last().unwrap());
-                info!(
-                    "Sending payment for {} slots, range: ({}, {}), total payment: {}",
-                    batch.len(),
-                    lowest_slot,
-                    highest_slot,
-                    total_payment
-                );
-                let Some(blockhash) = Self::get_latest_blockhash(&rpc_url) else {
-                    error!("Failed to get latest blockhash, skipping payment");
-                    continue;
-                };
-                let batch_txn = Self::create_transfer_transaction(
-                    dependencies.cluster_info.keypair().as_ref(),
-                    blockhash,
-                    payment_pubkey,
-                    total_payment,
-                    *lowest_slot,
-                    *highest_slot,
-                );
-                if Self::payment_successful(&rpc_url, &batch_txn, *lowest_slot, *highest_slot) {
-                    for (slot, _) in batch.iter() {
-                        leader_slots_for_payment.remove(slot);
-                    }
-                    info!("Payment sent successfully for slots: {:?}", batch);
-                }
-            } else {
+            // Try to send
+            if Self::send_batch(&batch, &dependencies) {
                 for (slot, _) in batch.iter() {
                     leader_slots_for_payment.remove(slot);
                 }
+                info!("Payment sent successfully for slots: {:?}", batch);
             }
 
             last_payment_time = now;
             info!("slots_unpaid={:?}", leader_slots_for_payment);
         }
+
+        let final_batch = Self::create_batch(
+            &blockstore,
+            &leader_slots_for_payment,
+            poh_recorder.read().unwrap().get_current_slot(),
+        );
+        Self::send_batch(&final_batch, &dependencies);
+        warn!(
+            "BamPaymentSender thread exiting, final batch: {:?} remaining slots: {:?}",
+            final_batch, leader_slots_for_payment
+        );
+    }
+
+    pub fn send_batch(batch: &[(u64, u64)], dependencies: &BamDependencies) -> bool {
+        let total_payment = batch.iter().map(|(_, amount)| *amount).sum::<u64>();
+        if total_payment == 0 {
+            return true;
+        }
+
+        let payment_pubkey = dependencies.bam_node_pubkey.lock().unwrap().clone();
+        let rpc_url = dependencies
+            .cluster_info
+            .my_contact_info()
+            .rpc()
+            .map_or_else(|| LOCALHOST.to_string(), |rpc| rpc.to_string());
+
+        let ((lowest_slot, _), (highest_slot, _)) = (batch.first().unwrap(), batch.last().unwrap());
+
+        info!(
+            "Sending payment for {} slots, range: ({}, {}), total payment: {}",
+            batch.len(),
+            lowest_slot,
+            highest_slot,
+            total_payment
+        );
+        let Some(blockhash) = Self::get_latest_blockhash(&rpc_url) else {
+            error!("Failed to get latest blockhash, skipping payment");
+            return false;
+        };
+        let batch_txn = Self::create_transfer_transaction(
+            dependencies.cluster_info.keypair().as_ref(),
+            blockhash,
+            payment_pubkey,
+            total_payment,
+            *lowest_slot,
+            *highest_slot,
+        );
+
+        Self::payment_successful(&rpc_url, &batch_txn, *lowest_slot, *highest_slot)
     }
 
     pub fn send_slot(&mut self, slot: Slot) -> bool {
@@ -172,8 +187,10 @@ impl BamPaymentSender {
             false
         } else {
             info!(
-                "Payment for slot range ({}, {}) sent successfully signature: {:?}",
-                lowest_slot, highest_slot, txn.signatures.first()
+                "Payment for slot range ({}, {}) sent successfully; signature: {:?}",
+                lowest_slot,
+                highest_slot,
+                txn.signatures.first()
             );
             true
         }
