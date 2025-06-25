@@ -147,7 +147,6 @@ impl BamPaymentSender {
     fn payment_successful(txn: &VersionedTransaction, lowest_slot: u64, highest_slot: u64) -> bool {
         // Send it via RpcClient (loopback to the same node)
         let rpc_client = RpcClient::new_with_commitment(LOCALHOST, CommitmentConfig::confirmed());
-
         if let Err(err) = rpc_client.send_and_confirm_transaction(txn) {
             error!(
                 "Failed to send payment transaction for slot range ({}, {}): {}",
