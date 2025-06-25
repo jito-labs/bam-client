@@ -378,9 +378,7 @@ impl PohRecorder {
     }
 
     pub fn get_current_slot(&self) -> Slot {
-        self.bank().map_or_else(|| {
-            self.start_bank.slot().saturating_add(1)
-        }, |bank| bank.slot())
+        self.slot_for_tick_height(self.tick_height)
     }
 
     pub fn leader_after_n_slots(&self, slots: u64) -> Option<Pubkey> {
