@@ -14,8 +14,8 @@ use {
         clock::Slot, commitment_config::CommitmentConfig, compute_budget::ComputeBudgetInstruction, signer::Signer, transaction::VersionedTransaction
     },
     std::{
-        collections::HashSet,
-        sync::{Arc, RwLock},
+        collections::BTreeSet,
+        sync::{Arc, RwLock}, time::Instant,
     },
 };
 
@@ -47,7 +47,10 @@ impl BamPaymentSender {
         poh_recorder: Arc<RwLock<PohRecorder>>,
         dependencies: BamDependencies,
     ) {
-        let mut leader_slots_for_payment = HashSet::new();
+        let mut leader_slots_for_payment = BTreeSet::new();
+        let blockstore = poh_recorder.read().unwrap().get_blockstore();
+        const DURATION_BETWEEN_PAYMENTS: std::time::Duration = std::time::Duration::from_secs(30);
+        let mut last_payment_time = Instant::now();
 
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
             // Receive new potentially new slots
@@ -55,27 +58,57 @@ impl BamPaymentSender {
                 leader_slots_for_payment.insert(slot); // Will dedup
             }
 
-            // Review the leader slots that need payment
-            let blockstore = poh_recorder.read().unwrap().get_blockstore();
-            let payment_pubkey = dependencies.bam_node_pubkey.lock().unwrap().clone();
+            let now = Instant::now();
+            if now
+                .duration_since(last_payment_time)
+                .as_secs()
+                < DURATION_BETWEEN_PAYMENTS.as_secs()
+            {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                continue;
+            }
+
+            // Create batch
             let current_slot = poh_recorder.read().unwrap().get_current_slot();
-            leader_slots_for_payment.retain(|slot| {
-                // Will only be finalized  after 32 slots
-                if current_slot.saturating_sub(*slot) < 32 {
-                    return true;
-                }
-                !Self::payment_successful(
-                    *slot,
-                    &blockstore,
+            let batch = Self::create_batch(
+                &blockstore,
+                &leader_slots_for_payment,
+                current_slot,
+            );
+
+            // If no fees to pay, skip; otherwise, send payment
+            let payment_pubkey = dependencies.bam_node_pubkey.lock().unwrap().clone();
+            let total_payment = batch.iter().map(|(_, amount)| *amount).sum::<u64>();
+            if total_payment > 0 {
+                let ((lowest_slot, _), (highest_slot, _)) = (batch.first().unwrap(), batch.last().unwrap());
+                info!(
+                    "Sending payment for {} slots, range: ({}, {}), total payment: {}",
+                    batch.len(),
+                    lowest_slot,
+                    highest_slot,
+                    total_payment
+                );
+                let batch_txn = Self::create_transfer_transaction(
                     &dependencies.cluster_info,
                     &poh_recorder,
-                    &payment_pubkey,
-                )
-            });
+                    payment_pubkey,
+                    total_payment,
+                    *lowest_slot,
+                    *highest_slot,
+                );
+                if Self::payment_successful(&batch_txn, *lowest_slot, *highest_slot) {
+                    for (slot, _) in batch.iter() {
+                        leader_slots_for_payment.remove(slot);
+                    }
+                }
+            } else {
+                for (slot, _) in batch.iter() {
+                    leader_slots_for_payment.remove(slot);
+                }
+            }
 
+            last_payment_time = now;
             info!("slots_unpaid={:?}", leader_slots_for_payment);
-
-            std::thread::sleep(std::time::Duration::from_millis(100));
         }
     }
 
@@ -87,49 +120,45 @@ impl BamPaymentSender {
         self.thread.join()
     }
 
-    fn payment_successful(
-        slot: u64,
+    fn create_batch(
         blockstore: &Blockstore,
-        cluster_info: &ClusterInfo,
-        poh_recorder: &Arc<RwLock<PohRecorder>>,
-        bam_node_pubkey: &Pubkey,
-    ) -> bool {
-        let Some(payment_amount) = Self::calculate_payment_amount(&blockstore, slot) else {
-            return false;
-        };
+        leader_slots_for_payment: &BTreeSet<u64>,
+        current_slot: u64,
+    ) -> Vec<(u64, u64)> {
+        let mut batch = vec![];
+        for slot in leader_slots_for_payment.iter() {
+            if current_slot.saturating_sub(*slot) < 32 {
+                continue;
+            }
+            let Some(payment_amount) = Self::calculate_payment_amount(&blockstore, *slot) else {
+                break;
+            };
 
-        if payment_amount == 0 {
-            info!("No payment amount for slot {}. Skipping payment.", slot);
-            return true;
+            batch.push((*slot, payment_amount));
         }
+        batch
+    }
 
-        let transfer_txn = Self::create_transfer_transaction(
-            cluster_info,
-            poh_recorder,
-            *bam_node_pubkey,
-            payment_amount,
-            slot,
-        );
-
-        info!(
-            "Sending payment of {} lamports for slot {} to BAM node {}",
-            payment_amount, slot, bam_node_pubkey
-        );
+    fn payment_successful(
+        txn: &VersionedTransaction,
+        lowest_slot: u64,
+        highest_slot: u64,
+    ) -> bool {
 
         // Send it via RpcClient (loopback to the same node)
         let rpc_client =
             RpcClient::new_with_commitment("http://localhost:8899", CommitmentConfig::confirmed());
 
         if let Err(err) = rpc_client
-            .send_and_confirm_transaction(&transfer_txn)
+            .send_and_confirm_transaction(txn)
         {
             error!(
-                "Failed to send payment transaction for slot {}: {}",
-                slot, err
+                "Failed to send payment transaction for slot range ({}, {}): {}",
+                lowest_slot, highest_slot, err
             );
             false
         } else {
-            info!("Payment for slot {} sent successfully", slot);
+            info!("Payment for slot range ({}, {}) sent successfully", lowest_slot, highest_slot);
             true
         }
     }
@@ -163,7 +192,8 @@ impl BamPaymentSender {
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         destination_pubkey: Pubkey,
         lamports: u64,
-        slot: u64,
+        lowest_slot: u64,
+        highest_slot: u64,
     ) -> VersionedTransaction {
         // Create transfer instruction
         let transfer_ix = solana_sdk::system_instruction::transfer(
@@ -173,13 +203,13 @@ impl BamPaymentSender {
         );
 
         // Create memo instruction
-        let memo = format!("bam_slot={}", slot);
+        let memo = format!("bam_pay=({}, {})", lowest_slot, highest_slot);
         let memo_ix =
             spl_memo::build_memo(memo.as_bytes(), &[&cluster_info.keypair().pubkey()]);
 
         // Set compute unit price
         let compute_unit_price_ix = ComputeBudgetInstruction::set_compute_unit_price(10_000);
-        let compute_unit_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(20_000);
+        let compute_unit_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(22_000);
 
         let payer = cluster_info.keypair();
         let blockhash = poh_recorder
