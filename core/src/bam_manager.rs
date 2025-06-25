@@ -157,7 +157,9 @@ impl BamManager {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
 
-        payment_sender.join().expect("Failed to join payment sender thread");
+        payment_sender
+            .join()
+            .expect("Failed to join payment sender thread");
     }
 
     fn generate_leader_state(bank: &Bank) -> LeaderState {
