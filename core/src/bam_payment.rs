@@ -11,7 +11,7 @@ use {
     solana_poh::poh_recorder::PohRecorder,
     solana_pubkey::Pubkey,
     solana_sdk::{
-        commitment_config::CommitmentConfig, signer::Signer, transaction::VersionedTransaction,
+        commitment_config::CommitmentConfig, compute_budget::ComputeBudgetInstruction, signer::Signer, transaction::VersionedTransaction
     },
     std::{
         collections::HashSet,
@@ -119,6 +119,7 @@ impl BamPaymentSender {
         // Send it via RpcClient (loopback to the same node)
         let rpc_client =
             RpcClient::new_with_commitment("http://localhost:8899", CommitmentConfig::confirmed());
+
         if let Err(err) = rpc_client
             .send_and_confirm_transaction(&transfer_txn)
         {
@@ -163,7 +164,7 @@ impl BamPaymentSender {
         slot: u64,
     ) -> VersionedTransaction {
         // Create transfer instruction
-        let transfer_instruction = solana_sdk::system_instruction::transfer(
+        let transfer_ix = solana_sdk::system_instruction::transfer(
             &cluster_info.keypair().pubkey(),
             &destination_pubkey,
             lamports,
@@ -171,8 +172,12 @@ impl BamPaymentSender {
 
         // Create memo instruction
         let memo = format!("bam_slot={}", slot);
-        let memo_instruction =
+        let memo_ix =
             spl_memo::build_memo(memo.as_bytes(), &[&cluster_info.keypair().pubkey()]);
+
+        // Set compute unit price
+        let compute_unit_price_ix = ComputeBudgetInstruction::set_compute_unit_price(10_000);
+        let compute_unit_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(20_000);
 
         let payer = cluster_info.keypair();
         let blockhash = poh_recorder
@@ -183,7 +188,12 @@ impl BamPaymentSender {
             .last_blockhash();
 
         let tx = solana_sdk::transaction::Transaction::new_signed_with_payer(
-            &[transfer_instruction, memo_instruction],
+            &[
+                transfer_ix,
+                memo_ix,
+                compute_unit_price_ix,
+                compute_unit_limit_ix,
+            ],
             Some(&payer.pubkey()),
             &[payer.as_ref()],
             blockhash,
