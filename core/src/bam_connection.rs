@@ -111,6 +111,7 @@ impl BamConnection {
         let Some(auth_proof) = Self::prepare_auth_proof(&mut validator_client, cluster_info).await
         else {
             error!("Failed to prepare auth response");
+            is_healthy.store(false, Relaxed);
             return;
         };
 
