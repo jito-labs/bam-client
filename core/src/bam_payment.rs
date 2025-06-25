@@ -26,6 +26,7 @@ const LOCALHOST: &str = "http://localhost:8899";
 pub struct BamPaymentSender {
     thread: std::thread::JoinHandle<()>,
     slot_sender: crossbeam_channel::Sender<u64>,
+    previous_slot: u64,
 }
 
 impl BamPaymentSender {
@@ -40,6 +41,7 @@ impl BamPaymentSender {
                 Self::run(exit, slot_receiver, poh_recorder, dependencies);
             }),
             slot_sender,
+            previous_slot: 0,
         }
     }
 
@@ -112,7 +114,11 @@ impl BamPaymentSender {
         }
     }
 
-    pub fn send_slot(&self, slot: Slot) -> bool {
+    pub fn send_slot(&mut self, slot: Slot) -> bool {
+        if slot <= self.previous_slot {
+            return false;
+        }
+        self.previous_slot = slot;
         self.slot_sender.try_send(slot).is_ok()
     }
 
