@@ -6,7 +6,7 @@
 use {
     crate::bam_dependencies::BamDependencies,
     solana_client::rpc_client::RpcClient,
-    solana_ledger::blockstore::Blockstore,
+    solana_ledger::blockstore::{Blockstore, BlockstoreError},
     solana_poh::poh_recorder::PohRecorder,
     solana_pubkey::Pubkey,
     solana_sdk::{
@@ -163,9 +163,13 @@ impl BamPaymentSender {
     }
 
     pub fn calculate_payment_amount(blockstore: &Blockstore, slot: u64) -> Option<u64> {
-        let Ok(block) = blockstore.get_rooted_block(slot, false).inspect_err(|err| {
-            error!("Failed to get block for slot {}: {}", slot, err);
-        }) else {
+        let result = blockstore.get_rooted_block(slot, false);
+        if result.is_err() && !matches!(result, Err(BlockstoreError::SlotNotRooted)) {
+            error!("Failed to get block for slot {}: {:?}", slot, result);
+            return Some(0);
+        }
+
+        let Ok(block) = result else {
             return None;
         };
 
