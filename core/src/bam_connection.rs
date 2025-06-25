@@ -11,14 +11,18 @@ use {
             BuilderConfigResp, GetBuilderConfigRequest, StartSchedulerMessage,
             StartSchedulerMessageV0, StartSchedulerResponse, StartSchedulerResponseV0,
         },
-        bam_types::{AtomicTxnBatch, ValidatorHeartBeat},
+        bam_types::{AtomicTxnBatch, BuilderHeartBeat, ValidatorHeartBeat},
     },
     solana_gossip::cluster_info::ClusterInfo,
     solana_poh::poh_recorder::PohRecorder,
+    solana_pubkey::Pubkey,
     solana_sdk::{signature::Keypair, signer::Signer},
-    std::sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
-        Arc, Mutex, RwLock,
+    std::{
+        str::FromStr,
+        sync::{
+            atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
+            Arc, Mutex, RwLock,
+        },
     },
     thiserror::Error,
     tokio::time::{interval, timeout},
@@ -40,6 +44,7 @@ impl BamConnection {
         cluster_info: Arc<ClusterInfo>,
         batch_sender: crossbeam_channel::Sender<AtomicTxnBatch>,
         outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessageV0>,
+        bam_node_pubkey: Arc<Mutex<Pubkey>>,
     ) -> Result<Self, TryInitError> {
         let backend_endpoint = tonic::transport::Endpoint::from_shared(url.clone())?;
         let connection_timeout = std::time::Duration::from_secs(5);
@@ -71,6 +76,7 @@ impl BamConnection {
             outbound_sender,
             validator_client,
             builder_config.clone(),
+            bam_node_pubkey.clone(),
             batch_sender,
             poh_recorder,
             cluster_info,
@@ -95,6 +101,7 @@ impl BamConnection {
         mut outbound_sender: mpsc::Sender<StartSchedulerMessage>,
         validator_client: BamNodeApiClient<tonic::transport::channel::Channel>,
         builder_config: Arc<Mutex<Option<BuilderConfigResp>>>,
+        bam_node_pubkey: Arc<Mutex<Pubkey>>,
         batch_sender: crossbeam_channel::Sender<AtomicTxnBatch>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         cluster_info: Arc<ClusterInfo>,
@@ -163,7 +170,12 @@ impl BamConnection {
                     };
 
                     match inbound {
-                        StartSchedulerResponseV0 { resp: Some(Resp::HeartBeat(_)), .. } => {
+                        StartSchedulerResponseV0 { resp: Some(Resp::HeartBeat(BuilderHeartBeat { pubkey })), .. } => {
+                            let Ok(pubkey) = Pubkey::from_str(&pubkey) else {
+                                error!("Received invalid pubkey in heartbeat: {}", pubkey);
+                                continue;
+                            };
+                            *bam_node_pubkey.lock().unwrap() = pubkey;
                             last_heartbeat = std::time::Instant::now();
                             metrics.heartbeat_received.fetch_add(1, Relaxed);
                         }

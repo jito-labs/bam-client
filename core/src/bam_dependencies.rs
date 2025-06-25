@@ -10,6 +10,7 @@ use {
         bam_types::AtomicTxnBatch,
     },
     solana_gossip::cluster_info::ClusterInfo,
+    solana_pubkey::Pubkey,
 };
 
 #[derive(Clone)]
@@ -24,6 +25,7 @@ pub struct BamDependencies {
 
     pub cluster_info: Arc<ClusterInfo>,
     pub block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
+    pub bam_node_pubkey: Arc<Mutex<Pubkey>>,
 }
 
 pub fn v0_to_versioned_proto(v0: StartSchedulerMessageV0) -> StartSchedulerMessage {

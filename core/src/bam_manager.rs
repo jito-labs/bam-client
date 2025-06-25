@@ -15,7 +15,7 @@ use std::{
 use {
     crate::{
         bam_connection::BamConnection, bam_dependencies::BamDependencies,
-        proxy::block_engine_stage::BlockBuilderFeeInfo,
+        bam_payment::BamPaymentSender, proxy::block_engine_stage::BlockBuilderFeeInfo,
     },
     jito_protos::proto::{
         bam_api::{start_scheduler_message_v0::Msg, BuilderConfigResp, StartSchedulerMessageV0},
@@ -63,6 +63,9 @@ impl BamManager {
 
         let mut current_connection = None;
         let mut cached_builder_config = None;
+        let mut payment_sender =
+            BamPaymentSender::new(exit.clone(), poh_recorder.clone(), dependencies.clone());
+
         while !exit.load(Ordering::Relaxed) {
             // Check if we are in the startup grace period
             if in_startup_grace_period && start.elapsed() > GRACE_PERIOD_DURATION {
@@ -87,6 +90,7 @@ impl BamManager {
                         dependencies.cluster_info.clone(),
                         dependencies.batch_sender.clone(),
                         dependencies.outbound_receiver.clone(),
+                        dependencies.bam_node_pubkey.clone(),
                     ));
                     match result {
                         Ok(connection) => {
@@ -140,6 +144,7 @@ impl BamManager {
             if let Some(bank_start) = poh_recorder.read().unwrap().bank_start() {
                 if bank_start.should_working_bank_still_be_processing_txs() {
                     let leader_state = Self::generate_leader_state(&bank_start.working_bank);
+                    payment_sender.send_slot(leader_state.slot);
                     let _ = dependencies
                         .outbound_sender
                         .try_send(StartSchedulerMessageV0 {
@@ -151,6 +156,10 @@ impl BamManager {
             // Sleep for a short duration to avoid busy-waiting
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
+
+        payment_sender
+            .join()
+            .expect("Failed to join payment sender thread");
     }
 
     fn generate_leader_state(bank: &Bank) -> LeaderState {

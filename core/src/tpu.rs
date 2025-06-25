@@ -357,6 +357,7 @@ impl Tpu {
             outbound_receiver: bam_outbound_receiver,
             cluster_info: cluster_info.clone(),
             block_builder_fee_info: Arc::new(Mutex::new(BlockBuilderFeeInfo::default())),
+            bam_node_pubkey: Arc::new(Mutex::new(Pubkey::default())),
         };
 
         let mut blacklisted_accounts = HashSet::new();
