@@ -75,6 +75,11 @@ impl BamPaymentSender {
 
             // If no fees to pay, skip; otherwise, send payment
             let payment_pubkey = dependencies.bam_node_pubkey.lock().unwrap().clone();
+            let rpc_url = dependencies
+                .cluster_info
+                .my_contact_info()
+                .rpc()
+                .map_or_else(|| LOCALHOST.to_string(), |rpc| rpc.to_string());
             let total_payment = batch.iter().map(|(_, amount)| *amount).sum::<u64>();
             if total_payment > 0 {
                 let ((lowest_slot, _), (highest_slot, _)) =
@@ -86,7 +91,7 @@ impl BamPaymentSender {
                     highest_slot,
                     total_payment
                 );
-                let Some(blockhash) = Self::get_latest_blockhash() else {
+                let Some(blockhash) = Self::get_latest_blockhash(&rpc_url) else {
                     error!("Failed to get latest blockhash, skipping payment");
                     continue;
                 };
@@ -98,7 +103,7 @@ impl BamPaymentSender {
                     *lowest_slot,
                     *highest_slot,
                 );
-                if Self::payment_successful(&batch_txn, *lowest_slot, *highest_slot) {
+                if Self::payment_successful(&rpc_url, &batch_txn, *lowest_slot, *highest_slot) {
                     for (slot, _) in batch.iter() {
                         leader_slots_for_payment.remove(slot);
                     }
@@ -146,14 +151,19 @@ impl BamPaymentSender {
         batch
     }
 
-    fn get_latest_blockhash() -> Option<solana_sdk::hash::Hash> {
-        let rpc_client = RpcClient::new_with_commitment(LOCALHOST, CommitmentConfig::confirmed());
+    fn get_latest_blockhash(rpc_url: &str) -> Option<solana_sdk::hash::Hash> {
+        let rpc_client = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
         rpc_client.get_latest_blockhash().ok()
     }
 
-    fn payment_successful(txn: &VersionedTransaction, lowest_slot: u64, highest_slot: u64) -> bool {
+    fn payment_successful(
+        rpc_url: &str,
+        txn: &VersionedTransaction,
+        lowest_slot: Slot,
+        highest_slot: Slot,
+    ) -> bool {
         // Send it via RpcClient (loopback to the same node)
-        let rpc_client = RpcClient::new_with_commitment(LOCALHOST, CommitmentConfig::confirmed());
+        let rpc_client = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
         if let Err(err) = rpc_client.send_and_confirm_transaction(txn) {
             error!(
                 "Failed to send payment transaction for slot range ({}, {}): {}",
@@ -234,44 +244,5 @@ impl BamPaymentSender {
             blockhash,
         );
         VersionedTransaction::from(tx)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use {
-        crate::bam_payment::BamPaymentSender,
-        solana_client::rpc_client::RpcClient,
-        solana_sdk::signer::{EncodableKey, Signer},
-    };
-
-    #[test]
-    fn test_submission() {
-        let url = "https://api.testnet.solana.com";
-        let keypair = solana_sdk::signature::Keypair::read_from_file("/Users/david/work/repos/jito-solana-jds/DavdWGiLjrmdDCoqciM9sWm7gbDarcbQjJ5QPakt1dot.json").unwrap();
-        let block_hash = RpcClient::new_with_commitment(
-            url,
-            solana_sdk::commitment_config::CommitmentConfig::confirmed(),
-        )
-        .get_latest_blockhash()
-        .unwrap();
-        let txn = BamPaymentSender::create_transfer_transaction(
-            &keypair,
-            block_hash,
-            keypair.pubkey(),
-            100,
-            341699547,
-            341699547,
-        );
-        let rpc_client = RpcClient::new_with_commitment(
-            url,
-            solana_sdk::commitment_config::CommitmentConfig::confirmed(),
-        );
-        let result = rpc_client.send_and_confirm_transaction(&txn);
-        assert!(
-            result.is_ok(),
-            "Transaction submission failed: {:?}",
-            result.err()
-        );
     }
 }
