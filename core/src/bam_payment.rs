@@ -51,7 +51,7 @@ impl BamPaymentSender {
 
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
             // Receive new potentially new slots
-            if let Ok(slot) = slot_receiver.recv() {
+            while let Ok(slot) = slot_receiver.try_recv() {
                 leader_slots_for_payment.insert(slot); // Will dedup
             }
 
