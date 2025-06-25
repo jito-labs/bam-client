@@ -68,10 +68,14 @@ impl BamPaymentSender {
                 std::thread::sleep(std::time::Duration::from_millis(100));
                 continue;
             }
+            last_payment_time = now;
 
             // Create batch
             let current_slot = poh_recorder.read().unwrap().get_current_slot();
             let batch = Self::create_batch(&blockstore, &leader_slots_for_payment, current_slot);
+            if batch.is_empty() {
+                continue;
+            }
 
             // Try to send
             if Self::send_batch(&batch, &dependencies) {
@@ -80,8 +84,6 @@ impl BamPaymentSender {
                 }
                 info!("Payment sent successfully for slots: {:?}", batch);
             }
-
-            last_payment_time = now;
             info!("slots_unpaid={:?}", leader_slots_for_payment);
         }
 
