@@ -135,7 +135,9 @@ impl BamPaymentSender {
     }
 
     pub fn calculate_payment_amount(blockstore: &Blockstore, slot: u64) -> Option<u64> {
-        let Ok(block) = blockstore.get_rooted_block(slot, false) else {
+        let Ok(block) = blockstore.get_rooted_block(slot, false).inspect_err(|err| {
+            error!("Failed to get block for slot {}: {}", slot, err);
+        }) else {
             return None;
         };
 
