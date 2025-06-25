@@ -12,13 +12,15 @@ use std::{
         Arc, Mutex, RwLock,
     },
 };
+use crate::bam_payment::COMMISSION_PERCENTAGE;
+
 use {
     crate::{
         bam_connection::BamConnection, bam_dependencies::BamDependencies,
         bam_payment::BamPaymentSender, proxy::block_engine_stage::BlockBuilderFeeInfo,
     },
     jito_protos::proto::{
-        bam_api::{start_scheduler_message_v0::Msg, BuilderConfigResp, StartSchedulerMessageV0},
+        bam_api::{start_scheduler_message_v0::Msg, ConfigResponse, StartSchedulerMessageV0},
         bam_types::{LeaderState, Socket},
     },
     solana_gossip::cluster_info::ClusterInfo,
@@ -86,11 +88,9 @@ impl BamManager {
                 if let Some(url) = url {
                     let result = runtime.block_on(BamConnection::try_init(
                         url,
-                        poh_recorder.clone(),
                         dependencies.cluster_info.clone(),
                         dependencies.batch_sender.clone(),
                         dependencies.outbound_receiver.clone(),
-                        dependencies.bam_node_pubkey.clone(),
                     ));
                     match result {
                         Ok(connection) => {
@@ -129,12 +129,16 @@ impl BamManager {
             }
 
             // Check if block builder info has changed
-            if let Some(builder_config) = connection.get_builder_config() {
+            if let Some(builder_config) = connection.get_latest_config() {
                 if Some(&builder_config) != cached_builder_config.as_ref() {
                     Self::update_tpu_config(Some(&builder_config), &dependencies.cluster_info);
-                    Self::update_key_and_commission(
+                    Self::update_block_engine_key_and_commission(
                         Some(&builder_config),
                         &dependencies.block_builder_fee_info,
+                    );
+                    Self::update_bam_recipient_and_commission(
+                        &builder_config,
+                        &dependencies.bam_node_pubkey,
                     );
                     cached_builder_config = Some(builder_config);
                 }
@@ -182,29 +186,67 @@ impl BamManager {
         )))
     }
 
-    fn update_tpu_config(tpu_info: Option<&BuilderConfigResp>, cluster_info: &Arc<ClusterInfo>) {
-        if let Some(tpu_info) = tpu_info {
-            if let Some(tpu) = Self::get_sockaddr(tpu_info.tpu_sock.as_ref()) {
-                let _ = cluster_info.set_tpu(tpu);
-            }
+    fn update_tpu_config(config: Option<&ConfigResponse>, cluster_info: &Arc<ClusterInfo>) {
+        let Some(tpu_info) = config.and_then(|c| c.bam_config.as_ref()) else {
+            return;
+        };
 
-            if let Some(tpu_fwd) = Self::get_sockaddr(tpu_info.tpu_fwd_sock.as_ref()) {
-                let _ = cluster_info.set_tpu_forwards(tpu_fwd);
-            }
+        if let Some(tpu) = Self::get_sockaddr(tpu_info.tpu_sock.as_ref()) {
+            let _ = cluster_info.set_tpu(tpu);
+        }
+        if let Some(tpu_fwd) = Self::get_sockaddr(tpu_info.tpu_fwd_sock.as_ref()) {
+            let _ = cluster_info.set_tpu_forwards(tpu_fwd);
         }
     }
 
-    fn update_key_and_commission(
-        builder_info: Option<&BuilderConfigResp>,
+    fn update_block_engine_key_and_commission(
+        config: Option<&ConfigResponse>,
         block_builder_fee_info: &Arc<Mutex<BlockBuilderFeeInfo>>,
     ) {
-        if let Some(builder_info) = builder_info {
-            let pubkey = Pubkey::from_str(&builder_info.builder_pubkey).unwrap();
-            let commission = builder_info.builder_commission;
-            let mut block_builder_fee_info = block_builder_fee_info.lock().unwrap();
-            block_builder_fee_info.block_builder = pubkey;
-            block_builder_fee_info.block_builder_commission = commission;
+        let Some(builder_info) = config.and_then(|c| c.block_engine_config.as_ref()) else {
+            return;
+        };
+
+        let Some(pubkey) = Pubkey::from_str(&builder_info.builder_pubkey).ok() else {
+            error!(
+                "Failed to parse builder pubkey: {}",
+                builder_info.builder_pubkey
+            );
+            block_builder_fee_info.lock().unwrap().block_builder = Pubkey::default();
+            return;
+        };
+
+        let commission = builder_info.builder_commission;
+        let mut block_builder_fee_info = block_builder_fee_info.lock().unwrap();
+        block_builder_fee_info.block_builder = pubkey;
+        block_builder_fee_info.block_builder_commission = commission;
+    }
+
+    fn update_bam_recipient_and_commission(
+        config: &ConfigResponse,
+        prio_fee_recipient_pubkey: &Arc<Mutex<Pubkey>>,
+    ) -> bool {
+        let Some(bam_info) = config.bam_config.as_ref() else {
+            return false;
+        };
+
+        if bam_info.commission_bps != COMMISSION_PERCENTAGE.saturating_mul(100) {
+            error!(
+                "BAM commission bps mismatch: expected {}, got {}",
+                COMMISSION_PERCENTAGE, bam_info.commission_bps
+            );
+            return false;
         }
+
+        let Some(pubkey) = Pubkey::from_str(&bam_info.prio_fee_recipient_pubkey).ok() else {
+            return false;
+        };
+
+        prio_fee_recipient_pubkey
+            .lock()
+            .unwrap()
+            .clone_from(&pubkey);
+        true
     }
 
     pub fn join(self) -> std::thread::Result<()> {
