@@ -20,7 +20,7 @@ use {
     },
 };
 
-const COMMISSION_PERCENTAGE: u64 = 1; // 1% commission
+pub const COMMISSION_PERCENTAGE: u64 = 1; // 1% commission
 const LOCALHOST: &str = "http://localhost:8899";
 
 pub struct BamPaymentSender {
