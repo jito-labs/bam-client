@@ -64,7 +64,7 @@ impl BamPaymentSender {
                 if current_slot.saturating_sub(*slot) < 32 {
                     return true;
                 }
-                Self::payment_successful(
+                !Self::payment_successful(
                     *slot,
                     &blockstore,
                     &dependencies.cluster_info,
