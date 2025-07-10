@@ -1,7 +1,9 @@
-use bam_local_cluster::{BamLocalCluster, LocalClusterConfig};
-use clap::{App, Arg};
-use solana_logger::setup;
-use log::{error, info};
+use {
+    bam_local_cluster::{BamLocalCluster, LocalClusterConfig},
+    clap::{App, Arg},
+    log::{error, info},
+    solana_logger::setup,
+};
 
 fn main() {
     setup();
@@ -24,12 +26,12 @@ fn main() {
 
     info!("Starting cluster with config: {:?}", config);
     let cluster = BamLocalCluster::new(config.clone()).expect("Failed to start cluster");
-    
+
     // Run the HTTP server (this will block until shutdown is requested)
     if let Err(e) = cluster.run_http_server(&config) {
         error!("HTTP server error: {}", e);
     }
-    
+
     // Graceful shutdown
     cluster.shutdown();
-} 
+}

@@ -29,4 +29,4 @@ impl LocalClusterConfig {
         let config: LocalClusterConfig = toml::from_str(&config_str)?;
         Ok(config)
     }
-} 
+}

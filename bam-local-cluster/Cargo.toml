@@ -15,6 +15,7 @@ serde = { workspace = true, features = ["derive"] }
 toml = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
+anyhow = { workspace = true }
 solana-core = { workspace = true }
 solana-faucet = { workspace = true }
 solana-local-cluster = { workspace = true }

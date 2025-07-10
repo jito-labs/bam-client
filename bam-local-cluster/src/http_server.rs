@@ -1,15 +1,9 @@
 use {
-    axum::{
-        extract::State,
-        http::StatusCode,
-        response::Json,
-        routing::get,
-        Router,
-    },
+    crate::config::ClusterInfo,
+    axum::{extract::State, http::StatusCode, response::Json, routing::get, Router},
     log::info,
     std::sync::Arc,
     tokio::sync::Notify,
-    crate::config::ClusterInfo,
 };
 
 pub struct AppState {
@@ -32,4 +26,4 @@ pub fn create_app(state: Arc<AppState>) -> Router {
         .route("/cluster-info", get(get_cluster_info))
         .route("/exit", get(exit_handler))
         .with_state(state)
-} 
+}

@@ -1197,6 +1197,7 @@ dependencies = [
 name = "bam-local-cluster"
 version = "2.2.7"
 dependencies = [
+ "anyhow",
  "axum 0.7.9",
  "clap 2.33.3",
  "log",
