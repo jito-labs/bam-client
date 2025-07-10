@@ -1194,6 +1194,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "bam-local-cluster"
+version = "2.2.7"
+dependencies = [
+ "axum 0.7.9",
+ "clap 2.33.3",
+ "log",
+ "serde",
+ "solana-core",
+ "solana-faucet",
+ "solana-local-cluster",
+ "solana-logger",
+ "solana-program-test",
+ "solana-rpc",
+ "solana-sdk",
+ "solana-streamer",
+ "tokio",
+ "toml 0.8.12",
+]
+
+[[package]]
 name = "base64"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8666,6 +8686,7 @@ name = "solana-local-cluster"
 version = "2.2.7"
 dependencies = [
  "assert_matches",
+ "axum 0.7.9",
  "clap 2.33.3",
  "crossbeam-channel",
  "fs_extra",
@@ -8706,6 +8727,7 @@ dependencies = [
  "static_assertions",
  "strum",
  "tempfile",
+ "tokio",
  "toml 0.8.12",
  "trees",
 ]

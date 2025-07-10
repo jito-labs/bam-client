@@ -65,6 +65,7 @@ members = [
     "ledger",
     "ledger-tool",
     "local-cluster",
+    "bam-local-cluster",
     "log-analyzer",
     "log-collector",
     "measure",

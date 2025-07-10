@@ -1,0 +1,25 @@
+[package]
+name = "bam-local-cluster"
+description = "BAM LocalCluster bootstrapper for Solana testing"
+version = { workspace = true }
+authors = { workspace = true }
+repository = { workspace = true }
+homepage = { workspace = true }
+license = { workspace = true }
+edition = { workspace = true }
+
+[dependencies]
+clap = { workspace = true }
+log = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+toml = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+solana-core = { workspace = true }
+solana-faucet = { workspace = true }
+solana-local-cluster = { workspace = true }
+solana-logger = { workspace = true }
+solana-program-test = { workspace = true }
+solana-rpc = { workspace = true }
+solana-sdk = { workspace = true }
+solana-streamer = { workspace = true } 
