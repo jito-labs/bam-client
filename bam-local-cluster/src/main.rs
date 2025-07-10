@@ -23,7 +23,7 @@ fn main() {
     let config = LocalClusterConfig::from_file(config_path).expect("Failed to parse TOML");
 
     info!("Starting cluster with config: {:?}", config);
-    let mut cluster = BamLocalCluster::new(config.clone()).expect("Failed to start cluster");
+    let cluster = BamLocalCluster::new(config.clone()).expect("Failed to start cluster");
     
     // Run the HTTP server (this will block until shutdown is requested)
     if let Err(e) = cluster.run_http_server(&config) {

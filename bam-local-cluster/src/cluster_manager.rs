@@ -164,7 +164,7 @@ impl BamLocalCluster {
         Ok(())
     }
 
-    pub fn shutdown(&mut self) {
+    pub fn shutdown(mut self) {
         info!("Shutting down cluster...");
         self.cluster.exit();
     }

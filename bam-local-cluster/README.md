@@ -14,11 +14,15 @@ The `bam-local-cluster` package contains a binary that spins up a local Solana c
 ## Usage
 
 ```bash
-# Run with info logging
-RUST_LOG=info cargo run -- --config examples/example_config.toml
+# Run with info logging (from top-level directory)
+RUST_LOG=info cargo run --bin bam-local-cluster -- --config bam-local-cluster/examples/example_config.toml
 
 # Run with debug logging (more verbose)
-RUST_LOG=debug cargo run -- --config examples/example_config.toml
+RUST_LOG=debug cargo run --bin bam-local-cluster -- --config bam-local-cluster/examples/example_config.toml
+
+# Run from within the bam-local-cluster directory
+cd bam-local-cluster
+RUST_LOG=info cargo run -- --config examples/example_config.toml
 ```
 
 ## Configuration
@@ -42,9 +46,34 @@ RPC ports are assigned dynamically by the local cluster system.
 
 See `examples/example_config.toml` for a complete example.
 
+## RPC Port Discovery
+
+**Important Gotcha**: RPC ports are assigned dynamically by the local cluster system and cannot be hard-coded in the configuration. The ports you specify in config files will be overwritten.
+
+To discover the actual RPC endpoint at runtime, use the HTTP server endpoint:
+
+```bash
+# Get cluster info including the RPC endpoint
+curl http://127.0.0.1:12346/cluster-info
+
+# Example response:
+# {
+#   "rpc_endpoint": "http://127.0.0.1:12345"
+# }
+```
+
+You can then use the returned RPC endpoint in your applications:
+
+```bash
+# Use the discovered RPC endpoint
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}' \
+  http://127.0.0.1:12345
+```
+
 ## HTTP Endpoints
 
-- `/cluster-info`: Returns cluster information including RPC endpoint
+- `/cluster-info`: Returns one of the RPC endpoints that can be used to discover the rest of the cluster
 - `/exit`: Graceful shutdown endpoint
 
 ## Building
