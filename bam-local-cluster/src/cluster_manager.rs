@@ -71,6 +71,8 @@ impl BamLocalCluster {
             validator_config.on_start_geyser_plugin_config_files =
                 v.geyser_config.as_ref().map(|geyser| vec![geyser.clone()]);
 
+            validator_config.bam_url = Arc::new(Mutex::new(Some(config.bam_url.clone())));
+
             (validator_config, identity_keypair, vote_account_keypair)
         });
 

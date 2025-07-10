@@ -1,13 +1,31 @@
-tip_payment_program_id = "T1pyyaTNZsKv2WcRAB8oVnk93mLJw2XzjtVYqCsaHqt"
-tip_distribution_program_id = "4R3gSG8BpU4t19KYj8CfnbtRpnT8gtk4dvTHxVRwc2r7"
-faucet_address = "127.0.0.1:12345"
+# BAM Local Cluster Example Configuration
+# 
+# This configuration sets up a local Solana cluster with 4 validators
+# for BAM (Blockchain Application Manager) testing.
+
+# BAM service URL (currently unused but required for future features)
 bam_url = "http://127.0.0.1:45678"
+
+# HTTP server address for cluster info and health endpoints
 info_address = "127.0.0.1:12346"
 
+# Tip manager configuration
+tip_payment_program_id = "T1pyyaTNZsKv2WcRAB8oVnk93mLJw2XzjtVYqCsaHqt"
+tip_distribution_program_id = "4R3gSG8BpU4t19KYj8CfnbtRpnT8gtk4dvTHxVRwc2r7"
+
+# Faucet address for airdrops
+faucet_address = "127.0.0.1:12345"
+
+# Validator configurations
+# Each validator can have an optional geyser plugin configuration
 [[validators]]
+# geyser_config = "/path/to/geyser/config.json"  # Optional
 
 [[validators]]
+# geyser_config = "/path/to/geyser/config.json"  # Optional
 
 [[validators]]
+# geyser_config = "/path/to/geyser/config.json"  # Optional
 
 [[validators]]
+# geyser_config = "/path/to/geyser/config.json"  # Optional

@@ -7,26 +7,30 @@ This package provides a local Solana cluster bootstrapper specifically designed 
 The `bam-local-cluster` package contains a binary that spins up a local Solana cluster from a TOML configuration file. It's designed to be used for BAM testing scenarios and includes:
 
 - Local cluster setup with configurable validators
-- HTTP server for cluster information
+- HTTP server for cluster information and health checks
 - Faucet integration for airdrops
 - Tip manager configuration for BAM-specific features
 
 ## Usage
 
 ```bash
-cargo run --bin bam-local-cluster -- --config examples/example_config.toml
+# Run with info logging
+RUST_LOG=info cargo run -- --config examples/example_config.toml
+
+# Run with debug logging (more verbose)
+RUST_LOG=debug cargo run -- --config examples/example_config.toml
 ```
 
 ## Configuration
 
 The configuration file should be in TOML format and include:
 
-- `bam_url`: URL for BAM service
+- `bam_url`: URL for BAM service (currently unused but required)
 - `info_address`: HTTP server address for cluster info
 - `tip_payment_program_id`: Program ID for tip payments
 - `tip_distribution_program_id`: Program ID for tip distribution
 - `faucet_address`: Address for the faucet service
-- `validators`: Array of validator configurations
+- `validators`: Array of validator configurations (each can have optional `geyser_config`)
 
 See `examples/example_config.toml` for a complete example.
 
@@ -38,5 +42,17 @@ See `examples/example_config.toml` for a complete example.
 ## Building
 
 ```bash
-cargo build --bin bam-local-cluster
-``` 
+# Build the binary
+cargo build
+
+# Build and run with logging
+RUST_LOG=info cargo run -- --config examples/example_config.toml
+```
+
+## Development
+
+The code is organized into modules:
+- `src/config.rs`: Configuration parsing and structures
+- `src/http_server.rs`: HTTP server and endpoints
+- `src/cluster_manager.rs`: Main cluster management logic
+- `src/main.rs`: Binary entry point 
