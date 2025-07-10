@@ -69,7 +69,7 @@ impl BamLocalCluster {
 
             // Set hard-coded RPC addresses if specified
             if let (Some(rpc_port), Some(rpc_pubsub_port)) = (v.rpc_port, v.rpc_pubsub_port) {
-                let localhost_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+                let localhost_ip = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
                 validator_config.rpc_addrs = Some((
                     SocketAddr::new(localhost_ip, rpc_port),
                     SocketAddr::new(localhost_ip, rpc_pubsub_port),
