@@ -91,7 +91,7 @@ dependencies = [
  "serde",
  "serde_derive",
  "serde_json",
- "sha2 0.10.8",
+ "sha2 0.10.9",
  "solana-clap-utils",
  "solana-cli",
  "solana-cli-config",
@@ -2346,7 +2346,7 @@ dependencies = [
  "derivation-path",
  "ed25519-dalek",
  "hmac 0.12.1",
- "sha2 0.10.8",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -5980,9 +5980,9 @@ dependencies = [
 
 [[package]]
 name = "sha2"
-version = "0.10.8"
+version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "793db75ad2bcafc3ffa7c68b215fee268f537982cd901d132f89c6343f3a3dc8"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
 dependencies = [
  "cfg-if 1.0.0",
  "cpufeatures",
@@ -6705,7 +6705,7 @@ dependencies = [
  "itertools 0.12.1",
  "log",
  "serde",
- "sha2 0.10.8",
+ "sha2 0.10.9",
  "solana-accounts-db",
  "solana-ledger",
  "solana-logger",
@@ -7635,7 +7635,7 @@ dependencies = [
  "serde_bytes",
  "serde_derive",
  "serde_with",
- "sha2 0.10.8",
+ "sha2 0.10.9",
  "solana-frozen-abi-macro",
  "solana-logger",
  "thiserror 2.0.9",
@@ -7979,7 +7979,7 @@ dependencies = [
  "scopeguard",
  "serde",
  "serde_bytes",
- "sha2 0.10.8",
+ "sha2 0.10.9",
  "solana-account-decoder",
  "solana-accounts-db",
  "solana-bpf-loader-program",
@@ -9276,7 +9276,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "serde_with",
- "sha2 0.10.8",
+ "sha2 0.10.9",
  "sha3",
  "solana-account",
  "solana-bn254",
@@ -9435,7 +9435,7 @@ version = "2.2.0"
 dependencies = [
  "hmac 0.12.1",
  "pbkdf2 0.11.0",
- "sha2 0.10.8",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -9498,7 +9498,7 @@ dependencies = [
 name = "solana-sha256-hasher"
 version = "2.2.0"
 dependencies = [
- "sha2 0.10.8",
+ "sha2 0.10.9",
  "solana-define-syscall",
  "solana-hash",
 ]
@@ -10836,7 +10836,7 @@ checksum = "8c1f05593b7ca9eac7caca309720f2eafb96355e037e6d373b909a80fe7b69b9"
 dependencies = [
  "proc-macro2 1.0.92",
  "quote 1.0.38",
- "sha2 0.10.8",
+ "sha2 0.10.9",
  "syn 2.0.95",
  "thiserror 1.0.69",
 ]
@@ -10924,7 +10924,7 @@ checksum = "e6d375dd76c517836353e093c2dbb490938ff72821ab568b545fd30ab3256b3e"
 dependencies = [
  "proc-macro2 1.0.92",
  "quote 1.0.38",
- "sha2 0.10.8",
+ "sha2 0.10.9",
  "syn 2.0.95",
 ]
 
