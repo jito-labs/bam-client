@@ -47,8 +47,8 @@ fn passthrough_priority(
     *id
 }
 
-const MAX_SCHEDULED_PER_WORKER: usize = 5;
-const MAX_TXN_PER_BATCH: usize = 16;
+const MAX_TXN_PER_BATCH: usize = 64;
+const MAX_SCHEDULED_PER_WORKER: usize = MAX_TXN_PER_BATCH;
 
 pub struct BamScheduler<Tx: TransactionWithMeta> {
     workers_scheduled_count: Vec<usize>,
@@ -199,38 +199,57 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         container: &mut impl StateContainer<Tx>,
         current_slot: Slot,
     ) {
-        let mut current_batch_ids = self.get_or_create_priority_ids();
+        while let Some((next_batch_id, unblocked)) = self.prio_graph.pop_and_unblock() {
+            let Some((_, revert_on_error, slot)) = container.get_batch(next_batch_id.id) else {
+                continue;
+            };
+            self.add_to_result(
+                result,
+                next_batch_id,
+                revert_on_error,
+                slot,
+                current_slot,
+                container,
+            );
+            if result.len() + unblocked.len() >= MAX_TXN_PER_BATCH {
+                break;
+            }
+        }
+
         while let Some(next_batch_id) = self.prio_graph.pop() {
             let Some((_, revert_on_error, slot)) = container.get_batch(next_batch_id.id) else {
                 continue;
             };
-
-            // These should be cleared out earlier; but if not, we remove them here
-            if slot != current_slot {
-                container.remove_by_id(next_batch_id.id);
-                self.prio_graph.unblock(&next_batch_id);
-                self.send_no_leader_slot_bundle_result(priority_to_seq_id(next_batch_id.priority));
-                continue;
-            }
-
-            if revert_on_error {
-                if !current_batch_ids.is_empty() {
-                    result.push((std::mem::take(&mut current_batch_ids), false));
-                    current_batch_ids = self.get_or_create_priority_ids();
-                }
-                result.push((vec![next_batch_id], true));
-                break;
-            } else {
-                current_batch_ids.push(next_batch_id);
-            }
-
-            if current_batch_ids.len() >= MAX_TXN_PER_BATCH {
-                break;
-            }
+            self.add_to_result(
+                result,
+                next_batch_id,
+                revert_on_error,
+                slot,
+                current_slot,
+                container,
+            );
         }
-        if !current_batch_ids.is_empty() {
-            result.push((current_batch_ids, false));
+    }
+
+    fn add_to_result(
+        &mut self,
+        result: &mut Vec<(Vec<TransactionPriorityId>, bool)>,
+        next_batch_id: TransactionPriorityId,
+        revert_on_error: bool,
+        slot: Slot,
+        current_slot: Slot,
+        container: &mut impl StateContainer<Tx>,
+    ) {
+        // These should be cleared out earlier; but if not, we remove them here
+        if slot != current_slot {
+            container.remove_by_id(next_batch_id.id);
+            self.prio_graph.unblock(&next_batch_id);
+            self.send_no_leader_slot_bundle_result(priority_to_seq_id(next_batch_id.priority));
+            return;
         }
+        let mut priority_ids = self.get_or_create_priority_ids();
+        priority_ids.push(next_batch_id);
+        result.push((priority_ids, revert_on_error));
     }
 
     fn send_to_worker(
