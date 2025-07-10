@@ -23,7 +23,7 @@ use {
     solana_streamer::socket::SocketAddrSpace,
     std::{
         iter,
-        net::{SocketAddr, Ipv4Addr, IpAddr},
+        net::SocketAddr,
         str::FromStr,
         sync::{Arc, Mutex},
     },
@@ -67,15 +67,6 @@ impl BamLocalCluster {
                 ..JsonRpcConfig::default()
             };
 
-            // Set hard-coded RPC addresses if specified
-            if let (Some(rpc_port), Some(rpc_pubsub_port)) = (v.rpc_port, v.rpc_pubsub_port) {
-                let ip = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
-                validator_config.rpc_addrs = Some((
-                    SocketAddr::new(ip, rpc_port),
-                    SocketAddr::new(ip, rpc_pubsub_port),
-                ));
-            }
-
             // apply the geyser files if provided
             validator_config.on_start_geyser_plugin_config_files =
                 v.geyser_config.as_ref().map(|geyser| vec![geyser.clone()]);
@@ -86,7 +77,7 @@ impl BamLocalCluster {
         });
 
         let mut validator_configs = Vec::new();
-        let mut identity_keys = Vec::new();
+        let mut identity_keys: Vec<Arc<Keypair>> = Vec::new();
         let mut vote_keys = Vec::new();
         for (cfg, identity, vote) in all_configs {
             validator_configs.push(cfg);

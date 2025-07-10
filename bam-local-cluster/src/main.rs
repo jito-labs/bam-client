@@ -1,7 +1,7 @@
 use bam_local_cluster::{BamLocalCluster, LocalClusterConfig};
 use clap::{App, Arg};
 use solana_logger::setup;
-use log::error;
+use log::{error, info};
 
 fn main() {
     setup();
@@ -21,6 +21,8 @@ fn main() {
 
     let config_path = matches.value_of("config").unwrap();
     let config = LocalClusterConfig::from_file(config_path).expect("Failed to parse TOML");
+
+    info!("Starting cluster with config: {:?}", config);
     let mut cluster = BamLocalCluster::new(config.clone()).expect("Failed to start cluster");
     
     // Run the HTTP server (this will block until shutdown is requested)

@@ -10,7 +10,6 @@ The `bam-local-cluster` package contains a binary that spins up a local Solana c
 - HTTP server for cluster information and health checks
 - Faucet integration for airdrops
 - Tip manager configuration for BAM-specific features
-- Optional hard-coded RPC ports for validators
 
 ## Usage
 
@@ -38,10 +37,8 @@ The configuration file should be in TOML format and include:
 Each validator in the `validators` array can have:
 
 - `geyser_config`: Optional path to geyser plugin configuration file
-- `rpc_port`: Optional hard-coded RPC port (if not specified, port will be assigned dynamically)
-- `rpc_pubsub_port`: Optional hard-coded RPC pubsub port (if not specified, port will be assigned dynamically)
 
-When both `rpc_port` and `rpc_pubsub_port` are specified for a validator, those ports will be used instead of dynamic port assignment. This makes the discovery piece less important but still useful for cluster management.
+RPC ports are assigned dynamically by the local cluster system.
 
 See `examples/example_config.toml` for a complete example.
 
