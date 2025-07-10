@@ -27,7 +27,7 @@ use {
         str::FromStr,
         sync::{Arc, Mutex},
     },
-    tokio::signal,
+    tokio::{signal, sync::Notify},
 };
 
 pub struct BamLocalCluster {
@@ -123,8 +123,10 @@ impl BamLocalCluster {
     pub fn run_http_server(&self, config: &LocalClusterConfig) -> Result<(), Box<dyn std::error::Error>> {
         let rpc_endpoint = self.get_rpc_endpoint();
         let cluster_info = ClusterInfo { rpc_endpoint };
+        let shutdown_notify = Arc::new(Notify::new());
         let app_state = Arc::new(AppState {
             cluster_info,
+            shutdown_notify: shutdown_notify.clone(),
         });
 
         let app = create_app(app_state);
@@ -137,19 +139,24 @@ impl BamLocalCluster {
         });
 
         // Set up signal handler
-        let shutdown_signal = self.runtime.spawn(async {
+        let shutdown_notify_ctrl_c = shutdown_notify.clone();
+        let ctrl_c_signal = self.runtime.spawn(async move {
             signal::ctrl_c().await.unwrap();
             info!("Received Ctrl+C, shutting down...");
+            shutdown_notify_ctrl_c.notify_one();
         });
 
-        // Wait for either the server to exit or a signal
+        // Wait for either the server to exit, a signal, or HTTP shutdown request
         self.runtime.block_on(async {
             tokio::select! {
                 _ = server_handle => {
                     info!("HTTP server exited");
                 }
-                _ = shutdown_signal => {
-                    info!("Shutdown signal received");
+                _ = ctrl_c_signal => {
+                    info!("Ctrl+C signal received");
+                }
+                _ = shutdown_notify.notified() => {
+                    info!("Shutdown requested via HTTP /exit endpoint");
                 }
             }
         });

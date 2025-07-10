@@ -8,20 +8,23 @@ use {
     },
     log::info,
     std::sync::Arc,
+    tokio::sync::Notify,
     crate::config::ClusterInfo,
 };
 
 pub struct AppState {
     pub cluster_info: ClusterInfo,
+    pub shutdown_notify: Arc<Notify>,
 }
 
 pub async fn get_cluster_info(State(state): State<Arc<AppState>>) -> Json<ClusterInfo> {
     Json(state.cluster_info.clone())
 }
 
-pub async fn exit_handler(State(_state): State<Arc<AppState>>) -> StatusCode {
+pub async fn exit_handler(State(state): State<Arc<AppState>>) -> StatusCode {
     info!("Received exit request via HTTP");
-    std::process::exit(0);
+    state.shutdown_notify.notify_one();
+    StatusCode::OK
 }
 
 pub fn create_app(state: Arc<AppState>) -> Router {
