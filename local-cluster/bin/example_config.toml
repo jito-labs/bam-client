@@ -1,0 +1,11 @@
+tip_payment_program_id = "T1pyyaTNZsKv2WcRAB8oVnk93mLJw2XzjtVYqCsaHqt"
+tip_distribution_program_id = "4R3gSG8BpU4t19KYj8CfnbtRpnT8gtk4dvTHxVRwc2r7"
+faucet_address = "127.0.0.1:12345"
+
+[[validators]]
+
+[[validators]]
+
+[[validators]]
+
+[[validators]]
