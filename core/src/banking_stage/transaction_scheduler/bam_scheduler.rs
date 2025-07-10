@@ -247,9 +247,21 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             self.send_no_leader_slot_bundle_result(priority_to_seq_id(next_batch_id.priority));
             return;
         }
-        let mut priority_ids = self.get_or_create_priority_ids();
-        priority_ids.push(next_batch_id);
-        result.push((priority_ids, revert_on_error));
+
+        if let Some((_, prev_revert_on_error)) = result.last().cloned() {
+            if prev_revert_on_error || revert_on_error {
+                let mut priority_ids = self.get_or_create_priority_ids();
+                priority_ids.push(next_batch_id);
+                result.push((priority_ids, revert_on_error));
+            } else {
+                result.last_mut().unwrap().0.push(next_batch_id);
+            }
+
+        } else {
+            let mut priority_ids = self.get_or_create_priority_ids();
+            priority_ids.push(next_batch_id);
+            result.push((priority_ids, revert_on_error));
+        }
     }
 
     fn send_to_worker(
