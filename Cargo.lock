@@ -8686,8 +8686,6 @@ name = "solana-local-cluster"
 version = "2.2.7"
 dependencies = [
  "assert_matches",
- "axum 0.7.9",
- "clap 2.33.3",
  "crossbeam-channel",
  "fs_extra",
  "gag",
@@ -8695,7 +8693,6 @@ dependencies = [
  "log",
  "rand 0.8.5",
  "rayon",
- "serde",
  "serial_test",
  "solana-accounts-db",
  "solana-client",
@@ -8703,16 +8700,13 @@ dependencies = [
  "solana-core",
  "solana-download-utils",
  "solana-entry",
- "solana-faucet",
  "solana-gossip",
  "solana-ledger",
  "solana-local-cluster",
  "solana-logger",
  "solana-net-utils",
- "solana-program-test",
  "solana-pubsub-client",
  "solana-quic-client",
- "solana-rpc",
  "solana-rpc-client",
  "solana-rpc-client-api",
  "solana-runtime",
@@ -8727,8 +8721,6 @@ dependencies = [
  "static_assertions",
  "strum",
  "tempfile",
- "tokio",
- "toml 0.8.12",
  "trees",
 ]
 

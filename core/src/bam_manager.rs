@@ -12,12 +12,12 @@ use std::{
         Arc, Mutex, RwLock,
     },
 };
+use crate::bam_payment::COMMISSION_PERCENTAGE;
+
 use {
     crate::{
-        bam_connection::BamConnection,
-        bam_dependencies::BamDependencies,
-        bam_payment::{BamPaymentSender, COMMISSION_PERCENTAGE},
-        proxy::block_engine_stage::BlockBuilderFeeInfo,
+        bam_connection::BamConnection, bam_dependencies::BamDependencies,
+        bam_payment::BamPaymentSender, proxy::block_engine_stage::BlockBuilderFeeInfo,
     },
     jito_protos::proto::{
         bam_api::{start_scheduler_message_v0::Msg, ConfigResponse, StartSchedulerMessageV0},
