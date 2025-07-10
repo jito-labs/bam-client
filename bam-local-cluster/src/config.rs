@@ -16,6 +16,10 @@ pub struct LocalClusterConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct CustomValidatorConfig {
     pub geyser_config: Option<PathBuf>,
+    /// Optional hard-coded RPC port for this validator
+    pub rpc_port: Option<u16>,
+    /// Optional hard-coded RPC pubsub port for this validator
+    pub rpc_pubsub_port: Option<u16>,
 }
 
 #[derive(Debug, Serialize, Clone)]

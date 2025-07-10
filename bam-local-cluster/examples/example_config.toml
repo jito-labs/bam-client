@@ -18,14 +18,27 @@ faucet_address = "127.0.0.1:12345"
 
 # Validator configurations
 # Each validator can have an optional geyser plugin configuration
+# and optional hard-coded RPC ports
 [[validators]]
 # geyser_config = "/path/to/geyser/config.json"  # Optional
+# Hard-coded RPC ports (optional - if not specified, ports will be assigned dynamically)
+rpc_port = 8899
+rpc_pubsub_port = 8900
 
 [[validators]]
 # geyser_config = "/path/to/geyser/config.json"  # Optional
+# Hard-coded RPC ports (optional - if not specified, ports will be assigned dynamically)
+rpc_port = 8891
+rpc_pubsub_port = 8901
 
 [[validators]]
 # geyser_config = "/path/to/geyser/config.json"  # Optional
+# Hard-coded RPC ports (optional - if not specified, ports will be assigned dynamically)
+rpc_port = 8892
+rpc_pubsub_port = 8902
 
 [[validators]]
 # geyser_config = "/path/to/geyser/config.json"  # Optional
+# Hard-coded RPC ports (optional - if not specified, ports will be assigned dynamically)
+rpc_port = 8893
+rpc_pubsub_port = 8903
