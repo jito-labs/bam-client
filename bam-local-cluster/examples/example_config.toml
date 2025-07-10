@@ -1,7 +1,7 @@
 # BAM Local Cluster Example Configuration
 # 
 # This configuration sets up a local Solana cluster with 4 validators
-# for BAM (Blockchain Application Manager) testing.
+# for BAM (Block Assembly Marketplace) testing.
 
 # BAM service URL (currently unused but required for future features)
 bam_url = "http://127.0.0.1:45678"

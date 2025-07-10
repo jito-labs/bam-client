@@ -1,10 +1,10 @@
 # BAM Local Cluster
 
-This package provides a local Solana cluster bootstrapper specifically designed for BAM (Blockchain Application Manager) testing.
+This package provides a local Solana cluster bootstrapper specifically designed for BAM (Block Assembly Marketplace) testing.
 
 ## Overview
 
-The `bam-local-cluster` package contains a binary that spins up a local Solana cluster from a TOML configuration file. It's designed to be used for BAM testing scenarios and includes:
+The `bam-local-cluster` package contains a binary that spins up a local Solana cluster from a TOML configuration file. It's designed to be used for BAM (Block Assembly Marketplace) testing scenarios and includes:
 
 - Local cluster setup with configurable validators
 - HTTP server for cluster information and health checks
