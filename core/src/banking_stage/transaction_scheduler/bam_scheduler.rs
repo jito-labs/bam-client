@@ -399,6 +399,12 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                 continue;
             }
 
+            info!(
+                "Scheduling batch {} with {} transactions",
+                next_batch_id.id,
+                batch_ids.len()
+            );
+
             let txns = batch_ids
                 .iter()
                 .filter_map(|id| container.get_transaction_ttl(*id))
@@ -426,6 +432,8 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                 continue;
             }
 
+            info!("passed blocking locks check");
+
             // 2. Check thread locks
             let thread_selector = |thead_set: ThreadSet| {
                 Self::least_loaded_worker(
@@ -450,6 +458,8 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                 continue;
             };
 
+            info!("passed thread locks check, worker index: {}", worker_index);
+
             // If too much scheduled on that thread; we skip as we want some optionality for parallelization down the line
             if self.workers_scheduled_count[worker_index] >= MAX_TXN_PER_BATCH {
                 self.thread_locks.unlock_accounts(write_account_locks.iter(), read_account_locks.iter(), worker_index);
@@ -457,17 +467,12 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                 continue;
             }
 
+            info!("Worker {} is selected for scheduling", worker_index);
+
             // 3. Send to worker
             let batch_id = self.get_next_schedule_id();
             let mut priority_ids = self.get_or_create_priority_ids();
-            priority_ids.extend(
-                batch_ids
-                    .iter()
-                    .map(|id| TransactionPriorityId {
-                        id: *id,
-                        priority: next_batch_id.priority,
-                    }),
-            );
+            priority_ids.push(next_batch_id);
             let mut work = self.get_or_create_work_object();
             Self::generate_work(
                 &mut work,
@@ -479,6 +484,12 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
             );
             self.send_to_worker(worker_index, priority_ids, work);
             num_scheduled += 1;
+
+            info!(
+                "Scheduled batch {} to worker {}",
+                next_batch_id.id,
+                worker_index
+            );
         }
 
         // Push everything skipped back into container
@@ -553,6 +564,8 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                     read_account_locks.iter(),
                     inflight_batch_info.worker_index,
                 );
+
+                info!("unblocked accounts for id {:?}", priority_id.id);
 
                 // If we got extra info, we can send back the result
                 if let Some(extra_info) = result.extra_info.as_ref() {
