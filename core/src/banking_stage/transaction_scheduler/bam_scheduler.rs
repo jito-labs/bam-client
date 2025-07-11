@@ -528,8 +528,8 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             let seq_id = priority_to_seq_id(next_batch_id.priority);
             self.send_no_leader_slot_bundle_result(seq_id);
             container.remove_by_id(next_batch_id.id);
-            self.scheduled_but_not_popped.remove(next_batch_id);
         }
+        self.scheduled_but_not_popped.clear();
     }
 }
 
