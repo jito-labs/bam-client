@@ -204,10 +204,12 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         current_slot: Slot,
     ) {
         while let Some((next_batch_id, unblocked)) = self.prio_graph.pop_and_unblock() {
+            // If already scheduled in different group; skip scheduling
             if self.scheduled_but_not_popped.contains(&next_batch_id) {
                 continue;
             }
 
+            // Add the current and unblocked ids to the result
             for next_batch_id in std::iter::once(next_batch_id).chain(unblocked.iter().cloned()) {
                 let Some((_, revert_on_error, slot)) = container.get_batch(next_batch_id.id) else {
                     continue;
@@ -223,12 +225,18 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 self.scheduled_but_not_popped.extend(unblocked.iter().cloned());
             }
 
+            // If we've saturated the batch, we can stop
             if result.len() >= MAX_TXN_PER_BATCH {
                 break;
             }
         }
     }
 
+    // Adds the next batch ID to the result.
+    // - If the slot is not the current slot, it will remove the batch from the container.
+    // - If the last result is 'revert_on_error', it will create a new entry in the result.
+    // - If the last result is not 'revert_on_error', it will append the next batch ID to the last entry.
+    // - if the current bundle is revert_on_error, it will create a new entry in the result.
     fn add_to_result(
         &mut self,
         result: &mut Vec<(Vec<TransactionPriorityId>, bool)>,
