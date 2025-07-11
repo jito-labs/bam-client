@@ -18,7 +18,7 @@ use {
         programs::spl_programs,
         tokio::{self, runtime::Runtime},
     },
-    solana_rpc::rpc::JsonRpcConfig,
+    solana_rpc::{rpc::JsonRpcConfig, rpc_pubsub_service::PubSubConfig},
     solana_sdk::{
         pubkey::Pubkey,
         rent::Rent,
@@ -77,6 +77,12 @@ impl BamLocalCluster {
                     full_api: true,
                     disable_health_check: true,
                     ..JsonRpcConfig::default()
+                };
+
+                validator_config.pubsub_config = PubSubConfig {
+                    enable_block_subscription: true,
+                    enable_vote_subscription: true,
+                    ..PubSubConfig::default()
                 };
 
                 // apply the geyser files if provided
