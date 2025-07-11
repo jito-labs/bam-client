@@ -353,7 +353,7 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
         }
 
         let mut result = 0;
-        const MAX_BUNDLES_PER_RECV: usize = 24;
+        const MAX_BUNDLES_PER_RECV: usize = 32;
         match decision {
             BufferedPacketsDecision::Consume(_) | BufferedPacketsDecision::Hold => {
                 while result < MAX_BUNDLES_PER_RECV {

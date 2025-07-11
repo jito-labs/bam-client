@@ -2,6 +2,8 @@
 /// schedules them to workers in a FIFO, account-aware manner. This is facilitated by the
 /// `PrioGraph` data structure, which is a directed graph that tracks the dependencies.
 use std::time::Instant;
+use ahash::HashSet;
+
 use {
     super::{
         bam_receive_and_buffer::priority_to_seq_id,
@@ -47,8 +49,8 @@ fn passthrough_priority(
     *id
 }
 
-const MAX_TXN_PER_BATCH: usize = 16;
-const MAX_SCHEDULED_PER_WORKER: usize = MAX_TXN_PER_BATCH * 4;
+const MAX_TXN_PER_BATCH: usize = 32;
+const MAX_SCHEDULED_PER_WORKER: usize = MAX_TXN_PER_BATCH;
 
 pub struct BamScheduler<Tx: TransactionWithMeta> {
     workers_scheduled_count: Vec<usize>,
@@ -59,6 +61,7 @@ pub struct BamScheduler<Tx: TransactionWithMeta> {
     next_batch_id: u64,
     inflight_batch_info: HashMap<TransactionBatchId, InflightBatchInfo>,
     prio_graph: SchedulerPrioGraph,
+    scheduled_but_not_popped: HashSet<TransactionPriorityId>,
     slot: Option<Slot>,
 
     // Reusable objects to avoid allocations
@@ -90,6 +93,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             next_batch_id: 0,
             inflight_batch_info: HashMap::default(),
             prio_graph: PrioGraph::new(passthrough_priority),
+            scheduled_but_not_popped: HashSet::default(),
             slot: None,
             reusable_consume_work: Vec::new(),
             reusable_priority_ids: Vec::new(),
@@ -200,34 +204,28 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         current_slot: Slot,
     ) {
         while let Some((next_batch_id, unblocked)) = self.prio_graph.pop_and_unblock() {
-            let Some((_, revert_on_error, slot)) = container.get_batch(next_batch_id.id) else {
+            if self.scheduled_but_not_popped.contains(&next_batch_id) {
                 continue;
-            };
-            self.add_to_result(
-                result,
-                next_batch_id,
-                revert_on_error,
-                slot,
-                current_slot,
-                container,
-            );
-            if result.len() + unblocked.len() >= MAX_TXN_PER_BATCH {
+            }
+
+            for next_batch_id in std::iter::once(next_batch_id).chain(unblocked.iter().cloned()) {
+                let Some((_, revert_on_error, slot)) = container.get_batch(next_batch_id.id) else {
+                    continue;
+                };
+                self.add_to_result(
+                    result,
+                    next_batch_id,
+                    revert_on_error,
+                    slot,
+                    current_slot,
+                    container,
+                );
+                self.scheduled_but_not_popped.extend(unblocked.iter().cloned());
+            }
+
+            if result.len() >= MAX_TXN_PER_BATCH {
                 break;
             }
-        }
-
-        while let Some(next_batch_id) = self.prio_graph.pop() {
-            let Some((_, revert_on_error, slot)) = container.get_batch(next_batch_id.id) else {
-                continue;
-            };
-            self.add_to_result(
-                result,
-                next_batch_id,
-                revert_on_error,
-                slot,
-                current_slot,
-                container,
-            );
         }
     }
 
@@ -530,6 +528,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             let seq_id = priority_to_seq_id(next_batch_id.priority);
             self.send_no_leader_slot_bundle_result(seq_id);
             container.remove_by_id(next_batch_id.id);
+            self.scheduled_but_not_popped.remove(next_batch_id);
         }
     }
 }
