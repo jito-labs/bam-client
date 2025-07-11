@@ -698,7 +698,7 @@ impl Consumer {
             }),
             Some(&bundle_account_locks.read_locks()),
             Some(&bundle_account_locks.write_locks()),
-            true,
+            revert_on_error,
         ));
         drop(bundle_account_locks);
 
