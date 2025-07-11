@@ -1,7 +1,11 @@
 /// A Scheduled implementation that pulls batches off the container, and then
 /// schedules them to workers in a FIFO, account-aware manner. This is facilitated by the
 /// `PrioGraph` data structure, which is a directed graph that tracks the dependencies.
-use std::time::Instant;
+use ahash::HashSet;
+use prio_graph::AccessKind;
+
+use crate::banking_stage::{read_write_account_set::ReadWriteAccountSet, transaction_scheduler::thread_aware_account_locks::{ThreadAwareAccountLocks, ThreadSet}};
+
 use {
     super::{
         bam_receive_and_buffer::priority_to_seq_id,
@@ -25,29 +29,12 @@ use {
         bam_api::{start_scheduler_message_v0::Msg, StartSchedulerMessageV0},
         bam_types::{atomic_txn_batch_result, not_committed::Reason, SchedulingError},
     },
-    prio_graph::{AccessKind, GraphNode, PrioGraph},
     solana_pubkey::Pubkey,
     solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
     solana_sdk::clock::Slot,
     solana_svm_transaction::svm_message::SVMMessage,
 };
 
-type SchedulerPrioGraph = PrioGraph<
-    TransactionPriorityId,
-    Pubkey,
-    TransactionPriorityId,
-    fn(&TransactionPriorityId, &GraphNode<TransactionPriorityId>) -> TransactionPriorityId,
->;
-
-#[inline(always)]
-fn passthrough_priority(
-    id: &TransactionPriorityId,
-    _graph_node: &GraphNode<TransactionPriorityId>,
-) -> TransactionPriorityId {
-    *id
-}
-
-const MAX_SCHEDULED_PER_WORKER: usize = 5;
 const MAX_TXN_PER_BATCH: usize = 16;
 
 pub struct BamScheduler<Tx: TransactionWithMeta> {
@@ -56,15 +43,15 @@ pub struct BamScheduler<Tx: TransactionWithMeta> {
     finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
     response_sender: Sender<StartSchedulerMessageV0>,
 
+    thread_locks: ThreadAwareAccountLocks,
+
     next_batch_id: u64,
     inflight_batch_info: HashMap<TransactionBatchId, InflightBatchInfo>,
-    prio_graph: SchedulerPrioGraph,
     slot: Option<Slot>,
 
     // Reusable objects to avoid allocations
     reusable_consume_work: Vec<ConsumeWork<Tx>>,
     reusable_priority_ids: Vec<Vec<TransactionPriorityId>>,
-    reusable_batches_for_scheduling: Vec<(Vec<TransactionPriorityId>, bool)>,
 }
 
 // A structure to hold information about inflight batches.
@@ -73,7 +60,6 @@ pub struct BamScheduler<Tx: TransactionWithMeta> {
 struct InflightBatchInfo {
     pub priority_ids: Vec<TransactionPriorityId>,
     pub worker_index: usize,
-    pub slot: Slot,
 }
 
 impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
@@ -82,18 +68,18 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
         response_sender: Sender<StartSchedulerMessageV0>,
     ) -> Self {
+        let worker_count = consume_work_senders.len();
         Self {
             workers_scheduled_count: vec![0; consume_work_senders.len()],
             consume_work_senders,
             finished_consume_work_receiver,
             response_sender,
+            thread_locks: ThreadAwareAccountLocks::new(worker_count),
             next_batch_id: 0,
             inflight_batch_info: HashMap::default(),
-            prio_graph: PrioGraph::new(passthrough_priority),
             slot: None,
             reusable_consume_work: Vec::new(),
             reusable_priority_ids: Vec::new(),
-            reusable_batches_for_scheduling: Vec::new(),
         }
     }
 
@@ -117,128 +103,11 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         })
     }
 
-    /// Insert all incoming transactions into the `PrioGraph`.
-    fn pull_into_prio_graph<S: StateContainer<Tx>>(&mut self, container: &mut S) {
-        while let Some(next_batch_id) = container.pop() {
-            let Some((batch_ids, _, _)) = container.get_batch(next_batch_id.id) else {
-                error!("Batch {} not found in container", next_batch_id.id);
-                continue;
-            };
-            let txns = batch_ids
-                .iter()
-                .filter_map(|txn_id| container.get_transaction_ttl(*txn_id));
-
-            self.prio_graph.insert_transaction(
-                next_batch_id,
-                Self::get_transactions_account_access(txns.into_iter()),
-            );
-        }
-    }
-
-    fn get_best_available_worker(&mut self) -> Option<usize> {
-        let mut best_worker_index = None;
-        let mut best_worker_count = MAX_SCHEDULED_PER_WORKER;
-        for (worker_index, count) in self.workers_scheduled_count.iter_mut().enumerate() {
-            if *count == 0 {
-                return Some(worker_index);
-            }
-            if best_worker_index.is_none() || *count < best_worker_count {
-                best_worker_index = Some(worker_index);
-                best_worker_count = *count;
-            }
-        }
-        best_worker_index
-    }
-
-    fn send_to_workers(
-        &mut self,
-        container: &mut impl StateContainer<Tx>,
-        num_scheduled: &mut usize,
-    ) {
-        let Some(slot) = self.slot else {
-            warn!("Slot is not set, cannot schedule transactions");
-            return;
-        };
-
-        // Schedule any available transactions in prio-graph
-        let mut batches_for_scheduling = std::mem::take(&mut self.reusable_batches_for_scheduling);
-        while let Some(worker_index) = self.get_best_available_worker() {
-            self.get_batches_for_scheduling(&mut batches_for_scheduling, container, slot);
-            if batches_for_scheduling.is_empty() {
-                break;
-            }
-            for (priority_ids, revert_on_error) in batches_for_scheduling.drain(..) {
-                let len = priority_ids.len();
-                let batch_id = self.get_next_schedule_id();
-                let mut work = self.get_or_create_work_object();
-                Self::generate_work(
-                    &mut work,
-                    batch_id,
-                    &priority_ids,
-                    revert_on_error,
-                    container,
-                    slot,
-                );
-                self.send_to_worker(worker_index, priority_ids, work, slot);
-                *num_scheduled += len;
-            }
-        }
-        std::mem::swap(
-            &mut self.reusable_batches_for_scheduling,
-            &mut batches_for_scheduling,
-        );
-    }
-
-    /// Get batches of transactions for scheduling.
-    /// Build a normal txn batch up to a maximum of `MAX_TXN_PER_BATCH` transactions;
-    /// but if a 'revert_on_error' batch is encountered, the WIP batch is finalized
-    /// and the 'revert_on_error' batch is appended to the result.
-    fn get_batches_for_scheduling(
-        &mut self,
-        result: &mut Vec<(Vec<TransactionPriorityId>, bool)>,
-        container: &mut impl StateContainer<Tx>,
-        current_slot: Slot,
-    ) {
-        let mut current_batch_ids = self.get_or_create_priority_ids();
-        while let Some(next_batch_id) = self.prio_graph.pop() {
-            let Some((_, revert_on_error, slot)) = container.get_batch(next_batch_id.id) else {
-                continue;
-            };
-
-            // These should be cleared out earlier; but if not, we remove them here
-            if slot != current_slot {
-                container.remove_by_id(next_batch_id.id);
-                self.prio_graph.unblock(&next_batch_id);
-                self.send_no_leader_slot_bundle_result(priority_to_seq_id(next_batch_id.priority));
-                continue;
-            }
-
-            if revert_on_error {
-                if !current_batch_ids.is_empty() {
-                    result.push((std::mem::take(&mut current_batch_ids), false));
-                    current_batch_ids = self.get_or_create_priority_ids();
-                }
-                result.push((vec![next_batch_id], true));
-                break;
-            } else {
-                current_batch_ids.push(next_batch_id);
-            }
-
-            if current_batch_ids.len() >= MAX_TXN_PER_BATCH {
-                break;
-            }
-        }
-        if !current_batch_ids.is_empty() {
-            result.push((current_batch_ids, false));
-        }
-    }
-
     fn send_to_worker(
         &mut self,
         worker_index: usize,
         priority_ids: Vec<TransactionPriorityId>,
         work: ConsumeWork<Tx>,
-        slot: Slot,
     ) {
         let consume_work_sender = &self.consume_work_senders[worker_index];
         let batch_id = work.batch_id;
@@ -248,7 +117,6 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             InflightBatchInfo {
                 priority_ids,
                 worker_index,
-                slot,
             },
         );
         self.workers_scheduled_count[worker_index] += 1;
@@ -487,19 +355,16 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 container.remove_by_id(next_batch_id.id);
             }
         }
+    }
 
-        // Unblock all transactions blocked by inflight batches
-        // and then drain the prio-graph
-        for (_, inflight_info) in self.inflight_batch_info.iter() {
-            for priority_id in &inflight_info.priority_ids {
-                self.prio_graph.unblock(priority_id);
-            }
-        }
-        while let Some((next_batch_id, _)) = self.prio_graph.pop_and_unblock() {
-            let seq_id = priority_to_seq_id(next_batch_id.priority);
-            self.send_no_leader_slot_bundle_result(seq_id);
-            container.remove_by_id(next_batch_id.id);
-        }
+    fn least_loaded_worker(
+        workers_scheduled_count: &[usize],
+        thread_set: ThreadSet,
+    ) -> usize {
+        thread_set
+            .contained_threads_iter()
+            .min_by_key(|&worker_index| workers_scheduled_count[worker_index])
+            .unwrap_or(0)
     }
 }
 
@@ -509,19 +374,118 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
         container: &mut S,
         _pre_graph_filter: impl Fn(&[&Tx], &mut [bool]),
         _pre_lock_filter: impl Fn(&Tx) -> bool,
-    ) -> Result<SchedulingSummary, SchedulerError> {
-        let start_time = Instant::now();
+    ) -> Result<SchedulingSummary, SchedulerError>
+    {
+        let Some(slot) = self.slot else {
+            warn!("Slot is not set, cannot schedule transactions");
+            return Ok(SchedulingSummary {
+                num_scheduled: 0,
+                num_unschedulable: 0,
+                num_filtered_out: 0,
+                filter_time_us: 0
+            });
+        };
+
         let mut num_scheduled = 0;
+        let mut blocking_locks = ReadWriteAccountSet::default();
+        let mut skipped = vec![];
+        while let Some(next_batch_id) = container.pop() {
+            let Some((batch_ids, revert_on_error, batch_slot)) = container.get_batch(next_batch_id.id)
+            else {
+                continue;
+            };
+            if batch_slot != slot {
+                container.remove_by_id(next_batch_id.id);
+                continue;
+            }
 
-        self.pull_into_prio_graph(container);
-        self.send_to_workers(container, &mut num_scheduled);
+            let txns = batch_ids
+                .iter()
+                .filter_map(|id| container.get_transaction_ttl(*id))
+                .collect::<Vec<_>>();
 
-        Ok(SchedulingSummary {
+            // 1. Check blocking locks and extract account locks
+            let mut write_account_locks = HashSet::default();
+            let mut read_account_locks = HashSet::default();
+            for (key, kind) in Self::get_transactions_account_access(txns.iter().cloned()) {
+                let blocked = if matches!(kind, AccessKind::Write) {
+                    write_account_locks.insert(key);
+                    !blocking_locks.can_write(&key)
+                } else {
+                    read_account_locks.insert(key);
+                    !blocking_locks.can_read(&key)
+                };
+                if blocked {
+                    skipped.push(next_batch_id);
+                    continue;
+                }
+            }
+
+            // 2. Check thread locks
+            let thread_selector = |thead_set: ThreadSet| {
+                Self::least_loaded_worker(
+                    &self.workers_scheduled_count,
+                    thead_set,
+                )
+            };
+            let Some(worker_index) = self.thread_locks.try_lock_accounts(
+                write_account_locks.iter(),
+                read_account_locks.iter(),
+                ThreadSet::any(self.consume_work_senders.len()),
+                thread_selector,
+            )
+            else {
+                skipped.push(next_batch_id);
+                for write in write_account_locks.iter() {
+                    blocking_locks.add_write(write);
+                }
+                for read in read_account_locks.iter() {
+                    blocking_locks.add_read(read);
+                }
+                continue;
+            };
+
+            // If too much scheduled on that thread; we skip as we want some optionality for parallelization down the line
+            if self.workers_scheduled_count[worker_index] >= MAX_TXN_PER_BATCH {
+                self.thread_locks.unlock_accounts(write_account_locks.iter(), read_account_locks.iter(), worker_index);
+                skipped.push(next_batch_id);
+                continue;
+            }
+
+            // 3. Send to worker
+            let batch_id = self.get_next_schedule_id();
+            let mut priority_ids = self.get_or_create_priority_ids();
+            priority_ids.extend(
+                batch_ids
+                    .iter()
+                    .map(|id| TransactionPriorityId {
+                        id: *id,
+                        priority: next_batch_id.priority,
+                    }),
+            );
+            let mut work = self.get_or_create_work_object();
+            Self::generate_work(
+                &mut work,
+                batch_id,
+                &priority_ids,
+                revert_on_error,
+                container,
+                slot,
+            );
+            self.send_to_worker(worker_index, priority_ids, work);
+            num_scheduled += 1;
+        }
+
+        // Push everything skipped back into container
+        let num_unschedulable = skipped.len();
+        container.push_ids_into_queue(skipped.into_iter());
+
+        return Ok(SchedulingSummary {
             num_scheduled,
-            num_unschedulable: 0,
+            num_unschedulable,
             num_filtered_out: 0,
-            filter_time_us: start_time.elapsed().as_micros() as u64,
-        })
+            filter_time_us: 0
+        });
     }
 
     /// Receive completed batches of transactions without blocking.
@@ -561,6 +525,30 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                 .enumerate()
                 .take(len)
             {
+                let Some((batch_ids, _, _)) = container.get_batch(priority_id.id) else {
+                    warn!("Batch {} not found in container for priority_id {:?}", batch_id.0, priority_id);
+                    continue;
+                };
+                let txns = batch_ids
+                    .iter()
+                    .filter_map(|id| container.get_transaction_ttl(*id))
+                    .collect::<Vec<_>>();
+                let mut write_account_locks = HashSet::default();
+                let mut read_account_locks = HashSet::default();
+                for (key, kind) in Self::get_transactions_account_access(txns.iter().cloned()) {
+                    if matches!(kind, AccessKind::Write) {
+                        write_account_locks.insert(key);
+                    } else {
+                        read_account_locks.insert(key);
+                    }
+                }
+                // Unlock the accounts
+                self.thread_locks.unlock_accounts(
+                    write_account_locks.iter(),
+                    read_account_locks.iter(),
+                    inflight_batch_info.worker_index,
+                );
+
                 // If we got extra info, we can send back the result
                 if let Some(extra_info) = result.extra_info.as_ref() {
                     let bundle_result = if revert_on_error {
@@ -576,11 +564,6 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                         Self::generate_bundle_result(txn_result)
                     };
                     self.send_back_result(priority_to_seq_id(priority_id.priority), bundle_result);
-                }
-
-                // If in the same slot, unblock the transaction
-                if Some(inflight_batch_info.slot) == self.slot {
-                    self.prio_graph.unblock(priority_id);
                 }
 
                 // Remove the transaction from the container
@@ -1010,10 +993,6 @@ mod tests {
         assert!(
             container.pop().is_none(),
             "Container should be empty after processing all transactions"
-        );
-        assert!(
-            scheduler.prio_graph.is_empty(),
-            "Prio-graph should be empty after processing all transactions"
         );
 
         // Receive the NotCommitted Result
