@@ -407,6 +407,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
             // 1. Check blocking locks and extract account locks
             let mut write_account_locks = HashSet::default();
             let mut read_account_locks = HashSet::default();
+            let mut any_blocked = false;
             for (key, kind) in Self::get_transactions_account_access(txns.iter().cloned()) {
                 let blocked = if matches!(kind, AccessKind::Write) {
                     write_account_locks.insert(key);
@@ -416,9 +417,13 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                     !blocking_locks.can_read(&key)
                 };
                 if blocked {
-                    skipped.push(next_batch_id);
-                    continue;
+                    any_blocked = true;
+                    break;
                 }
+            }
+            if any_blocked {
+                skipped.push(next_batch_id);
+                continue;
             }
 
             // 2. Check thread locks
