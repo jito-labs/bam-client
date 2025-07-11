@@ -181,6 +181,6 @@ impl BamLocalCluster {
 
     pub fn shutdown(mut self) {
         info!("Shutting down cluster...");
-        self.cluster.exit();
+        self.cluster.close_preserve_ledgers();
     }
 }
