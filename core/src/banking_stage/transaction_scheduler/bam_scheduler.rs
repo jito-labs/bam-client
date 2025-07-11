@@ -205,12 +205,21 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
     ) {
         while let Some((next_batch_id, unblocked)) = self.prio_graph.pop_and_unblock() {
             // If already scheduled in different group; skip scheduling
-            if self.scheduled_but_not_popped.remove(&next_batch_id) {
-                continue;
+            if !self.scheduled_but_not_popped.remove(&next_batch_id) {
+                if let Some((_, revert_on_error, slot)) = container.get_batch(next_batch_id.id) {
+                    self.add_to_result(
+                        result,
+                        next_batch_id,
+                        revert_on_error,
+                        slot,
+                        current_slot,
+                        container,
+                    );
+                }
             }
 
             // Add the current and unblocked ids to the result
-            for next_batch_id in std::iter::once(next_batch_id).chain(unblocked.iter().cloned()) {
+            for next_batch_id in unblocked {
                 let Some((_, revert_on_error, slot)) = container.get_batch(next_batch_id.id) else {
                     continue;
                 };
@@ -222,7 +231,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                     current_slot,
                     container,
                 );
-                self.scheduled_but_not_popped.extend(unblocked.iter().cloned());
+                self.scheduled_but_not_popped.insert(next_batch_id);
             }
 
             // If we've saturated the batch, we can stop
