@@ -209,7 +209,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             if self.scheduled_but_not_popped.contains(&next_batch_id) {
                 continue;
             }
-            scheduled_but_not_popped.insert(next_batch_id);
+            scheduled_but_not_popped.remove(&next_batch_id);
 
             // Add the current and unblocked ids to the result
             for next_batch_id in std::iter::once(next_batch_id).chain(unblocked.iter().cloned()) {
