@@ -60,6 +60,8 @@ pub struct BamScheduler<Tx: TransactionWithMeta> {
 struct InflightBatchInfo {
     pub priority_ids: Vec<TransactionPriorityId>,
     pub worker_index: usize,
+    pub write_account_locks: HashSet<Pubkey>,
+    pub read_account_locks: HashSet<Pubkey>,
 }
 
 impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
@@ -108,6 +110,8 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         worker_index: usize,
         priority_ids: Vec<TransactionPriorityId>,
         work: ConsumeWork<Tx>,
+        write_account_locks: HashSet<Pubkey>,
+        read_account_locks: HashSet<Pubkey>,
     ) {
         let consume_work_sender = &self.consume_work_senders[worker_index];
         let batch_id = work.batch_id;
@@ -117,6 +121,8 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             InflightBatchInfo {
                 priority_ids,
                 worker_index,
+                write_account_locks,
+                read_account_locks,
             },
         );
         self.workers_scheduled_count[worker_index] += 1;
@@ -396,6 +402,8 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
             };
             if batch_slot != slot {
                 container.remove_by_id(next_batch_id.id);
+                let seq_id = priority_to_seq_id(next_batch_id.priority);
+                self.send_no_leader_slot_bundle_result(seq_id);
                 continue;
             }
 
@@ -482,7 +490,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                 container,
                 slot,
             );
-            self.send_to_worker(worker_index, priority_ids, work);
+            self.send_to_worker(worker_index, priority_ids, work, write_account_locks, read_account_locks);
             num_scheduled += 1;
 
             info!(
@@ -528,6 +536,11 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                 continue;
             };
             self.workers_scheduled_count[inflight_batch_info.worker_index] -= 1;
+            self.thread_locks.unlock_accounts(
+                inflight_batch_info.write_account_locks.iter(),
+                inflight_batch_info.read_account_locks.iter(),
+                inflight_batch_info.worker_index,
+            );
 
             // Should never not be 1; but just in case
             let len = if revert_on_error {
@@ -545,27 +558,6 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                     warn!("Batch {} not found in container for priority_id {:?}", batch_id.0, priority_id);
                     continue;
                 };
-                let txns = batch_ids
-                    .iter()
-                    .filter_map(|id| container.get_transaction_ttl(*id))
-                    .collect::<Vec<_>>();
-                let mut write_account_locks = HashSet::default();
-                let mut read_account_locks = HashSet::default();
-                for (key, kind) in Self::get_transactions_account_access(txns.iter().cloned()) {
-                    if matches!(kind, AccessKind::Write) {
-                        write_account_locks.insert(key);
-                    } else {
-                        read_account_locks.insert(key);
-                    }
-                }
-                // Unlock the accounts
-                self.thread_locks.unlock_accounts(
-                    write_account_locks.iter(),
-                    read_account_locks.iter(),
-                    inflight_batch_info.worker_index,
-                );
-
-                info!("unblocked accounts for id {:?}", priority_id.id);
 
                 // If we got extra info, we can send back the result
                 if let Some(extra_info) = result.extra_info.as_ref() {
@@ -584,7 +576,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                     self.send_back_result(priority_to_seq_id(priority_id.priority), bundle_result);
                 }
 
-                // Remove the transaction from the container
+                // Remove the batch from the container
                 container.remove_by_id(priority_id.id);
             }
             self.recycle_priority_ids(inflight_batch_info.priority_ids);
