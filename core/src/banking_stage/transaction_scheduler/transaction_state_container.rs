@@ -114,6 +114,8 @@ pub(crate) trait StateContainer<Tx: TransactionWithMeta> {
     fn remove_by_id(&mut self, id: TransactionId);
 
     fn get_min_max_priority(&self) -> MinMaxResult<u64>;
+
+    fn len(&self) -> usize;
 }
 
 // Extra capacity is added because some additional space is needed when
@@ -220,6 +222,10 @@ impl<Tx: TransactionWithMeta> StateContainer<Tx> for TransactionStateContainer<T
             },
             None => MinMaxResult::NoElements,
         }
+    }
+
+    fn len(&self) -> usize {
+        self.id_to_transaction_state.len()
     }
 }
 
@@ -361,6 +367,10 @@ impl StateContainer<RuntimeTransactionView> for TransactionViewStateContainer {
     #[inline]
     fn is_empty(&self) -> bool {
         self.inner.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.inner.len()
     }
 
     #[inline]

@@ -14,6 +14,7 @@ echo "Git hash: $GIT_SHA"
 DEBUG_FLAGS=${1-false}
 
 DOCKER_BUILDKIT=1 docker build \
+  --platform linux/amd64 \
   --build-arg debug=$DEBUG_FLAGS \
   --build-arg ci_commit=$GIT_SHA \
   -t jitolabs/build-solana \
