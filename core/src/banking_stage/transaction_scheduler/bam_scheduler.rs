@@ -203,13 +203,9 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         container: &mut impl StateContainer<Tx>,
         current_slot: Slot,
     ) {
-        let mut scheduled_but_not_popped = HashSet::default();
         while let Some((next_batch_id, unblocked)) = self.prio_graph.pop_and_unblock() {
             // If already scheduled in different group; skip scheduling
-            if self.scheduled_but_not_popped.contains(&next_batch_id) {
-                continue;
-            }
-            if scheduled_but_not_popped.remove(&next_batch_id) {
+            if self.scheduled_but_not_popped.remove(&next_batch_id) {
                 continue;
             }
 
@@ -226,7 +222,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                     current_slot,
                     container,
                 );
-                scheduled_but_not_popped.extend(unblocked.iter().cloned());
+                self.scheduled_but_not_popped.extend(unblocked.iter().cloned());
             }
 
             // If we've saturated the batch, we can stop
@@ -234,8 +230,6 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 break;
             }
         }
-
-        self.scheduled_but_not_popped.extend(scheduled_but_not_popped.iter().cloned());
     }
 
     // Adds the next batch ID to the result.
