@@ -554,11 +554,6 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                 .enumerate()
                 .take(len)
             {
-                let Some((batch_ids, _, _)) = container.get_batch(priority_id.id) else {
-                    warn!("Batch {} not found in container for priority_id {:?}", batch_id.0, priority_id);
-                    continue;
-                };
-
                 // If we got extra info, we can send back the result
                 if let Some(extra_info) = result.extra_info.as_ref() {
                     let bundle_result = if revert_on_error {
