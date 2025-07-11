@@ -47,8 +47,8 @@ fn passthrough_priority(
     *id
 }
 
-const MAX_SCHEDULED_PER_WORKER: usize = 5;
-const MAX_TXN_PER_BATCH: usize = 16;
+const MAX_SCHEDULED_PER_WORKER: usize = 20;
+const MAX_TXN_PER_BATCH: usize = 1;
 
 pub struct BamScheduler<Tx: TransactionWithMeta> {
     workers_scheduled_count: Vec<usize>,
@@ -467,6 +467,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         if bank_start.map(|bs| bs.working_bank.slot()) == self.slot {
             return;
         }
+
         if let Some(bank_start) = bank_start {
             info!(
                 "Bank boundary detected: slot changed from {:?} to {:?}",
@@ -479,12 +480,15 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             self.slot = None;
         }
 
+        let mut num_dropped_on_clear = 0;
+
         // Drain container and send back 'retryable'
         if self.slot.is_none() {
             while let Some(next_batch_id) = container.pop() {
                 let seq_id = priority_to_seq_id(next_batch_id.priority);
                 self.send_no_leader_slot_bundle_result(seq_id);
                 container.remove_by_id(next_batch_id.id);
+                num_dropped_on_clear += 1;
             }
         }
 
@@ -499,7 +503,13 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             let seq_id = priority_to_seq_id(next_batch_id.priority);
             self.send_no_leader_slot_bundle_result(seq_id);
             container.remove_by_id(next_batch_id.id);
+            num_dropped_on_clear += 1;
         }
+
+        datapoint_info!(
+            "bam-scheduler_num-dropped-on-clear", 
+            ("count", num_dropped_on_clear, i64)
+        );
     }
 }
 
