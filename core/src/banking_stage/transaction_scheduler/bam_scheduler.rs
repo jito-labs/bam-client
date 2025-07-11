@@ -207,7 +207,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             // If already scheduled in different group; skip scheduling
             if !self.scheduled_but_not_popped.remove(&next_batch_id) {
                 if let Some((_, revert_on_error, slot)) = container.get_batch(next_batch_id.id) {
-                    self.add_to_result(
+                    self.add_to_batch(
                         result,
                         next_batch_id,
                         revert_on_error,
@@ -223,7 +223,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 let Some((_, revert_on_error, slot)) = container.get_batch(next_batch_id.id) else {
                     continue;
                 };
-                self.add_to_result(
+                self.add_to_batch(
                     result,
                     next_batch_id,
                     revert_on_error,
@@ -241,12 +241,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         }
     }
 
-    // Adds the next batch ID to the result.
-    // - If the slot is not the current slot, it will remove the batch from the container.
-    // - If the last result is 'revert_on_error', it will create a new entry in the result.
-    // - If the last result is not 'revert_on_error', it will append the next batch ID to the last entry.
-    // - if the current bundle is revert_on_error, it will create a new entry in the result.
-    fn add_to_result(
+    fn add_to_batch(
         &mut self,
         result: &mut Vec<(Vec<TransactionPriorityId>, bool)>,
         next_batch_id: TransactionPriorityId,
