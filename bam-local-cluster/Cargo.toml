@@ -12,15 +12,18 @@ edition = { workspace = true }
 clap = { workspace = true }
 log = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 toml = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 anyhow = { workspace = true }
 solana-core = { workspace = true }
 solana-faucet = { workspace = true }
+solana-ledger = { workspace = true }
 solana-local-cluster = { workspace = true }
 solana-logger = { workspace = true }
 solana-program-test = { workspace = true }
 solana-rpc = { workspace = true }
+solana-runtime = { workspace = true }
 solana-sdk = { workspace = true }
 solana-streamer = { workspace = true } 

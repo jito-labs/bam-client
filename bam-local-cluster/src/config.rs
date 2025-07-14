@@ -10,6 +10,8 @@ pub struct LocalClusterConfig {
     pub tip_payment_program_id: String,
     pub tip_distribution_program_id: String,
     pub faucet_address: String,
+    pub ledger_base_directory: String,
+    pub validator_binary_path: Option<String>,
     pub validators: Vec<CustomValidatorConfig>,
 }
 
@@ -21,6 +23,7 @@ pub struct CustomValidatorConfig {
 #[derive(Debug, Serialize, Clone)]
 pub struct ClusterInfo {
     pub rpc_endpoint: String,
+    pub bootstrap_gossip: String,
 }
 
 impl LocalClusterConfig {
@@ -28,5 +31,13 @@ impl LocalClusterConfig {
         let config_str = std::fs::read_to_string(path)?;
         let config: LocalClusterConfig = toml::from_str(&config_str)?;
         Ok(config)
+    }
+
+    pub fn get_bootstrap_node(&self) -> Option<&CustomValidatorConfig> {
+        self.validators.first()
+    }
+
+    pub fn get_validator_nodes(&self) -> Vec<&CustomValidatorConfig> {
+        self.validators.iter().skip(1).collect()
     }
 }

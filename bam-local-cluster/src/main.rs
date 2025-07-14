@@ -28,7 +28,7 @@ fn main() {
     let cluster = BamLocalCluster::new(config.clone()).expect("Failed to start cluster");
 
     // Run the HTTP server (this will block until shutdown is requested)
-    if let Err(e) = cluster.run_http_server(&config) {
+    if let Err(e) = cluster.run() {
         error!("HTTP server error: {}", e);
     }
 
