@@ -5,6 +5,7 @@ declare dcou_tainted_packages=(
   agave-ledger-tool
   agave-store-histogram
   agave-store-tool
+  bam-banking-bench
   solana-accounts-cluster-bench
   solana-banking-bench
   solana-bench-tps
