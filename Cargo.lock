@@ -7597,6 +7597,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "slab",
+ "smallvec",
  "solana-accounts-db",
  "solana-address-lookup-table-program",
  "solana-bloom",
