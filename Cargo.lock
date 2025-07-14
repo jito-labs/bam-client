@@ -531,6 +531,7 @@ dependencies = [
  "tikv-jemallocator",
  "tokio",
  "tonic",
+ "url 2.5.4",
 ]
 
 [[package]]
@@ -1388,6 +1389,45 @@ dependencies = [
  "miniz_oxide",
  "object 0.31.1",
  "rustc-demangle",
+]
+
+[[package]]
+name = "bam-local-cluster"
+version = "3.1.0"
+dependencies = [
+ "agave-feature-set",
+ "anyhow",
+ "axum 0.7.9",
+ "clap 2.33.3",
+ "log",
+ "serde",
+ "serde_json",
+ "solana-account 3.0.0",
+ "solana-cluster-type",
+ "solana-commitment-config",
+ "solana-core",
+ "solana-faucet",
+ "solana-feature-gate-interface 3.0.0",
+ "solana-fee-calculator 3.0.0",
+ "solana-genesis-config",
+ "solana-keypair",
+ "solana-ledger",
+ "solana-local-cluster",
+ "solana-logger",
+ "solana-native-token 3.0.0",
+ "solana-program-binaries",
+ "solana-rent 3.0.0",
+ "solana-rpc",
+ "solana-rpc-client",
+ "solana-runtime",
+ "solana-shred-version",
+ "solana-signer",
+ "solana-stake-program",
+ "solana-streamer",
+ "solana-system-interface 2.0.0",
+ "solana-vote-program",
+ "tokio",
+ "toml 0.8.12",
 ]
 
 [[package]]
@@ -8602,6 +8642,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "slab",
+ "smallvec",
  "solana-account 3.0.0",
  "solana-accounts-db",
  "solana-address-lookup-table-interface 3.0.0",
@@ -8614,6 +8655,7 @@ dependencies = [
  "solana-client",
  "solana-clock 3.0.0",
  "solana-cluster-type",
+ "solana-commitment-config",
  "solana-compute-budget",
  "solana-compute-budget-instruction",
  "solana-compute-budget-interface",
