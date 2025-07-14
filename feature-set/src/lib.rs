@@ -3,7 +3,6 @@
 use {
     ahash::{AHashMap, AHashSet},
     solana_epoch_schedule::EpochSchedule,
-    solana_feature_set_interface::FeatureSet as SdkFeatureSet,
     solana_hash::Hash,
     solana_pubkey::Pubkey,
     solana_sha256_hasher::Hasher,
@@ -13,60 +12,59 @@ use {
 #[cfg_attr(feature = "frozen-abi", derive(solana_frozen_abi_macro::AbiExample))]
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct FeatureSet {
-    feature_set: SdkFeatureSet,
+    active: AHashMap<Pubkey, u64>,
+    inactive: AHashSet<Pubkey>,
 }
 
 impl Default for FeatureSet {
     fn default() -> Self {
-        // All features disabled
         Self {
-            feature_set: SdkFeatureSet {
-                active: AHashMap::new(),
-                inactive: AHashSet::from_iter((*FEATURE_NAMES).keys().cloned()),
-            },
+            // All features disabled
+            active: AHashMap::new(),
+            inactive: AHashSet::from_iter((*FEATURE_NAMES).keys().cloned()),
         }
     }
 }
 
 impl FeatureSet {
     pub fn new(active: AHashMap<Pubkey, u64>, inactive: AHashSet<Pubkey>) -> Self {
-        Self {
-            feature_set: SdkFeatureSet { active, inactive },
-        }
+        Self { active, inactive }
     }
 
     pub fn active(&self) -> &AHashMap<Pubkey, u64> {
-        &self.feature_set.active
+        &self.active
     }
 
     pub fn active_mut(&mut self) -> &mut AHashMap<Pubkey, u64> {
-        &mut self.feature_set.active
+        &mut self.active
     }
 
     pub fn inactive(&self) -> &AHashSet<Pubkey> {
-        &self.feature_set.inactive
+        &self.inactive
     }
 
     pub fn inactive_mut(&mut self) -> &mut AHashSet<Pubkey> {
-        &mut self.feature_set.inactive
+        &mut self.inactive
     }
 
     pub fn is_active(&self, feature_id: &Pubkey) -> bool {
-        self.feature_set.is_active(feature_id)
+        self.active.contains_key(feature_id)
     }
 
     pub fn activated_slot(&self, feature_id: &Pubkey) -> Option<u64> {
-        self.feature_set.activated_slot(feature_id)
+        self.active.get(feature_id).copied()
     }
 
     /// Activate a feature
     pub fn activate(&mut self, feature_id: &Pubkey, slot: u64) {
-        self.feature_set.activate(feature_id, slot)
+        self.inactive.remove(feature_id);
+        self.active.insert(*feature_id, slot);
     }
 
     /// Deactivate a feature
     pub fn deactivate(&mut self, feature_id: &Pubkey) {
-        self.feature_set.deactivate(feature_id)
+        self.active.remove(feature_id);
+        self.inactive.insert(*feature_id);
     }
 
     /// List of enabled features that trigger full inflation
@@ -91,10 +89,8 @@ impl FeatureSet {
     /// All features enabled, useful for testing
     pub fn all_enabled() -> Self {
         Self {
-            feature_set: SdkFeatureSet {
-                active: AHashMap::from_iter((*FEATURE_NAMES).keys().cloned().map(|key| (key, 0))),
-                inactive: AHashSet::new(),
-            },
+            active: AHashMap::from_iter((*FEATURE_NAMES).keys().cloned().map(|key| (key, 0))),
+            inactive: AHashSet::new(),
         }
     }
 
@@ -654,7 +650,7 @@ pub mod enable_turbine_fanout_experiments {
 }
 
 pub mod disable_turbine_fanout_experiments {
-    solana_pubkey::declare_id!("Gz1aLrbeQ4Q6PTSafCZcGWZXz91yVRi7ASFzFEr1U4sa");
+    solana_pubkey::declare_id!("turbnbNRp22nwZCmgVVXFSshz7H7V23zMzQgA46YpmQ");
 }
 
 pub mod move_serialized_len_ptr_in_cpi {
@@ -696,8 +692,9 @@ pub mod delay_visibility_of_program_deployment {
 pub mod apply_cost_tracker_during_replay {
     solana_pubkey::declare_id!("2ry7ygxiYURULZCrypHhveanvP5tzZ4toRwVp89oCNSj");
 }
+
 pub mod bpf_account_data_direct_mapping {
-    solana_pubkey::declare_id!("AjX3A4Nv2rzUuATEUWLP4rrBaBropyUnHxEvFDj1dKbx");
+    solana_pubkey::declare_id!("1ncomp1ete111111111111111111111111111111111");
 }
 
 pub mod add_set_tx_loaded_accounts_data_size_instruction {
@@ -769,7 +766,7 @@ pub mod remaining_compute_units_syscall_enabled {
 }
 
 pub mod enable_loader_v4 {
-    solana_pubkey::declare_id!("8Cb77yHjPWe9wuWUfXeh6iszFGCDGNCoFk3tprViYHNm");
+    solana_pubkey::declare_id!("2aQJYqER2aKyb3cZw22v4SL2xMX7vwXBRWfvS4pTrtED");
 }
 
 pub mod require_rent_exempt_split_destination {
@@ -909,7 +906,7 @@ pub mod zk_elgamal_proof_program_enabled {
 }
 
 pub mod verify_retransmitter_signature {
-    solana_pubkey::declare_id!("BZ5g4hRbu5hLQQBdPyo2z9icGyJ8Khiyj3QS6dhWijTb");
+    solana_pubkey::declare_id!("51VCKU5eV6mcTc9q9ArfWELU2CqDoi13hdAjr6fHMdtv");
 }
 
 pub mod move_stake_and_move_lamports_ixs {
@@ -933,7 +930,7 @@ pub mod enable_transaction_loading_failure_fees {
 }
 
 pub mod enable_turbine_extended_fanout_experiments {
-    solana_pubkey::declare_id!("BZn14Liea52wtBwrXUxTv6vojuTTmfc7XGEDTXrvMD7b");
+    solana_pubkey::declare_id!("turbRpTzBzDU6PJmWvRTbcJXXGxUs19CvQamUrRD9bN");
 }
 
 pub mod deprecate_legacy_vote_ixs {
@@ -1005,11 +1002,31 @@ pub mod raise_block_limits_to_50m {
 }
 
 pub mod drop_unchained_merkle_shreds {
-    solana_pubkey::declare_id!("3A9WtMU4aHuryD3VN7SFKdfXto8HStLb1Jj6HjkgfnGL");
+    solana_pubkey::declare_id!("5KLGJSASDVxKPjLCDWNtnABLpZjsQSrYZ8HKwcEdAMC8");
 }
 
 pub mod disable_partitioned_rent_collection {
     solana_pubkey::declare_id!("2B2SBNbUcr438LtGXNcJNBP2GBSxjx81F945SdSkUSfC");
+}
+
+pub mod raise_block_limits_to_60m {
+    solana_pubkey::declare_id!("6oMCUgfY6BzZ6jwB681J6ju5Bh6CjVXbd7NeWYqiXBSu");
+}
+
+pub mod mask_out_rent_epoch_in_vm_serialization {
+    solana_pubkey::declare_id!("RENtePQcDLrAbxAsP3k8dwVcnNYQ466hi2uKvALjnXx");
+}
+
+pub mod enable_extend_program_checked {
+    solana_pubkey::declare_id!("2oMRZEDWT2tqtYMofhmmfQ8SsjqUFzT6sYXppQDavxwz");
+}
+
+pub mod disable_zk_elgamal_proof_program {
+    solana_pubkey::declare_id!("zkdoVwnSFnSLtGJG7irJPEYUpmb4i7sGMGcnN6T9rnC");
+}
+
+pub mod reenable_zk_elgamal_proof_program {
+    solana_pubkey::declare_id!("zkemPXcuM3G4wpMDZ36Cpw34EjUpvm1nuioiSGbGZPR");
 }
 
 pub static FEATURE_NAMES: LazyLock<AHashMap<Pubkey, &'static str>> = LazyLock::new(|| {
@@ -1221,11 +1238,11 @@ pub static FEATURE_NAMES: LazyLock<AHashMap<Pubkey, &'static str>> = LazyLock::n
         (enable_turbine_extended_fanout_experiments::id(), "enable turbine extended fanout experiments #"),
         (deprecate_legacy_vote_ixs::id(), "Deprecate legacy vote instructions"),
         (partitioned_epoch_rewards_superfeature::id(), "replaces enable_partitioned_epoch_reward to enable partitioned rewards at epoch boundary SIMD-0118"),
-        (disable_sbpf_v0_execution::id(), "Disables execution of SBPFv1 programs SIMD-0161"),
-        (reenable_sbpf_v0_execution::id(), "Re-enables execution of SBPFv1 programs"),
-        (enable_sbpf_v1_deployment_and_execution::id(), "Enables deployment and execution of SBPFv1 programs SIMD-0161"),
-        (enable_sbpf_v2_deployment_and_execution::id(), "Enables deployment and execution of SBPFv2 programs SIMD-0161"),
-        (enable_sbpf_v3_deployment_and_execution::id(), "Enables deployment and execution of SBPFv3 programs SIMD-0161"),
+        (disable_sbpf_v0_execution::id(), "SIMD-0161: Disables execution of SBPFv0 programs"),
+        (reenable_sbpf_v0_execution::id(), "Re-enables execution of SBPFv0 programs"),
+        (enable_sbpf_v1_deployment_and_execution::id(), "SIMD-0166: Enable deployment and execution of SBPFv1 programs"),
+        (enable_sbpf_v2_deployment_and_execution::id(), "SIMD-0173 and SIMD-0174: Enable deployment and execution of SBPFv2 programs"),
+        (enable_sbpf_v3_deployment_and_execution::id(), "SIMD-0178, SIMD-0179 and SIMD-0189: Enable deployment and execution of SBPFv3 programs"),
         (remove_accounts_executable_flag_checks::id(), "Remove checks of accounts is_executable flag SIMD-0162"),
         (lift_cpi_caller_restriction::id(), "Lift the restriction in CPI that the caller must have the callee as an instruction account #2202"),
         (disable_account_loader_special_case::id(), "Disable account loader special case #3513"),
@@ -1240,6 +1257,11 @@ pub static FEATURE_NAMES: LazyLock<AHashMap<Pubkey, &'static str>> = LazyLock::n
         (fix_alt_bn128_multiplication_input_length::id(), "fix alt_bn128 multiplication input length SIMD-0222 #3686"),
         (drop_unchained_merkle_shreds::id(), "drops unchained Merkle shreds #2149"),
         (disable_partitioned_rent_collection::id(), "SIMD-0175: Disable partitioned rent collection"),
+        (raise_block_limits_to_60m::id(), "Raise block limit to 60M SIMD-0256"),
+        (mask_out_rent_epoch_in_vm_serialization::id(), "SIMD-0267: Sets rent_epoch to a constant in the VM"),
+        (enable_extend_program_checked::id(), "Enable ExtendProgramChecked instruction"),
+        (disable_zk_elgamal_proof_program::id(), "Disables zk-elgamal-proof program"),
+        (reenable_zk_elgamal_proof_program::id(), "Re-enables zk-elgamal-proof program"),
         /*************** ADD NEW FEATURES HERE ***************/
     ]
     .iter()
@@ -1285,7 +1307,6 @@ mod test {
         let mut feature_set = FeatureSet::default();
         assert!(feature_set.full_inflation_features_enabled().is_empty());
         feature_set
-            .feature_set
             .active
             .insert(full_inflation::devnet_and_testnet::id(), 42);
         assert_eq!(
@@ -1303,12 +1324,10 @@ mod test {
         let mut feature_set = FeatureSet::default();
         assert!(feature_set.full_inflation_features_enabled().is_empty());
         feature_set
-            .feature_set
             .active
             .insert(full_inflation::mainnet::certusone::vote::id(), 42);
         assert!(feature_set.full_inflation_features_enabled().is_empty());
         feature_set
-            .feature_set
             .active
             .insert(full_inflation::mainnet::certusone::enable::id(), 42);
         assert_eq!(
@@ -1323,12 +1342,10 @@ mod test {
         let mut feature_set = FeatureSet::default();
         assert!(feature_set.full_inflation_features_enabled().is_empty());
         feature_set
-            .feature_set
             .active
             .insert(full_inflation::mainnet::certusone::enable::id(), 42);
         assert!(feature_set.full_inflation_features_enabled().is_empty());
         feature_set
-            .feature_set
             .active
             .insert(full_inflation::mainnet::certusone::vote::id(), 42);
         assert_eq!(

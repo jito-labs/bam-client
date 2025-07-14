@@ -8,6 +8,12 @@ homepage = { workspace = true }
 license = { workspace = true }
 edition = { workspace = true }
 
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
+
+[features]
+dev-context-only-utils = []
+
 [dependencies]
 chrono = { workspace = true }
 clap = { workspace = true }
@@ -27,7 +33,7 @@ solana-core = { workspace = true, features = ["dev-context-only-utils"] }
 solana-faucet = { workspace = true }
 solana-genesis = { workspace = true }
 solana-gossip = { workspace = true }
-solana-logger = { workspace = true }
+solana-logger = "=2.3.1"
 solana-measure = { workspace = true }
 solana-metrics = { workspace = true }
 solana-net-utils = { workspace = true }
@@ -37,13 +43,13 @@ solana-rpc-client = { workspace = true }
 solana-rpc-client-api = { workspace = true }
 solana-rpc-client-nonce-utils = { workspace = true }
 solana-runtime = { workspace = true, features = ["dev-context-only-utils"] }
-solana-sdk = { workspace = true }
+solana-sdk = "=2.2.2"
 solana-streamer = { workspace = true }
 solana-tps-client = { workspace = true }
 solana-tpu-client = { workspace = true }
 solana-transaction-status = { workspace = true }
 solana-version = { workspace = true }
-spl-instruction-padding = { workspace = true }
+spl-instruction-padding = { version = "=0.3.0", features = ["no-entrypoint"] }
 thiserror = { workspace = true }
 
 [dev-dependencies]
@@ -54,9 +60,3 @@ solana-runtime = { workspace = true, features = ["dev-context-only-utils"] }
 solana-test-validator = { workspace = true }
 solana-tps-client = { workspace = true, features = ["bank-client"] }
 tempfile = { workspace = true }
-
-[package.metadata.docs.rs]
-targets = ["x86_64-unknown-linux-gnu"]
-
-[features]
-dev-context-only-utils = []

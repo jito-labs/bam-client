@@ -266,6 +266,7 @@ pub fn main() {
         rocksdb_compaction_threads,
         rocksdb_flush_threads,
         tvu_receive_threads,
+        tvu_retransmit_threads,
         tvu_sigverify_threads,
     } = cli::thread_args::parse_num_threads_args(&matches);
 
@@ -715,8 +716,8 @@ pub fn main() {
             .is_present("accounts_db_test_skip_rewrites"),
         storage_access,
         scan_filter_for_shrinking,
-        enable_experimental_accumulator_hash: matches
-            .is_present("accounts_db_experimental_accumulator_hash"),
+        enable_experimental_accumulator_hash: !matches
+            .is_present("no_accounts_db_experimental_accumulator_hash"),
         verify_experimental_accumulator_hash: matches
             .is_present("accounts_db_verify_experimental_accumulator_hash"),
         snapshots_use_experimental_accumulator_hash: matches
@@ -1447,7 +1448,8 @@ pub fn main() {
         bind_ip_addr: bind_address,
         public_tpu_addr,
         public_tpu_forwards_addr,
-        num_tvu_sockets: tvu_receive_threads,
+        num_tvu_receive_sockets: tvu_receive_threads,
+        num_tvu_retransmit_sockets: tvu_retransmit_threads,
         num_quic_endpoints,
     };
 

@@ -4,7 +4,7 @@ members = ["json-rpc/client", "json-rpc/server", "paytube"]
 resolver = "2"
 
 [workspace.package]
-version = "2.2.7"
+version = "2.2.20"
 authors = ["Anza Maintainers <maintainers@anza.xyz>"]
 repository = "https://github.com/anza-xyz/agave"
 homepage = "https://anza.xyz/"
@@ -40,13 +40,13 @@ solana-rpc-client-api = { path = "../../rpc-client-api" }
 solana-sdk = "=2.2.2"
 solana-svm = { path = "../" }
 solana-system-program = { path = "../../programs/system" }
-solana-version = { path = "../../version" }
 solana-test-validator = { path = "../../test-validator" }
-solana-transaction-context = "=2.2.1"
+solana-transaction-context = { path = "../../transaction-context" }
 solana-transaction-status = { path = "../../transaction-status" }
-spl-associated-token-account = "=6.0.0"
-spl-token = "=7.0.0"
-spl-token-2022 = "=7.0.0"
+solana-version = { path = "../../version" }
+spl-associated-token-account = "6.0.0"
+spl-token = "7.0.0"
+spl-token-2022 = "7.0.0"
 termcolor = "1.4.1"
 thiserror = "1.0.68"
 tokio = "1.29.1"
@@ -56,4 +56,5 @@ yaml-rust = "0.4"
 [patch.crates-io]
 crossbeam-epoch = { git = "https://github.com/anza-xyz/crossbeam", rev = "fd279d707025f0e60951e429bf778b4813d1b6bf" }
 solana-curve25519 = { path = "../../curves/curve25519" }
+solana-transaction-context = { path = "../../transaction-context" }
 solana-zk-sdk = { path = "../../zk-sdk" }
