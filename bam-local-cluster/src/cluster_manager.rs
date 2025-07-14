@@ -92,6 +92,11 @@ impl BamLocalCluster {
                 format!("validator-{}", i)
             };
 
+            let base_dir = Path::new(&config.ledger_base_directory).join(&ledger_subdir);
+            if base_dir.exists() {
+                fs::remove_dir_all(&base_dir)?;
+            }
+
             let validator_ledger_path =
                 Self::create_ledger_directory(&config.ledger_base_directory, &ledger_subdir)?;
 
@@ -102,6 +107,7 @@ impl BamLocalCluster {
                     10737418240,
                     LedgerColumnOptions::default(),
                 )?;
+                Self::create_snapshot(&validator_ledger_path)?;
             }
 
             // Use pre-generated keypairs for validator
@@ -128,6 +134,8 @@ impl BamLocalCluster {
             } else {
                 format!("validator-{}", i)
             };
+            let dynamic_port_range_start = 10_000 + (i * 1000) as u64;
+            let dynamic_port_range_end = 10_000 + ((i + 1) * 1000) as u64;
 
             let validator_process = Self::start_validator_node(
                 validator_config,
@@ -145,6 +153,7 @@ impl BamLocalCluster {
                 rpc_port,
                 &runtime,
                 &node_name,
+                (dynamic_port_range_start, dynamic_port_range_end),
             )?;
 
             if is_bootstrap {
@@ -185,6 +194,7 @@ impl BamLocalCluster {
         rpc_port: Option<u16>,
         runtime: &Runtime,
         node_name: &str,
+        dynamic_port_range: (u64, u64),
     ) -> Result<Child, Box<dyn std::error::Error>> {
         // Determine validator binary path
         let validator_binary =
@@ -203,6 +213,8 @@ impl BamLocalCluster {
             .arg(vote_path)
             .arg("--bind-address")
             .arg("0.0.0.0")
+            .arg("--dynamic-port-range")
+            .arg(format!("{}-{}", dynamic_port_range.0, dynamic_port_range.1))
             .arg("--no-wait-for-vote-to-start-leader")
             .arg("--allow-private-addr")
             .arg("--full-rpc-api")
@@ -267,7 +279,7 @@ impl BamLocalCluster {
                 let mut lines = reader.lines();
 
                 while let Ok(Some(line)) = lines.next_line().await {
-                    info!("[{}] {}", node_name, line);
+                    println!("[{}] {}", node_name, line);
                 }
             });
         }
@@ -280,7 +292,7 @@ impl BamLocalCluster {
                 let mut lines = reader.lines();
 
                 while let Ok(Some(line)) = lines.next_line().await {
-                    warn!("[{}] {}", node_name, line);
+                    println!("[{}] {}", node_name, line);
                 }
             });
         }
@@ -344,5 +356,28 @@ impl BamLocalCluster {
                 }
             }
         }
+    }
+
+    fn create_snapshot(validator_ledger_path: &PathBuf) -> anyhow::Result<()> {
+        // Determine validator binary path
+        let ledger_tool_binary =
+            "/Users/lucasbruder/jito/jito-solana-jds/target/debug/agave-ledger-tool";
+
+        let mut cmd = Command::new(ledger_tool_binary);
+
+        cmd.env("RUST_LOG", "info")
+            .arg("--ledger")
+            .arg(validator_ledger_path.to_str().unwrap())
+            .arg("create-snapshot")
+            .arg("0");
+
+        let status = cmd.status()?;
+        if !status.success() {
+            return Err(anyhow::anyhow!(
+                "Failed to create snapshot: process exited with status {}",
+                status
+            ));
+        }
+        Ok(())
     }
 }
