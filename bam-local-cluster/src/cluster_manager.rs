@@ -102,10 +102,6 @@ impl BamLocalCluster {
                     10737418240,
                     LedgerColumnOptions::default(),
                 )?;
-            } else {
-                genesis_config_info
-                    .genesis_config
-                    .write(&validator_ledger_path)?;
             }
 
             // Use pre-generated keypairs for validator
@@ -211,6 +207,9 @@ impl BamLocalCluster {
             // .arg("0")
             .arg("--no-wait-for-vote-to-start-leader")
             .arg("--allow-private-addr")
+            .arg("--full-rpc-api")
+            .arg("--enable-rpc-transaction-history")
+            .arg("--no-snapshot-fetch")
             .arg("--expected-bank-hash")
             .arg(genesis_config.hash().to_string())
             .arg("--expected-shred-version")
@@ -224,9 +223,7 @@ impl BamLocalCluster {
             .arg("--merkle-root-upload-authority")
             .arg("11111111111111111111111111111111")
             .arg("--commission-bps")
-            .arg("100")
-            .arg("--full-rpc-api")
-            .arg("--no-snapshot-fetch");
+            .arg("100");
 
         if let Some(gossip_port) = gossip_port {
             cmd.arg("--gossip-port").arg(gossip_port.to_string());
