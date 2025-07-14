@@ -515,7 +515,6 @@ pub fn main() {
         .unwrap_or_default()
         .into_iter()
         .map(|entrypoint| {
-            info!("entrypoint: {entrypoint}");
             solana_net_utils::parse_host_port(&entrypoint).unwrap_or_else(|e| {
                 eprintln!("failed to parse entrypoint address: {e}");
                 exit(1);

@@ -13,7 +13,6 @@ use {
         genesis_config::{ClusterType, GenesisConfig},
         shred_version::compute_shred_version,
         signature::Keypair,
-        signer::Signer,
     },
     std::{
         fs,
@@ -22,8 +21,10 @@ use {
         process::{Child, Command, Stdio},
         str::FromStr,
         sync::{Arc, Mutex},
+        thread::sleep,
+        time::Duration,
     },
-    tokio::{runtime::Runtime, signal, task},
+    tokio::{runtime::Runtime, signal},
 };
 
 pub struct BamLocalCluster {
@@ -94,6 +95,19 @@ impl BamLocalCluster {
             let validator_ledger_path =
                 Self::create_ledger_directory(&config.ledger_base_directory, &ledger_subdir)?;
 
+            if is_bootstrap {
+                create_new_ledger(
+                    &validator_ledger_path,
+                    &genesis_config_info.genesis_config,
+                    10737418240,
+                    LedgerColumnOptions::default(),
+                )?;
+            } else {
+                genesis_config_info
+                    .genesis_config
+                    .write(&validator_ledger_path)?;
+            }
+
             // Use pre-generated keypairs for validator
             let (validator_identity, validator_vote) = &validator_keypairs[i];
 
@@ -107,18 +121,6 @@ impl BamLocalCluster {
             fs::write(
                 &validator_vote_path,
                 serde_json::to_string_pretty(&validator_vote.to_bytes().to_vec())?,
-            )?;
-
-            // Copy genesis to validator ledger
-            genesis_config_info
-                .genesis_config
-                .write(&validator_ledger_path)?;
-
-            create_new_ledger(
-                &validator_ledger_path,
-                &genesis_config_info.genesis_config,
-                10737418240,
-                LedgerColumnOptions::default(),
             )?;
 
             // Assign gossip port: 8001 for bootstrap, random for others
@@ -151,6 +153,7 @@ impl BamLocalCluster {
 
             if is_bootstrap {
                 bootstrap_gossip = format!("127.0.0.1:{}", gossip_port.unwrap());
+                sleep(Duration::from_secs(5)); // TODO: need smarter test here
             }
 
             processes.push(validator_process);
@@ -188,23 +191,8 @@ impl BamLocalCluster {
         node_name: &str,
     ) -> Result<Child, Box<dyn std::error::Error>> {
         // Determine validator binary path
-        let validator_binary = config.validator_binary_path.as_deref().unwrap_or_else(|| {
-            // Try to find the validator binary in common locations
-            let possible_paths = [
-                "target/debug/agave-validator",
-                "target/release/agave-validator",
-                "agave-validator",
-            ];
-
-            for path in &possible_paths {
-                if Path::new(path).exists() {
-                    return path;
-                }
-            }
-
-            // Fallback to the hardcoded path if nothing else works
-            "/Users/lucasbruder/jito/jito-solana-jds/target/debug/agave-validator"
-        });
+        let validator_binary =
+            "/Users/lucasbruder/jito/jito-solana-jds/target/debug/agave-validator";
 
         let mut cmd = Command::new(validator_binary);
 
@@ -237,7 +225,8 @@ impl BamLocalCluster {
             .arg("11111111111111111111111111111111")
             .arg("--commission-bps")
             .arg("100")
-            .arg("--full-rpc-api");
+            .arg("--full-rpc-api")
+            .arg("--no-snapshot-fetch");
 
         if let Some(gossip_port) = gossip_port {
             cmd.arg("--gossip-port").arg(gossip_port.to_string());
@@ -247,19 +236,23 @@ impl BamLocalCluster {
             cmd.arg("--rpc-port").arg(rpc_port.to_string());
         }
 
-        // Only add entrypoint for non-bootstrap nodes
-        if let Some(bootstrap_gossip) = bootstrap_gossip {
-            if !bootstrap_gossip.is_empty() {
-                cmd.arg("--entrypoint").arg(bootstrap_gossip);
-            }
-        }
-
         if let Some(ref geyser_config) = validator_config.geyser_config {
             cmd.arg("--geyser-plugin-config").arg(geyser_config);
         }
 
-        cmd.arg("run");
+        if let Some(bootstrap_gossip) = bootstrap_gossip {
+            cmd.arg("--entrypoint").arg(bootstrap_gossip);
+        }
+
         info!("Starting {} node with command: {:?}", node_name, cmd);
+        // Print the command as it would appear on the CLI
+        use std::ffi::OsStr;
+        let cmd_str = std::iter::once(cmd.get_program())
+            .chain(cmd.get_args())
+            .map(|s| s.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!("CLI Command: {}", cmd_str);
 
         let mut child = cmd
             .stdout(Stdio::piped())
