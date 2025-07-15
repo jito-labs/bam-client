@@ -321,6 +321,8 @@ impl BamValidator {
             .arg("program-id")
             .arg("--allow-private-addr")
             .arg("--full-rpc-api")
+            .arg("--accounts-db-hash-threads")
+            .arg("1")
             .arg("--enable-rpc-transaction-history")
             .arg("--enable-extended-tx-metadata-storage")
             .arg("--expected-shred-version")
@@ -351,6 +353,9 @@ impl BamValidator {
         if let Some(bootstrap_gossip) = bootstrap_gossip {
             cmd.arg("--entrypoint").arg(bootstrap_gossip);
         }
+
+        // TODO (LB): add in geyser
+        
 
         info!("Starting {} node with command: {:?}", node_name, cmd);
 
