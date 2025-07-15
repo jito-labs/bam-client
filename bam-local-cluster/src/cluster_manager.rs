@@ -1,7 +1,7 @@
 use {
     crate::config::{CustomValidatorConfig, LocalClusterConfig},
     anyhow::{Context, Result},
-    log::{debug, error, info, warn},
+    log::{debug, error, info},
     solana_faucet::faucet::{run_faucet, Faucet},
     solana_ledger::{blockstore::create_new_ledger, blockstore_options::LedgerColumnOptions},
     solana_local_cluster::integration_tests::DEFAULT_NODE_STAKE,
@@ -14,6 +14,7 @@ use {
         genesis_config::{ClusterType, GenesisConfig},
         shred_version::compute_shred_version,
         signature::Keypair,
+        signer::Signer,
     },
     std::{
         fs,
@@ -28,8 +29,379 @@ use {
     tokio::{runtime::Runtime, signal},
 };
 
+pub struct BamValidator {
+    pub config: CustomValidatorConfig,
+    pub index: usize,
+    pub is_bootstrap: bool,
+    pub ledger_path: PathBuf,
+    pub identity_path: PathBuf,
+    pub authorized_voter_path: PathBuf,
+    pub vote_path: PathBuf,
+    pub log_file_path: PathBuf,
+    pub node_name: String,
+    pub gossip_port: Option<u16>,
+    pub rpc_port: Option<u16>,
+    pub dynamic_port_range: (u64, u64),
+    pub process: Child,
+}
+
+impl BamValidator {
+    pub fn new(
+        config: CustomValidatorConfig,
+        index: usize,
+        is_bootstrap: bool,
+        ledger_path: &PathBuf,
+        node_keypair: &Keypair,
+        vote_keypair: &Keypair,
+        cluster_config: &LocalClusterConfig,
+        genesis_config: &GenesisConfig,
+        bootstrap_gossip: Option<&str>,
+        expected_bank_hash: Option<String>,
+        runtime: &Runtime,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let identity_path = ledger_path.join("identity.json");
+        let authorized_voter_path: PathBuf = ledger_path.join("authorized-voter.json");
+        let vote_path = ledger_path.join("vote.json");
+        let log_file_path = ledger_path.join("validator.log");
+
+        let node_name = if is_bootstrap {
+            "bootstrap".to_string()
+        } else {
+            format!("validator-{}", index)
+        };
+
+        let gossip_port = is_bootstrap.then_some(8001);
+        let rpc_port = is_bootstrap.then_some(8899);
+        let dynamic_port_range_start = 8_000 + (index * 1000) as u64;
+        let dynamic_port_range_end = 8_000 + ((index + 1) * 1000) as u64;
+
+        // Save keypairs
+        fs::write(
+            &identity_path,
+            serde_json::to_string_pretty(&node_keypair.to_bytes().to_vec())?,
+        )?;
+        fs::write(
+            &vote_path,
+            serde_json::to_string_pretty(&vote_keypair.to_bytes().to_vec())?,
+        )?;
+        // Save authorized voter (same as vote keypair for local testing)
+        fs::write(
+            &authorized_voter_path,
+            serde_json::to_string_pretty(&vote_keypair.to_bytes().to_vec())?,
+        )?;
+
+        if !is_bootstrap {
+            genesis_config.write(ledger_path)?;
+        }
+
+        let process = Self::start_process(
+            &ledger_path,
+            &log_file_path,
+            &node_name,
+            gossip_port,
+            rpc_port,
+            dynamic_port_range_start,
+            dynamic_port_range_end,
+            cluster_config,
+            genesis_config,
+            bootstrap_gossip,
+            expected_bank_hash,
+            &identity_path,
+            &authorized_voter_path,
+            &vote_path,
+            runtime,
+        )?;
+
+        Ok(Self {
+            config,
+            index,
+            is_bootstrap,
+            ledger_path: ledger_path.clone(),
+            identity_path,
+            authorized_voter_path,
+            vote_path,
+            log_file_path,
+            node_name,
+            gossip_port,
+            rpc_port,
+            dynamic_port_range: (dynamic_port_range_start, dynamic_port_range_end),
+            process,
+        })
+    }
+
+    pub fn get_bank_hash(ledger_path: &PathBuf) -> Result<String, anyhow::Error> {
+        let ledger_tool_binary =
+            "/Users/lucasbruder/jito/jito-solana-jds/target/debug/agave-ledger-tool";
+
+        let mut cmd = std::process::Command::new(ledger_tool_binary);
+
+        cmd.arg("-l")
+            .arg(ledger_path.to_str().unwrap())
+            .arg("verify")
+            .arg("--print-bank-hash");
+
+        let output = cmd.output()?;
+
+        if !output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            error!("stdout: {}", stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            error!("stderr: {}", stderr);
+            return Err(anyhow::anyhow!(
+                "Failed to run agave-ledger-tool: process exited with status {}",
+                output.status
+            ));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if let Some(hash) = line.strip_prefix("Bank hash for slot 0: ") {
+                return Ok(hash.trim().to_string());
+            }
+        }
+
+        Err(anyhow::anyhow!(
+            "Bank hash for slot 0 not found in agave-ledger-tool output"
+        ))
+    }
+
+    async fn stream_output_stdout(stdout: std::process::ChildStdout, node_name: &str) {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let reader = BufReader::new(tokio::process::ChildStdout::from_std(stdout).unwrap());
+        let mut lines = reader.lines();
+
+        while let Ok(Some(line)) = lines.next_line().await {
+            println!("[\x1b[35m{}\x1b[0m] stdout: {}", node_name, line);
+        }
+    }
+
+    async fn stream_output_stderr(stderr: std::process::ChildStderr, node_name: &str) {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let reader = BufReader::new(tokio::process::ChildStderr::from_std(stderr).unwrap());
+        let mut lines = reader.lines();
+
+        while let Ok(Some(line)) = lines.next_line().await {
+            println!("[\x1b[35m{}\x1b[0m] stderr: {}", node_name, line);
+        }
+    }
+
+    async fn tail_log_file(log_file_path: &PathBuf, node_name: &str) {
+        use std::io;
+        use tokio::fs::File;
+        use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader, SeekFrom};
+
+        // Wait a bit for the file to be created
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+        loop {
+            match File::open(log_file_path).await {
+                Ok(mut file) => {
+                    // Seek to the end of the file to only show new lines
+                    if let Err(e) = file.seek(SeekFrom::End(0)).await {
+                        eprintln!("Failed to seek log file: {}", e);
+                        return;
+                    }
+                    let mut reader = BufReader::new(file);
+                    let mut buf = String::new();
+
+                    loop {
+                        buf.clear();
+                        match reader.read_line(&mut buf).await {
+                            Ok(0) => {
+                                // No new line, wait and try again
+                                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                            }
+                            Ok(_) => {
+                                // Print the new log line
+                                print!("[\x1b[35m{}\x1b[0m] LOG: {}", node_name, buf);
+                            }
+                            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                            Err(e) => {
+                                eprintln!("Error reading log file: {}", e);
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(_) => {
+                    // File doesn't exist yet, wait and retry
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                }
+            }
+        }
+    }
+
+    pub fn get_gossip_address(&self) -> Option<String> {
+        self.gossip_port.map(|port| format!("127.0.0.1:{}", port))
+    }
+
+    pub fn is_running(&mut self) -> bool {
+        self.process
+            .try_wait()
+            .map(|status| status.is_none())
+            .unwrap_or(false)
+    }
+
+    pub fn kill(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.process.kill()?;
+        self.process.wait()?;
+        Ok(())
+    }
+
+    fn create_snapshot(validator_ledger_path: &PathBuf) -> anyhow::Result<()> {
+        let ledger_tool_binary =
+            "/Users/lucasbruder/jito/jito-solana-jds/target/debug/agave-ledger-tool";
+
+        let mut cmd = Command::new(ledger_tool_binary);
+
+        cmd.env("RUST_LOG", "info")
+            .arg("--ledger")
+            .arg(validator_ledger_path.to_str().unwrap())
+            .arg("create-snapshot")
+            .arg("0");
+
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+
+        let status = cmd.status()?;
+        if !status.success() {
+            return Err(anyhow::anyhow!(
+                "Failed to create snapshot: process exited with status {}",
+                status
+            ));
+        }
+        Ok(())
+    }
+
+    fn start_process(
+        ledger_path: &PathBuf,
+        log_file_path: &PathBuf,
+        node_name: &str,
+        gossip_port: Option<u16>,
+        rpc_port: Option<u16>,
+        dynamic_port_range_start: u64,
+        dynamic_port_range_end: u64,
+        cluster_config: &LocalClusterConfig,
+        genesis_config: &GenesisConfig,
+        bootstrap_gossip: Option<&str>,
+        expected_bank_hash: Option<String>,
+        identity_path: &PathBuf,
+        authorized_voter_path: &PathBuf,
+        vote_path: &PathBuf,
+        runtime: &Runtime,
+    ) -> Result<Child, Box<dyn std::error::Error>> {
+        let validator_binary =
+            "/Users/lucasbruder/jito/jito-solana-jds/target/debug/agave-validator";
+
+        let mut cmd = Command::new(validator_binary);
+
+        cmd.env("RUST_LOG", "info")
+            .arg("--log")
+            .arg(log_file_path)
+            .arg("--ledger")
+            .arg(ledger_path)
+            .arg("--identity")
+            .arg(&identity_path)
+            .arg("--vote-account")
+            .arg(&vote_path)
+            .arg("--authorized-voter")
+            .arg(&authorized_voter_path)
+            .arg("--bind-address")
+            .arg("0.0.0.0")
+            .arg("--dynamic-port-range")
+            .arg(format!(
+                "{}-{}",
+                dynamic_port_range_start, dynamic_port_range_end
+            ))
+            .arg("--no-wait-for-vote-to-start-leader")
+            .arg("--wait-for-supermajority")
+            .arg("0")
+            .arg("--rpc-faucet-address")
+            .arg(cluster_config.faucet_address.to_string())
+            .arg("--rpc-pubsub-enable-block-subscription")
+            .arg("--rpc-pubsub-enable-vote-subscription")
+            .arg("--account-index")
+            .arg("program-id")
+            .arg("--allow-private-addr")
+            .arg("--full-rpc-api")
+            .arg("--enable-rpc-transaction-history")
+            .arg("--enable-extended-tx-metadata-storage")
+            .arg("--expected-shred-version")
+            .arg(compute_shred_version(&genesis_config.hash(), None).to_string())
+            .arg("--bam-url")
+            .arg(cluster_config.bam_url.to_string())
+            .arg("--tip-distribution-program-pubkey")
+            .arg(cluster_config.tip_distribution_program_id.to_string())
+            .arg("--tip-payment-program-pubkey")
+            .arg(cluster_config.tip_payment_program_id.to_string())
+            .arg("--merkle-root-upload-authority")
+            .arg("11111111111111111111111111111111")
+            .arg("--commission-bps")
+            .arg("100");
+
+        if let Some(expected_bank_hash) = expected_bank_hash {
+            cmd.arg("--expected-bank-hash").arg(expected_bank_hash);
+        }
+
+        if let Some(gossip_port) = gossip_port {
+            cmd.arg("--gossip-port").arg(gossip_port.to_string());
+        }
+
+        if let Some(rpc_port) = rpc_port {
+            cmd.arg("--rpc-port").arg(rpc_port.to_string());
+        }
+
+        if let Some(bootstrap_gossip) = bootstrap_gossip {
+            cmd.arg("--entrypoint").arg(bootstrap_gossip);
+        }
+
+        info!("Starting {} node with command: {:?}", node_name, cmd);
+
+        // Print the command as it would appear on the CLI
+        let cmd_str = std::iter::once(cmd.get_program())
+            .chain(cmd.get_args())
+            .map(|s| s.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!("CLI Command: {}", cmd_str);
+
+        let mut child = cmd
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context(format!("Failed to start {} node", node_name))?;
+
+        // Spawn tasks to stream the output and tail the log file
+        let child_stdout = child.stdout.take();
+        let child_stderr = child.stderr.take();
+        let log_file_path = log_file_path.clone();
+        let node_name = node_name.to_string();
+
+        if let Some(stdout) = child_stdout {
+            let node_name = node_name.clone();
+            runtime.spawn(async move {
+                Self::stream_output_stdout(stdout, &node_name).await;
+            });
+        }
+
+        if let Some(stderr) = child_stderr {
+            let node_name = node_name.clone();
+            runtime.spawn(async move {
+                Self::stream_output_stderr(stderr, &node_name).await;
+            });
+        }
+
+        // Spawn log file tailing
+        runtime.spawn(async move {
+            Self::tail_log_file(&log_file_path, &node_name).await;
+        });
+
+        Ok(child)
+    }
+}
+
 pub struct BamLocalCluster {
-    processes: Arc<Mutex<Vec<Child>>>,
+    validators: std::sync::Arc<std::sync::Mutex<Vec<BamValidator>>>,
     runtime: Runtime,
 }
 
@@ -37,16 +409,19 @@ impl BamLocalCluster {
     pub fn new(config: LocalClusterConfig) -> Result<Self, Box<dyn std::error::Error>> {
         let faucet_address = SocketAddr::from_str(&config.faucet_address)?;
 
-        // Create genesis configuration with the validator keypairs
-        let voting_keypairs = config
-            .validators
-            .iter()
-            .map(|_| ValidatorVoteKeypairs::new_rand())
-            .collect::<Vec<_>>();
-        let stakes = vec![DEFAULT_NODE_STAKE; config.validators.len()];
+        // Generate keypairs for all validators
+        let num_validators = config.validators.len();
+        let vote_keypairs: Vec<ValidatorVoteKeypairs> = (0..num_validators)
+            .map(|_| ValidatorVoteKeypairs {
+                node_keypair: Keypair::new(),
+                vote_keypair: Keypair::new(),
+                stake_keypair: Keypair::new(),
+            })
+            .collect();
+        let stakes = vec![DEFAULT_NODE_STAKE; num_validators];
         let mut genesis_config_info = create_genesis_config_with_vote_accounts_and_cluster_type(
             solana_local_cluster::local_cluster::DEFAULT_MINT_LAMPORTS,
-            &voting_keypairs,
+            &vote_keypairs,
             stakes,
             ClusterType::MainnetBeta,
         );
@@ -66,272 +441,103 @@ impl BamLocalCluster {
         let faucet = Arc::new(Mutex::new(Faucet::new(faucet_keypair, None, None, None)));
         runtime.spawn(run_faucet(faucet, faucet_address, None));
 
-        let mut processes = Vec::new();
-        let mut bootstrap_gossip = String::new();
+        let mut validators_vec = Vec::new();
+        let bootstrap_gossip = "127.0.0.1:8001".to_string();
         let mut expected_bank_hash = None;
 
         // Process all validators
         for (i, validator_config) in config.validators.iter().enumerate() {
             let is_bootstrap = i == 0; // First validator is always bootstrap
+            let ValidatorVoteKeypairs {
+                node_keypair,
+                vote_keypair,
+                stake_keypair,
+            } = &vote_keypairs[i];
 
-            // Auto-generate ledger path based on index
+            // Setup ledger before creating validator
             let ledger_subdir = if is_bootstrap {
                 "bootstrap-ledger".to_string()
             } else {
                 format!("validator-{}", i)
             };
+            let ledger_path = Path::new(&config.ledger_base_directory).join(&ledger_subdir);
 
-            let base_dir = Path::new(&config.ledger_base_directory).join(&ledger_subdir);
-            if base_dir.exists() {
-                fs::remove_dir_all(&base_dir)?;
+            // Remove ledger if it exists
+            if ledger_path.exists() {
+                fs::remove_dir_all(&ledger_path)?;
             }
+            fs::create_dir_all(&ledger_path).context(format!(
+                "Failed to create ledger directory: {:?}",
+                ledger_path
+            ))?;
 
-            let validator_ledger_path =
-                Self::create_ledger_directory(&config.ledger_base_directory, &ledger_subdir)?;
-
+            // Create ledger and snapshot if bootstrap; other validators need to have snapshot
+            // to download to start
             if is_bootstrap {
                 create_new_ledger(
-                    &validator_ledger_path,
+                    &ledger_path,
                     &genesis_config_info.genesis_config,
                     10737418240,
                     LedgerColumnOptions::default(),
                 )?;
-                Self::create_snapshot(&validator_ledger_path)?;
-                let bank_hash = Self::get_bank_hash(&validator_ledger_path)?;
+                BamValidator::create_snapshot(&ledger_path)?;
+
+                info!("Getting bank hash for bootstrap validator");
+                let bank_hash = BamValidator::get_bank_hash(&ledger_path)?;
                 info!("Bank hash for slot 0: {:?}", bank_hash);
                 expected_bank_hash = Some(bank_hash);
             }
 
-            // Use pre-generated keypairs for validator
-            let ValidatorVoteKeypairs {
+            let validator = BamValidator::new(
+                validator_config.clone(),
+                i,
+                is_bootstrap,
+                &ledger_path,
                 node_keypair,
                 vote_keypair,
-                stake_keypair,
-            } = &voting_keypairs[i];
-
-            // Save validator keypairs in the ledger directory
-            let validator_identity_path = validator_ledger_path.join("identity.json");
-            let validator_vote_path = validator_ledger_path.join("vote.json");
-            let authorized_voter_path = validator_ledger_path.join("authorized-voter.json");
-            // stake keypair is confusing yeah...
-            fs::write(
-                &validator_identity_path,
-                serde_json::to_string_pretty(&node_keypair.to_bytes().to_vec())?,
-            )?;
-            // stake keypair is the authorized voter...
-            fs::write(
-                &authorized_voter_path,
-                serde_json::to_string_pretty(&stake_keypair.to_bytes().to_vec())?,
-            )?;
-            fs::write(
-                &validator_vote_path,
-                serde_json::to_string_pretty(&vote_keypair.to_bytes().to_vec())?,
-            )?;
-
-            // Assign gossip port: 8001 for bootstrap, random for others
-            let gossip_port = is_bootstrap.then_some(8001);
-            let rpc_port = is_bootstrap.then_some(8899);
-
-            let node_name = if is_bootstrap {
-                "bootstrap".to_string()
-            } else {
-                format!("validator-{}", i)
-            };
-            let dynamic_port_range_start = 10_000 + (i * 1000) as u64;
-            let dynamic_port_range_end = 10_000 + ((i + 1) * 1000) as u64;
-
-            let validator_process = Self::start_validator_node(
-                validator_config,
                 &config,
                 &genesis_config_info.genesis_config,
-                &validator_ledger_path,
-                &validator_identity_path,
-                &authorized_voter_path,
-                &validator_vote_path,
-                if is_bootstrap {
-                    None
-                } else {
+                if !is_bootstrap {
                     Some(&bootstrap_gossip)
+                } else {
+                    None
                 },
-                gossip_port,
-                rpc_port,
-                &runtime,
-                &node_name,
-                (dynamic_port_range_start, dynamic_port_range_end),
                 expected_bank_hash.clone(),
+                &runtime,
             )?;
+            validators_vec.push(validator);
 
+            // Need to wait for gossip to start on bootstrap validator
             if is_bootstrap {
-                bootstrap_gossip = format!("127.0.0.1:{}", gossip_port.unwrap());
-                sleep(Duration::from_secs(5)); // TODO: need smarter test here
+                sleep(Duration::from_secs(5));
             }
-
-            processes.push(validator_process);
         }
 
+        let validators = std::sync::Arc::new(std::sync::Mutex::new(validators_vec));
+
         Ok(Self {
-            processes: Arc::new(Mutex::new(processes)),
+            validators,
             runtime,
         })
     }
 
-    fn create_ledger_directory(
-        base_path: &str,
-        name: &str,
-    ) -> Result<PathBuf, Box<dyn std::error::Error>> {
-        let ledger_path = PathBuf::from(base_path).join(name);
-        fs::create_dir_all(&ledger_path).context(format!(
-            "Failed to create ledger directory: {:?}",
-            ledger_path
-        ))?;
-        Ok(ledger_path)
-    }
-
-    fn start_validator_node(
-        validator_config: &CustomValidatorConfig,
-        config: &LocalClusterConfig,
-        genesis_config: &GenesisConfig,
-        ledger_path: &Path,
-        identity_path: &Path,
-        authorized_voter_path: &Path,
-        vote_path: &Path,
-        bootstrap_gossip: Option<&str>,
-        gossip_port: Option<u16>,
-        rpc_port: Option<u16>,
-        runtime: &Runtime,
-        node_name: &str,
-        dynamic_port_range: (u64, u64),
-        expected_bank_hash: Option<String>,
-    ) -> Result<Child, Box<dyn std::error::Error>> {
-        // Determine validator binary path
-        let validator_binary =
-            "/Users/lucasbruder/jito/jito-solana-jds/target/debug/agave-validator";
-
-        let mut cmd = Command::new(validator_binary);
-
-        cmd.env("RUST_LOG", "info")
-            .arg("--log")
-            .arg("-")
-            .arg("--ledger")
-            .arg(ledger_path)
-            .arg("--identity")
-            .arg(identity_path)
-            .arg("--vote-account")
-            .arg(vote_path)
-            .arg("--authorized-voter")
-            .arg(vote_path)
-            .arg("--bind-address")
-            .arg("0.0.0.0")
-            .arg("--dynamic-port-range")
-            .arg(format!("{}-{}", dynamic_port_range.0, dynamic_port_range.1))
-            .arg("--no-wait-for-vote-to-start-leader")
-            .arg("--wait-for-supermajority")
-            .arg("0")
-            .arg("--rpc-faucet-address")
-            .arg(config.faucet_address.to_string())
-            .arg("--rpc-pubsub-enable-block-subscription")
-            .arg("--rpc-pubsub-enable-vote-subscription")
-            .arg("--account-index")
-            .arg("program-id")
-            .arg("--allow-private-addr")
-            .arg("--full-rpc-api")
-            .arg("--enable-rpc-transaction-history")
-            .arg("--enable-extended-tx-metadata-storage")
-            .arg("--expected-shred-version")
-            .arg(compute_shred_version(&genesis_config.hash(), None).to_string())
-            .arg("--bam-url")
-            .arg(config.bam_url.to_string())
-            .arg("--tip-distribution-program-pubkey")
-            .arg(config.tip_distribution_program_id.to_string())
-            .arg("--tip-payment-program-pubkey")
-            .arg(config.tip_payment_program_id.to_string())
-            .arg("--merkle-root-upload-authority")
-            .arg("11111111111111111111111111111111")
-            .arg("--commission-bps")
-            .arg("100");
-
-        if let Some(expected_bank_hash) = expected_bank_hash {
-            cmd.arg("--expected-bank-hash").arg(expected_bank_hash);
-        }
-
-        if let Some(gossip_port) = gossip_port {
-            cmd.arg("--gossip-port").arg(gossip_port.to_string());
-        }
-
-        if let Some(rpc_port) = rpc_port {
-            cmd.arg("--rpc-port").arg(rpc_port.to_string());
-        }
-
-        if let Some(ref geyser_config) = validator_config.geyser_config {
-            cmd.arg("--geyser-plugin-config").arg(geyser_config);
-        }
-
-        if let Some(bootstrap_gossip) = bootstrap_gossip {
-            cmd.arg("--entrypoint").arg(bootstrap_gossip);
-        }
-
-        info!("Starting {} node with command: {:?}", node_name, cmd);
-        // Print the command as it would appear on the CLI
-        use std::ffi::OsStr;
-        let cmd_str = std::iter::once(cmd.get_program())
-            .chain(cmd.get_args())
-            .map(|s| s.to_string_lossy())
-            .collect::<Vec<_>>()
-            .join(" ");
-        println!("CLI Command: {}", cmd_str);
-
-        let mut child = cmd
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .context(format!("Failed to start {} node", node_name))?;
-
-        // Spawn a task to stream the output
-        let child_stdout = child.stdout.take();
-        let child_stderr = child.stderr.take();
-        let node_name_clone = node_name.to_string();
-
-        if let Some(stdout) = child_stdout {
-            let node_name = node_name_clone.clone();
-            runtime.spawn(async move {
-                use tokio::io::{AsyncBufReadExt, BufReader};
-                let reader = BufReader::new(tokio::process::ChildStdout::from_std(stdout).unwrap());
-                let mut lines = reader.lines();
-
-                while let Ok(Some(line)) = lines.next_line().await {
-                    println!("[{}] {}", node_name, line);
-                }
-            });
-        }
-
-        if let Some(stderr) = child_stderr {
-            let node_name = node_name_clone;
-            runtime.spawn(async move {
-                use tokio::io::{AsyncBufReadExt, BufReader};
-                let reader = BufReader::new(tokio::process::ChildStderr::from_std(stderr).unwrap());
-                let mut lines = reader.lines();
-
-                while let Ok(Some(line)) = lines.next_line().await {
-                    println!("[{}] {}", node_name, line);
-                }
-            });
-        }
-
-        Ok(child)
-    }
-
     pub fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
         // Start process monitoring
-        let processes_clone = Arc::clone(&self.processes);
+        let validators_ptr = self.validators.clone();
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+
         self.runtime.spawn(async move {
-            Self::monitor_processes(processes_clone).await;
+            Self::monitor_validators(validators_ptr, tx).await;
         });
 
-        // Wait for Ctrl+C or server to exit
+        // Wait for Ctrl+C or validator death
         self.runtime.block_on(async {
             tokio::select! {
                 _ = signal::ctrl_c() => {
                     info!("Received Ctrl+C, shutting down...");
+                }
+                _ = &mut rx => {
+                    error!("A validator died, shutting down cluster...");
                 }
             }
         });
@@ -339,23 +545,28 @@ impl BamLocalCluster {
         Ok(())
     }
 
-    async fn monitor_processes(processes: Arc<Mutex<Vec<Child>>>) {
+    async fn monitor_validators(
+        validators: std::sync::Arc<std::sync::Mutex<Vec<BamValidator>>>,
+        exit_tx: tokio::sync::oneshot::Sender<()>,
+    ) {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
 
-            if let Ok(mut processes_guard) = processes.lock() {
-                for (i, process) in processes_guard.iter_mut().enumerate() {
-                    match process.try_wait() {
-                        Ok(Some(status)) => {
-                            error!("Validator process {} exited with status: {:?}", i, status);
-                        }
-                        Ok(None) => {
-                            // Process is still running
-                            debug!("Validator process {} (PID: {}) is running", i, process.id());
-                        }
-                        Err(e) => {
-                            error!("Error checking validator process {}: {}", i, e);
-                        }
+            if let Ok(mut validators_guard) = validators.lock() {
+                for (i, validator) in validators_guard.iter_mut().enumerate() {
+                    if !validator.is_running() {
+                        error!(
+                            "Validator process {} ({}) is not running - exiting cluster",
+                            i, validator.node_name
+                        );
+                        // Signal exit and return
+                        let _ = exit_tx.send(());
+                        return;
+                    } else {
+                        debug!(
+                            "Validator process {} ({}) is running",
+                            i, validator.node_name
+                        );
                     }
                 }
             }
@@ -365,70 +576,11 @@ impl BamLocalCluster {
     pub fn shutdown(self) {
         info!("Shutting down cluster...");
 
-        // Terminate all child processes
-        if let Ok(mut processes) = self.processes.lock() {
-            for mut process in processes.drain(..) {
-                if let Err(e) = process.kill() {
-                    error!("Failed to kill process: {}", e);
-                }
-                if let Err(e) = process.wait() {
-                    error!("Failed to wait for process: {}", e);
-                }
+        // Terminate all validator processes
+        for mut validator in self.validators.lock().unwrap().drain(..) {
+            if let Err(e) = validator.kill() {
+                error!("Failed to kill validator {}: {}", validator.node_name, e);
             }
         }
-    }
-
-    fn create_snapshot(validator_ledger_path: &PathBuf) -> anyhow::Result<()> {
-        // Determine validator binary path
-        let ledger_tool_binary =
-            "/Users/lucasbruder/jito/jito-solana-jds/target/debug/agave-ledger-tool";
-
-        let mut cmd = Command::new(ledger_tool_binary);
-
-        cmd.env("RUST_LOG", "info")
-            .arg("--ledger")
-            .arg(validator_ledger_path.to_str().unwrap())
-            .arg("create-snapshot")
-            .arg("0");
-
-        let status = cmd.status()?;
-        if !status.success() {
-            return Err(anyhow::anyhow!(
-                "Failed to create snapshot: process exited with status {}",
-                status
-            ));
-        }
-        Ok(())
-    }
-
-    fn get_bank_hash(validator_ledger_path: &PathBuf) -> Result<String, anyhow::Error> {
-        // Run the agave-ledger-tool to get the bank hash for slot 0
-        let ledger_tool_binary =
-            "/Users/lucasbruder/jito/jito-solana-jds/target/debug/agave-ledger-tool";
-
-        let output = std::process::Command::new(ledger_tool_binary)
-            .arg("-l")
-            .arg(validator_ledger_path.to_str().unwrap())
-            .arg("verify")
-            .arg("--print-bank-hash")
-            .output()?;
-
-        if !output.status.success() {
-            return Err(anyhow::anyhow!(
-                "Failed to run agave-ledger-tool: process exited with status {}",
-                output.status
-            ));
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            if let Some(hash) = line.strip_prefix("Bank hash for slot 0: ") {
-                return Ok(hash.trim().to_string());
-            }
-        }
-
-        Err(anyhow::anyhow!(
-            "Bank hash for slot 0 not found in agave-ledger-tool output"
-        ))
     }
 }
