@@ -3,13 +3,13 @@
 /// this implementation only functions during the `Consume/Hold` phase; otherwise it will send them back
 /// to BAM with a `Retryable` result.
 use std::{
-    cmp::min,
-    sync::{
+    cmp::min, slice::IterMut, sync::{
         atomic::{AtomicBool, Ordering},
         Arc, RwLock,
-    },
-    time::{Duration, Instant},
+    }, time::{Duration, Instant}
 };
+use solana_sdk::saturating_add_assign;
+
 use {
     super::{
         receive_and_buffer::ReceiveAndBuffer,
@@ -343,8 +343,8 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
     fn receive_and_buffer_packets(
         &mut self,
         container: &mut Self::Container,
-        _: &mut super::scheduler_metrics::SchedulerTimingMetrics,
-        _: &mut super::scheduler_metrics::SchedulerCountMetrics,
+        timing_metrics: &mut super::scheduler_metrics::SchedulerTimingMetrics,
+        count_metrics: &mut super::scheduler_metrics::SchedulerCountMetrics,
         decision: &crate::banking_stage::decision_maker::BufferedPacketsDecision,
     ) -> Result<usize, ()> {
         if !self.bam_enabled.load(Ordering::Relaxed) {
@@ -352,14 +352,26 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
             return Ok(0);
         }
 
-        let mut result = 0;
+        let start_time = Instant::now();
+        let mut num_received_packets = 0;
+        let mut num_inserted = 0;
+        let mut receive_time_us = 0;
+        let mut buffer_time_us = 0;
         const MAX_BUNDLES_PER_RECV: usize = 24;
         match decision {
             BufferedPacketsDecision::Consume(_) | BufferedPacketsDecision::Hold => {
-                while result < MAX_BUNDLES_PER_RECV {
+                let mut batches = Vec::with_capacity(MAX_BUNDLES_PER_RECV);
+                while num_inserted < MAX_BUNDLES_PER_RECV {
                     let Ok(batch) = self.bundle_receiver.try_recv() else {
                         break;
                     };
+                    num_received_packets += 1;
+                    batches.push(batch);
+                }
+                let receive_end = Instant::now();
+                receive_time_us += receive_end.duration_since(start_time).as_micros() as u64;
+
+                for batch in batches {
                     let ParsedBatch {
                         transaction_ttls,
                         packets,
@@ -387,20 +399,40 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
                         self.send_container_full_txn_batch_result(batch.seq_id);
                         continue;
                     };
-
-                    result += 1;
+                    num_inserted += 1;
                 }
+
+                buffer_time_us += Instant::now().duration_since(receive_end).as_micros() as u64;
             }
             BufferedPacketsDecision::ForwardAndHold | BufferedPacketsDecision::Forward => {
                 // Send back any batches that were received while in Forward/Hold state
                 let deadline = Instant::now() + Duration::from_millis(100);
                 while let Ok(batch) = self.bundle_receiver.recv_deadline(deadline) {
                     self.send_no_leader_slot_txn_batch_result(batch.seq_id);
+                    num_received_packets += 1;
                 }
+                receive_time_us += Instant::now().duration_since(start_time).as_micros() as u64;
             }
         }
 
-        Ok(result)
+        count_metrics.update(|count_metrics| {
+            saturating_add_assign!(count_metrics.num_received, num_received_packets);
+        });
+        count_metrics.update(|count_metrics| {
+            saturating_add_assign!(
+                count_metrics.num_dropped_on_receive,
+                num_received_packets.saturating_sub(num_inserted)
+            );
+        });
+
+        timing_metrics.update(|timing_metrics| {
+            saturating_add_assign!(timing_metrics.receive_time_us, receive_time_us);
+        });
+        timing_metrics.update(|timing_metrics| {
+            saturating_add_assign!(timing_metrics.buffer_time_us, buffer_time_us);
+        });
+
+        Ok(num_received_packets)
     }
 }
 

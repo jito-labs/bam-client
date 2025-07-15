@@ -3229,21 +3229,6 @@ impl Bank {
         TransactionBatch::new(lock_results, self, OwnedOrBorrowed::Borrowed(transactions))
     }
 
-    /// Prepare a locked transaction batch from a list of sanitized transactions, and their cost
-    /// limited packing status, where transactions will be locked sequentially until the first failure
-    pub fn prepare_sequential_sanitized_batch_with_results<'a, 'b, Tx: SVMMessage>(
-        &'a self,
-        transactions: &'b [Tx],
-    ) -> TransactionBatch<'a, 'b, Tx> {
-        // this lock_results could be: Ok, AccountInUse, AccountLoadedTwice, or TooManyAccountLocks
-        let tx_account_lock_limit = self.get_transaction_account_lock_limit();
-        let lock_results = self
-            .rc
-            .accounts
-            .lock_accounts_sequential_with_results(transactions, tx_account_lock_limit);
-        TransactionBatch::new(lock_results, self, OwnedOrBorrowed::Borrowed(transactions))
-    }
-
     /// Prepare a locked transaction batch from a list of sanitized transactions for simulation.
     /// This grabs as many sequential account locks that it can without a RW conflict. However,
     /// it uses a temporary version of AccountLocks and not the Bank's account locks, so one can
