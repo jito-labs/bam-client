@@ -348,9 +348,13 @@ impl BamLocalCluster {
         let runtime = Runtime::new().expect("Could not create Tokio runtime");
 
         // Start faucet
-        let faucet_keypair = Keypair::new();
         let faucet_address = SocketAddr::from_str(&config.faucet_address)?;
-        let faucet = Arc::new(Mutex::new(Faucet::new(faucet_keypair, None, None, None)));
+        let faucet = Arc::new(Mutex::new(Faucet::new(
+            genesis_config_info.mint_keypair.insecure_clone(),
+            None,
+            None,
+            None,
+        )));
         runtime.spawn(run_faucet(faucet, faucet_address, None));
 
         let mut validators = Vec::new();
