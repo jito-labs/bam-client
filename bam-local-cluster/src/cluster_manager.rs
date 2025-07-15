@@ -108,6 +108,7 @@ impl BamValidator {
             &identity_path,
             &vote_path,
             runtime,
+            &config,
         )?;
 
         Ok(Self {
@@ -286,6 +287,7 @@ impl BamValidator {
         identity_path: &PathBuf,
         vote_path: &PathBuf,
         runtime: &Runtime,
+        config: &CustomValidatorConfig,
     ) -> Result<Child, Box<dyn std::error::Error>> {
         let validator_binary =
             "/Users/lucasbruder/jito/jito-solana-jds/target/debug/agave-validator";
@@ -354,8 +356,9 @@ impl BamValidator {
             cmd.arg("--entrypoint").arg(bootstrap_gossip);
         }
 
-        // TODO (LB): add in geyser
-        
+        if let Some(geyser_config) = &config.geyser_config {
+            cmd.arg("--geyser-plugin-config").arg(geyser_config);
+        }
 
         info!("Starting {} node with command: {:?}", node_name, cmd);
 
