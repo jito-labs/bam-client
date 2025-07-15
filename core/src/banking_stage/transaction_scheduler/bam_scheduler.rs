@@ -508,8 +508,16 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
 
         datapoint_info!(
             "bam-scheduler_metrics",
-            ("num_dropped_from_container", num_dropped_from_container, i64),
-            ("num_dropped_from_priograph", num_dropped_from_priograph, i64),
+            (
+                "num_dropped_from_container",
+                num_dropped_from_container,
+                i64
+            ),
+            (
+                "num_dropped_from_priograph",
+                num_dropped_from_priograph,
+                i64
+            ),
             ("inflight_info_len", self.inflight_batch_info.len(), i64),
         );
     }

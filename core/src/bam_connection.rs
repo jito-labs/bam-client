@@ -104,8 +104,6 @@ impl BamConnection {
         let mut metrics_and_health_check_interval = interval(std::time::Duration::from_secs(1));
         metrics_and_health_check_interval
             .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut outbound_tick_interval = interval(std::time::Duration::from_millis(1));
-        outbound_tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Burst);
 
         // Create auth proof
         let Some(auth_proof) = Self::prepare_auth_proof(&mut validator_client, cluster_info).await
@@ -137,6 +135,21 @@ impl BamConnection {
             validator_client.clone(),
             metrics.clone(),
         ));
+
+        let exit_clone = exit.clone();
+        let outbound_sender_clone = outbound_sender.clone();
+        let metrics_clone = metrics.clone();
+        let outbound_forwarder_task = std::thread::Builder::new()
+            .name("bam-outbound-forwarder".to_string())
+            .spawn(move || {
+                Self::outbound_forwarder_task(
+                    exit_clone,
+                    outbound_receiver,
+                    outbound_sender_clone,
+                    metrics_clone,
+                )
+            })
+            .expect("Failed to spawn outbound forwarder thread");
         while !exit.load(Relaxed) {
             tokio::select! {
                 _ = heartbeat_interval.tick() => {
@@ -189,27 +202,11 @@ impl BamConnection {
                         _ => {}
                     }
                 }
-                _ = outbound_tick_interval.tick() => {
-                    while let Ok(outbound) = outbound_receiver.try_recv() {
-                        match outbound.msg.as_ref() {
-                            Some(Msg::LeaderState(_)) => {
-                                metrics.leaderstate_sent.fetch_add(1, Relaxed);
-                            }
-                            Some(Msg::AtomicTxnBatchResult(_)) => {
-                                metrics.bundleresult_sent.fetch_add(1, Relaxed);
-                            }
-                            _ => {}
-                        }
-                        let _ = outbound_sender.try_send(v0_to_versioned_proto(outbound)).inspect_err(|_| {
-                            error!("Failed to send outbound message");
-                        });
-                        metrics.outbound_sent.fetch_add(1, Relaxed);
-                    }
-                }
             }
         }
         is_healthy.store(false, Relaxed);
         let _ = builder_config_task.await.ok();
+        let _ = outbound_forwarder_task.join();
     }
 
     async fn refresh_config_task(
@@ -237,6 +234,35 @@ impl BamConnection {
                     }
                 }
             }
+        }
+    }
+
+    fn outbound_forwarder_task(
+        exit: Arc<AtomicBool>,
+        outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessageV0>,
+        mut outbound_sender: mpsc::Sender<StartSchedulerMessage>,
+        metrics: Arc<BamConnectionMetrics>,
+    ) {
+        while !exit.load(Relaxed) {
+            let Ok(outbound) = outbound_receiver.recv_timeout(std::time::Duration::from_millis(10))
+            else {
+                continue;
+            };
+            match outbound.msg.as_ref() {
+                Some(Msg::LeaderState(_)) => {
+                    metrics.leaderstate_sent.fetch_add(1, Relaxed);
+                }
+                Some(Msg::AtomicTxnBatchResult(_)) => {
+                    metrics.bundleresult_sent.fetch_add(1, Relaxed);
+                }
+                _ => {}
+            }
+            let _ = outbound_sender
+                .try_send(v0_to_versioned_proto(outbound))
+                .inspect_err(|_| {
+                    error!("Failed to send outbound message");
+                });
+            metrics.outbound_sent.fetch_add(1, Relaxed);
         }
     }
 
