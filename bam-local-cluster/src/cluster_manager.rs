@@ -36,25 +36,11 @@ impl BamLocalCluster {
     pub fn new(config: LocalClusterConfig) -> Result<Self, Box<dyn std::error::Error>> {
         let faucet_address = SocketAddr::from_str(&config.faucet_address)?;
 
-        // Generate keypairs for all validators first
-        let mut validator_keypairs = Vec::new();
-        for _ in 0..config.validators.len() {
-            let validator_identity = Keypair::new();
-            let validator_vote = Keypair::new();
-            validator_keypairs.push((validator_identity, validator_vote));
-        }
-
         // Create genesis configuration with the validator keypairs
-        let voting_keypairs = validator_keypairs
+        let voting_keypairs = config
+            .validators
             .iter()
-            .map(|(identity_keypair, vote_keypair)| {
-                let stake_keypair = Keypair::new();
-                ValidatorVoteKeypairs::new(
-                    identity_keypair.insecure_clone(),
-                    vote_keypair.insecure_clone(),
-                    stake_keypair,
-                )
-            })
+            .map(|_| ValidatorVoteKeypairs::new_rand())
             .collect::<Vec<_>>();
         let stakes = vec![DEFAULT_NODE_STAKE; config.validators.len()];
         let mut genesis_config_info = create_genesis_config_with_vote_accounts_and_cluster_type(
@@ -63,6 +49,8 @@ impl BamLocalCluster {
             stakes,
             ClusterType::MainnetBeta,
         );
+        // TODO: set fee rate governor
+        // genesis_config_info.genesis_config.fee_rate_governor = FeeRateGovernor::new(
 
         // Add SPL programs
         for (pubkey, account) in spl_programs(&genesis_config_info.genesis_config.rent) {
@@ -80,6 +68,7 @@ impl BamLocalCluster {
 
         let mut processes = Vec::new();
         let mut bootstrap_gossip = String::new();
+        let mut expected_bank_hash = None;
 
         // Process all validators
         for (i, validator_config) in config.validators.iter().enumerate() {
@@ -108,21 +97,35 @@ impl BamLocalCluster {
                     LedgerColumnOptions::default(),
                 )?;
                 Self::create_snapshot(&validator_ledger_path)?;
+                let bank_hash = Self::get_bank_hash(&validator_ledger_path)?;
+                info!("Bank hash for slot 0: {:?}", bank_hash);
+                expected_bank_hash = Some(bank_hash);
             }
 
             // Use pre-generated keypairs for validator
-            let (validator_identity, validator_vote) = &validator_keypairs[i];
+            let ValidatorVoteKeypairs {
+                node_keypair,
+                vote_keypair,
+                stake_keypair,
+            } = &voting_keypairs[i];
 
             // Save validator keypairs in the ledger directory
             let validator_identity_path = validator_ledger_path.join("identity.json");
             let validator_vote_path = validator_ledger_path.join("vote.json");
+            let authorized_voter_path = validator_ledger_path.join("authorized-voter.json");
+            // stake keypair is confusing yeah...
             fs::write(
                 &validator_identity_path,
-                serde_json::to_string_pretty(&validator_identity.to_bytes().to_vec())?,
+                serde_json::to_string_pretty(&node_keypair.to_bytes().to_vec())?,
+            )?;
+            // stake keypair is the authorized voter...
+            fs::write(
+                &authorized_voter_path,
+                serde_json::to_string_pretty(&stake_keypair.to_bytes().to_vec())?,
             )?;
             fs::write(
                 &validator_vote_path,
-                serde_json::to_string_pretty(&validator_vote.to_bytes().to_vec())?,
+                serde_json::to_string_pretty(&vote_keypair.to_bytes().to_vec())?,
             )?;
 
             // Assign gossip port: 8001 for bootstrap, random for others
@@ -143,6 +146,7 @@ impl BamLocalCluster {
                 &genesis_config_info.genesis_config,
                 &validator_ledger_path,
                 &validator_identity_path,
+                &authorized_voter_path,
                 &validator_vote_path,
                 if is_bootstrap {
                     None
@@ -154,6 +158,7 @@ impl BamLocalCluster {
                 &runtime,
                 &node_name,
                 (dynamic_port_range_start, dynamic_port_range_end),
+                expected_bank_hash.clone(),
             )?;
 
             if is_bootstrap {
@@ -188,6 +193,7 @@ impl BamLocalCluster {
         genesis_config: &GenesisConfig,
         ledger_path: &Path,
         identity_path: &Path,
+        authorized_voter_path: &Path,
         vote_path: &Path,
         bootstrap_gossip: Option<&str>,
         gossip_port: Option<u16>,
@@ -195,6 +201,7 @@ impl BamLocalCluster {
         runtime: &Runtime,
         node_name: &str,
         dynamic_port_range: (u64, u64),
+        expected_bank_hash: Option<String>,
     ) -> Result<Child, Box<dyn std::error::Error>> {
         // Determine validator binary path
         let validator_binary =
@@ -211,16 +218,18 @@ impl BamLocalCluster {
             .arg(identity_path)
             .arg("--vote-account")
             .arg(vote_path)
+            .arg("--authorized-voter")
+            .arg(vote_path)
             .arg("--bind-address")
             .arg("0.0.0.0")
             .arg("--dynamic-port-range")
             .arg(format!("{}-{}", dynamic_port_range.0, dynamic_port_range.1))
             .arg("--no-wait-for-vote-to-start-leader")
+            .arg("--wait-for-supermajority")
+            .arg("0")
             .arg("--allow-private-addr")
             .arg("--full-rpc-api")
             .arg("--enable-rpc-transaction-history")
-            .arg("--expected-bank-hash")
-            .arg(genesis_config.hash().to_string())
             .arg("--expected-shred-version")
             .arg(compute_shred_version(&genesis_config.hash(), None).to_string())
             .arg("--bam-url")
@@ -233,6 +242,10 @@ impl BamLocalCluster {
             .arg("11111111111111111111111111111111")
             .arg("--commission-bps")
             .arg("100");
+
+        if let Some(expected_bank_hash) = expected_bank_hash {
+            cmd.arg("--expected-bank-hash").arg(expected_bank_hash);
+        }
 
         if let Some(gossip_port) = gossip_port {
             cmd.arg("--gossip-port").arg(gossip_port.to_string());
@@ -379,5 +392,36 @@ impl BamLocalCluster {
             ));
         }
         Ok(())
+    }
+
+    fn get_bank_hash(validator_ledger_path: &PathBuf) -> Result<String, anyhow::Error> {
+        // Run the agave-ledger-tool to get the bank hash for slot 0
+        let ledger_tool_binary =
+            "/Users/lucasbruder/jito/jito-solana-jds/target/debug/agave-ledger-tool";
+
+        let output = std::process::Command::new(ledger_tool_binary)
+            .arg("-l")
+            .arg(validator_ledger_path.to_str().unwrap())
+            .arg("verify")
+            .arg("--print-bank-hash")
+            .output()?;
+
+        if !output.status.success() {
+            return Err(anyhow::anyhow!(
+                "Failed to run agave-ledger-tool: process exited with status {}",
+                output.status
+            ));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if let Some(hash) = line.strip_prefix("Bank hash for slot 0: ") {
+                return Ok(hash.trim().to_string());
+            }
+        }
+
+        Err(anyhow::anyhow!(
+            "Bank hash for slot 0 not found in agave-ledger-tool output"
+        ))
     }
 }
