@@ -4,7 +4,6 @@
 /// to BAM with a `Retryable` result.
 use std::{
     cmp::min,
-    slice::IterMut,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, RwLock,
