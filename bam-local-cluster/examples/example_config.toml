@@ -17,7 +17,7 @@ faucet_address = "127.0.0.1:12345"
 ledger_base_directory = "config"
 
 # Build output directory (e.g., "target/debug" or "target/release")
-validator_build_path = "./target/debug"
+validator_build_path = "./target/release"
 
 # Validator configurations
 # The first validator is automatically the bootstrap node

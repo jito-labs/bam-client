@@ -28,7 +28,7 @@ The tool automatically handles:
 
 3. **Run the cluster**:
    ```bash
-   ./target/release/bam-local-cluster --config examples/example_config.toml
+   RUST_LOG=info ./target/release/bam-local-cluster --config bam-local-cluster/examples/example_config.toml
    ```
 
 ## Configuration
