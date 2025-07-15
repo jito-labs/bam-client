@@ -464,7 +464,7 @@ impl BamLocalCluster {
         stakes: Vec<u64>,
         cluster_type: ClusterType,
     ) -> GenesisConfigInfo {
-        const VALIDATOR_LAMPORTS: u64 = 100 * LAMPORTS_PER_SOL;
+        const VALIDATOR_LAMPORTS: u64 = 100000 * LAMPORTS_PER_SOL;
 
         assert!(!voting_keypairs.is_empty());
         assert_eq!(voting_keypairs.len(), stakes.len());
