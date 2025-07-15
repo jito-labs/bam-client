@@ -139,7 +139,7 @@ where
             }
             // Report metrics only if there is data.
             // Reset intervals when appropriate, regardless of report.
-            let should_report = self.count_metrics.interval_has_data();
+            let should_report = self.count_metrics.interval_has_data() && self.scheduling_enabled();
             let priority_min_max = self.container.get_min_max_priority();
             self.count_metrics.update(|count_metrics| {
                 count_metrics.update_priority_stats(priority_min_max);
