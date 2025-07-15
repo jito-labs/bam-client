@@ -13,27 +13,27 @@ tip_distribution_program_id = "4R3gSG8BpU4t19KYj8CfnbtRpnT8gtk4dvTHxVRwc2r7"
 # Faucet address for airdrops
 faucet_address = "127.0.0.1:12345"
 
-# HTTP server address for cluster info
-info_address = "127.0.0.1:8080"
-
 # Base directory for ledger storage
 ledger_base_directory = "config"
 
+# Build output directory (e.g., "target/debug" or "target/release")
+validator_build_path = "./target/debug"
+
 # Validator configurations
-# The first validator is automatically the bootstrap node (gossip port 8001)
-# Other validators get random gossip ports in range 8002-8999
+# The first validator is automatically the bootstrap node
+# Other validators will connect to the bootstrap node
 [[validators]]
-rpc_port = 18999
-# geyser_config = "/path/to/geyser/config.json"  # Optional
+# Optional: Path to geyser plugin configuration
+# geyser_config = "/path/to/geyser/config.json"
 
 [[validators]]
-rpc_port = 19001
-# geyser_config = "/path/to/geyser/config.json"  # Optional
+# Second validator (optional)
+# geyser_config = "/path/to/geyser/config.json"
 
 [[validators]]
-rpc_port = 19003
-# geyser_config = "/path/to/geyser/config.json"  # Optional
+# Third validator (optional)
+# geyser_config = "/path/to/geyser/config.json"
 
 [[validators]]
-rpc_port = 19005
-# geyser_config = "/path/to/geyser/config.json"  # Optional
+# Fourth validator (optional)
+# geyser_config = "/path/to/geyser/config.json"

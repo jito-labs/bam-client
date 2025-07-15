@@ -6,12 +6,11 @@ use {
 #[derive(Debug, Deserialize, Clone)]
 pub struct LocalClusterConfig {
     pub bam_url: String,
-    pub info_address: String,
     pub tip_payment_program_id: String,
     pub tip_distribution_program_id: String,
     pub faucet_address: String,
     pub ledger_base_directory: String,
-    pub validator_binary_path: Option<String>,
+    pub validator_build_path: String,
     pub validators: Vec<CustomValidatorConfig>,
 }
 

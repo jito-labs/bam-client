@@ -60,8 +60,7 @@ impl BamValidator {
         runtime: &Runtime,
         config: &CustomValidatorConfig,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let validator_binary =
-            "/Users/lucasbruder/jito/jito-solana-jds/target/debug/agave-validator";
+        let validator_binary = format!("{}/agave-validator", cluster_config.validator_build_path);
 
         let mut cmd = Command::new(validator_binary);
 
@@ -181,9 +180,8 @@ impl BamValidator {
         })
     }
 
-    pub fn get_bank_hash(ledger_path: &PathBuf) -> Result<String, anyhow::Error> {
-        let ledger_tool_binary =
-            "/Users/lucasbruder/jito/jito-solana-jds/target/debug/agave-ledger-tool";
+    pub fn get_bank_hash(ledger_path: &PathBuf, build_path: &str) -> Result<String, anyhow::Error> {
+        let ledger_tool_binary = format!("{}/agave-ledger-tool", build_path);
 
         let mut cmd = std::process::Command::new(ledger_tool_binary);
 
@@ -296,9 +294,8 @@ impl BamValidator {
         Ok(())
     }
 
-    fn create_snapshot(validator_ledger_path: &PathBuf) -> anyhow::Result<()> {
-        let ledger_tool_binary =
-            "/Users/lucasbruder/jito/jito-solana-jds/target/debug/agave-ledger-tool";
+    fn create_snapshot(validator_ledger_path: &PathBuf, build_path: &str) -> anyhow::Result<()> {
+        let ledger_tool_binary = format!("{}/agave-ledger-tool", build_path);
 
         let mut cmd = Command::new(ledger_tool_binary);
 
@@ -386,7 +383,7 @@ impl BamLocalCluster {
             ))?;
 
             // Create ledger and snapshot if bootstrap; other validators need to have snapshot
-            // to download to start
+            // to download from the bootstrap validator to start
             if is_bootstrap {
                 create_new_ledger(
                     &ledger_path,
@@ -394,10 +391,11 @@ impl BamLocalCluster {
                     10737418240,
                     LedgerColumnOptions::default(),
                 )?;
-                BamValidator::create_snapshot(&ledger_path)?;
+                BamValidator::create_snapshot(&ledger_path, &config.validator_build_path)?;
 
                 info!("Getting bank hash for bootstrap validator");
-                let bank_hash = BamValidator::get_bank_hash(&ledger_path)?;
+                let bank_hash =
+                    BamValidator::get_bank_hash(&ledger_path, &config.validator_build_path)?;
                 info!("Bank hash for slot 0: {:?}", bank_hash);
                 expected_bank_hash = Some(bank_hash);
             }
