@@ -3,13 +3,14 @@
 /// this implementation only functions during the `Consume/Hold` phase; otherwise it will send them back
 /// to BAM with a `Retryable` result.
 use std::{
-    cmp::min, slice::IterMut, sync::{
+    cmp::min,
+    slice::IterMut,
+    sync::{
         atomic::{AtomicBool, Ordering},
         Arc, RwLock,
-    }, time::{Duration, Instant}
+    },
+    time::{Duration, Instant},
 };
-use solana_sdk::saturating_add_assign;
-
 use {
     super::{
         receive_and_buffer::ReceiveAndBuffer,
@@ -42,6 +43,7 @@ use {
     solana_sdk::{
         clock::MAX_PROCESSING_AGE,
         packet::{PacketFlags, PACKET_DATA_SIZE},
+        saturating_add_assign,
         transaction::SanitizedTransaction,
     },
     solana_svm::transaction_error_metrics::TransactionErrorMetrics,

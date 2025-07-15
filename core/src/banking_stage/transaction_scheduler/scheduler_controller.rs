@@ -152,9 +152,12 @@ where
                 .iter()
                 .for_each(|metrics| metrics.maybe_report_and_reset());
 
-            if should_report && decision.bank_start().is_some() && last_container_update.elapsed() > Duration::from_millis(20) {
+            if should_report
+                && decision.bank_start().is_some()
+                && last_container_update.elapsed() > Duration::from_millis(20)
+            {
                 datapoint_info!(
-                    "bam-scheduler_container_size", 
+                    "bam-scheduler_container_size",
                     ("count", self.container.len(), i64)
                 );
                 last_container_update = Instant::now();

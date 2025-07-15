@@ -507,7 +507,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         }
 
         datapoint_info!(
-            "bam-scheduler_num-dropped-on-clear", 
+            "bam-scheduler_num-dropped-on-clear",
             ("count", num_dropped_on_clear, i64)
         );
     }
