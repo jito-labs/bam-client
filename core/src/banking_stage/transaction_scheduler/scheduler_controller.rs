@@ -106,6 +106,8 @@ where
     }
 
     pub fn run(mut self) -> Result<(), SchedulerError> {
+        let mut last_container_update = Instant::now();
+
         loop {
             // BufferedPacketsDecision is shared with legacy BankingStage, which will forward
             // packets. Initially, not renaming these decision variants but the actions taken
@@ -149,6 +151,14 @@ where
             self.worker_metrics
                 .iter()
                 .for_each(|metrics| metrics.maybe_report_and_reset());
+
+            if decision.bank_start().is_some() && last_container_update.elapsed() > Duration::from_millis(20) {
+                datapoint_info!(
+                    "bam-scheduler_container_size", 
+                    ("count", self.container.len(), i64)
+                );
+                last_container_update = Instant::now();
+            }
         }
 
         Ok(())
