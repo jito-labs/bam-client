@@ -39,13 +39,7 @@ impl BamConnection {
         batch_sender: crossbeam_channel::Sender<AtomicTxnBatch>,
         outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessageV0>,
     ) -> Result<Self, TryInitError> {
-        let backend_endpoint = tonic::transport::Endpoint::from_shared(url.clone())?;
-        let connection_timeout = std::time::Duration::from_secs(5);
-
-        let channel = timeout(connection_timeout, backend_endpoint.connect()).await??;
-
-        let mut validator_client = BamNodeApiClient::new(channel);
-
+        let mut validator_client = Self::build_client(&url).await?;
         let (outbound_sender, outbound_receiver_internal) = mpsc::channel(100_000);
         let outbound_stream =
             tonic::Request::new(outbound_receiver_internal.map(|req: StartSchedulerMessage| req));
@@ -74,6 +68,7 @@ impl BamConnection {
             metrics.clone(),
             is_healthy.clone(),
             outbound_receiver,
+            url.clone(),
         ));
 
         Ok(Self {
@@ -97,11 +92,12 @@ impl BamConnection {
         metrics: Arc<BamConnectionMetrics>,
         is_healthy: Arc<AtomicBool>,
         outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessageV0>,
+        url: String,
     ) {
         let mut last_heartbeat = std::time::Instant::now();
         let mut heartbeat_interval = interval(std::time::Duration::from_secs(5));
         heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut metrics_and_health_check_interval = interval(std::time::Duration::from_secs(1));
+        let mut metrics_and_health_check_interval = interval(std::time::Duration::from_millis(50));
         metrics_and_health_check_interval
             .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -129,10 +125,15 @@ impl BamConnection {
             return;
         }
 
+        let Ok(config_client) = Self::build_client(&url).await else {
+            error!("Failed to build client for config task");
+            is_healthy.store(false, Relaxed);
+            return;
+        };
         let builder_config_task = tokio::spawn(Self::refresh_config_task(
             exit.clone(),
             config.clone(),
-            validator_client.clone(),
+            config_client,
             metrics.clone(),
         ));
 
@@ -305,6 +306,17 @@ impl BamConnection {
             validator_pubkey: cluster_info.keypair().pubkey().to_string(),
             signature,
         })
+    }
+
+    async fn build_client(
+        url: &str,
+    ) -> Result<BamNodeApiClient<tonic::transport::channel::Channel>, TryInitError> {
+        let endpoint = tonic::transport::Endpoint::from_shared(url.to_string())
+            .map_err(TryInitError::EndpointConnectError)?;
+        let channel = timeout(std::time::Duration::from_secs(5), endpoint.connect())
+            .await
+            .map_err(TryInitError::ConnectionTimeout)??;
+        Ok(BamNodeApiClient::new(channel))
     }
 }
 
