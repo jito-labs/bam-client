@@ -511,6 +511,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             }
         }
         while let Some((next_batch_id, _)) = self.prio_graph.pop_and_unblock() {
+            self.in_prio_graph_count -= 1;
             let seq_id = priority_to_seq_id(next_batch_id.priority);
             self.send_no_leader_slot_bundle_result(seq_id);
             container.remove_by_id(next_batch_id.id);
