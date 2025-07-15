@@ -554,7 +554,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                 ("scheduled_count", self.scheduled_count, i64),
             );
             info!("workers={:?}", self.workers_scheduled_count);
-            self.num_scheduled = 0;
+            self.scheduled_count = 0;
             self.last_metrics_update = now;
         }
 
