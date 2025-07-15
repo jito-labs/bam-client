@@ -1,7 +1,6 @@
 /// A Scheduled implementation that pulls batches off the container, and then
 /// schedules them to workers in a FIFO, account-aware manner. This is facilitated by the
 /// `PrioGraph` data structure, which is a directed graph that tracks the dependencies.
-use std::time::Instant;
 use {
     super::{
         bam_receive_and_buffer::priority_to_seq_id,
@@ -480,7 +479,8 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             self.slot = None;
         }
 
-        let mut num_dropped_on_clear = 0;
+        let mut num_dropped_from_container = 0;
+        let mut num_dropped_from_priograph = 0;
 
         // Drain container and send back 'retryable'
         if self.slot.is_none() {
@@ -488,7 +488,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 let seq_id = priority_to_seq_id(next_batch_id.priority);
                 self.send_no_leader_slot_bundle_result(seq_id);
                 container.remove_by_id(next_batch_id.id);
-                num_dropped_on_clear += 1;
+                num_dropped_from_container += 1;
             }
         }
 
@@ -503,12 +503,14 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             let seq_id = priority_to_seq_id(next_batch_id.priority);
             self.send_no_leader_slot_bundle_result(seq_id);
             container.remove_by_id(next_batch_id.id);
-            num_dropped_on_clear += 1;
+            num_dropped_from_priograph += 1;
         }
 
         datapoint_info!(
-            "bam-scheduler_num-dropped-on-clear",
-            ("count", num_dropped_on_clear, i64)
+            "bam-scheduler_metrics",
+            ("num_dropped_from_container", num_dropped_from_container, i64),
+            ("num_dropped_from_priograph", num_dropped_from_priograph, i64),
+            ("inflight_info_len", self.inflight_batch_info.len(), i64),
         );
     }
 }
@@ -520,7 +522,6 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
         _pre_graph_filter: impl Fn(&[&Tx], &mut [bool]),
         _pre_lock_filter: impl Fn(&Tx) -> bool,
     ) -> Result<SchedulingSummary, SchedulerError> {
-        let start_time = Instant::now();
         let mut num_scheduled = 0;
 
         self.pull_into_prio_graph(container);
@@ -530,7 +531,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
             num_scheduled,
             num_unschedulable: 0,
             num_filtered_out: 0,
-            filter_time_us: start_time.elapsed().as_micros() as u64,
+            filter_time_us: 0,
         })
     }
 
@@ -571,6 +572,14 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                 .enumerate()
                 .take(len)
             {
+                // If in the same slot, unblock the transaction
+                if Some(inflight_batch_info.slot) == self.slot {
+                    self.prio_graph.unblock(priority_id);
+                }
+
+                // Remove the transaction from the container
+                container.remove_by_id(priority_id.id);
+
                 // If we got extra info, we can send back the result
                 if let Some(extra_info) = result.extra_info.as_ref() {
                     let bundle_result = if revert_on_error {
@@ -587,14 +596,6 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                     };
                     self.send_back_result(priority_to_seq_id(priority_id.priority), bundle_result);
                 }
-
-                // If in the same slot, unblock the transaction
-                if Some(inflight_batch_info.slot) == self.slot {
-                    self.prio_graph.unblock(priority_id);
-                }
-
-                // Remove the transaction from the container
-                container.remove_by_id(priority_id.id);
             }
             self.recycle_priority_ids(inflight_batch_info.priority_ids);
         }

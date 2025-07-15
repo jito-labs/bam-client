@@ -157,8 +157,9 @@ where
                 && last_container_update.elapsed() > Duration::from_millis(20)
             {
                 datapoint_info!(
-                    "bam-scheduler_container_size",
-                    ("count", self.container.len(), i64)
+                    "bam-scheduler_controller",
+                    ("container_len", self.container.len(), i64),
+                    ("scheduling_enabled", self.scheduling_enabled(), bool),
                 );
                 last_container_update = Instant::now();
             }
