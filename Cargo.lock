@@ -1212,7 +1212,9 @@ dependencies = [
  "solana-rpc",
  "solana-runtime",
  "solana-sdk",
+ "solana-stake-program",
  "solana-streamer",
+ "solana-vote-program",
  "tokio",
  "toml 0.8.12",
 ]

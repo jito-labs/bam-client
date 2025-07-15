@@ -3,20 +3,28 @@ use {
     anyhow::{Context, Result},
     log::{debug, error, info},
     solana_faucet::faucet::{run_faucet, Faucet},
-    solana_ledger::{blockstore::create_new_ledger, blockstore_options::LedgerColumnOptions},
+    solana_ledger::{
+        blockstore::create_new_ledger, blockstore_options::LedgerColumnOptions,
+        genesis_utils::GenesisConfigInfo,
+    },
     solana_local_cluster::integration_tests::DEFAULT_NODE_STAKE,
     solana_program_test::programs::spl_programs,
-    solana_runtime::genesis_utils::{
-        create_genesis_config_with_vote_accounts_and_cluster_type, ValidatorVoteKeypairs,
-    },
+    solana_runtime::genesis_utils::{create_genesis_config_with_leader_ex, ValidatorVoteKeypairs},
     solana_sdk::{
+        account::Account,
         fee_calculator::FeeRateGovernor,
         genesis_config::{ClusterType, GenesisConfig},
+        native_token::LAMPORTS_PER_SOL,
+        rent::Rent,
         shred_version::compute_shred_version,
         signature::Keypair,
         signer::Signer,
+        system_program,
     },
+    solana_stake_program::stake_state,
+    solana_vote_program::vote_state,
     std::{
+        borrow::Borrow,
         fs,
         net::SocketAddr,
         path::{Path, PathBuf},
@@ -65,7 +73,7 @@ impl BamValidator {
         let log_file_path = ledger_path.join("validator.log");
 
         let node_name = if is_bootstrap {
-            "bootstrap".to_string()
+            "bootstrap-ledger".to_string()
         } else {
             format!("validator-{}", index)
         };
@@ -84,15 +92,6 @@ impl BamValidator {
             &vote_path,
             serde_json::to_string_pretty(&vote_keypair.to_bytes().to_vec())?,
         )?;
-        // Save authorized voter (same as vote keypair for local testing)
-        fs::write(
-            &authorized_voter_path,
-            serde_json::to_string_pretty(&vote_keypair.to_bytes().to_vec())?,
-        )?;
-
-        if !is_bootstrap {
-            genesis_config.write(ledger_path)?;
-        }
 
         let process = Self::start_process(
             &ledger_path,
@@ -107,7 +106,6 @@ impl BamValidator {
             bootstrap_gossip,
             expected_bank_hash,
             &identity_path,
-            &authorized_voter_path,
             &vote_path,
             runtime,
         )?;
@@ -286,7 +284,6 @@ impl BamValidator {
         bootstrap_gossip: Option<&str>,
         expected_bank_hash: Option<String>,
         identity_path: &PathBuf,
-        authorized_voter_path: &PathBuf,
         vote_path: &PathBuf,
         runtime: &Runtime,
     ) -> Result<Child, Box<dyn std::error::Error>> {
@@ -305,7 +302,7 @@ impl BamValidator {
             .arg("--vote-account")
             .arg(&vote_path)
             .arg("--authorized-voter")
-            .arg(&authorized_voter_path)
+            .arg(&vote_path)
             .arg("--bind-address")
             .arg("0.0.0.0")
             .arg("--dynamic-port-range")
@@ -419,12 +416,13 @@ impl BamLocalCluster {
             })
             .collect();
         let stakes = vec![DEFAULT_NODE_STAKE; num_validators];
-        let mut genesis_config_info = create_genesis_config_with_vote_accounts_and_cluster_type(
-            solana_local_cluster::local_cluster::DEFAULT_MINT_LAMPORTS,
-            &vote_keypairs,
-            stakes,
-            ClusterType::MainnetBeta,
-        );
+        let mut genesis_config_info =
+            Self::create_genesis_config_with_vote_accounts_and_cluster_type(
+                solana_local_cluster::local_cluster::DEFAULT_MINT_LAMPORTS,
+                &vote_keypairs,
+                stakes,
+                ClusterType::MainnetBeta,
+            );
         genesis_config_info.genesis_config.fee_rate_governor = FeeRateGovernor::default();
 
         // Add SPL programs
@@ -451,7 +449,7 @@ impl BamLocalCluster {
             let ValidatorVoteKeypairs {
                 node_keypair,
                 vote_keypair,
-                stake_keypair,
+                stake_keypair: _,
             } = &vote_keypairs[i];
 
             // Setup ledger before creating validator
@@ -519,6 +517,73 @@ impl BamLocalCluster {
             validators,
             runtime,
         })
+    }
+
+    /// Similar to `create_genesis_config_with_vote_accounts_and_cluster_type` but with
+    /// real rent and real fees.
+    pub fn create_genesis_config_with_vote_accounts_and_cluster_type(
+        mint_lamports: u64,
+        voting_keypairs: &[impl Borrow<ValidatorVoteKeypairs>],
+        stakes: Vec<u64>,
+        cluster_type: ClusterType,
+    ) -> GenesisConfigInfo {
+        const VALIDATOR_LAMPORTS: u64 = 100 * LAMPORTS_PER_SOL;
+
+        assert!(!voting_keypairs.is_empty());
+        assert_eq!(voting_keypairs.len(), stakes.len());
+
+        let mint_keypair = Keypair::new();
+        let voting_keypair = voting_keypairs[0].borrow().vote_keypair.insecure_clone();
+
+        let validator_pubkey = voting_keypairs[0].borrow().node_keypair.pubkey();
+        let genesis_config = create_genesis_config_with_leader_ex(
+            mint_lamports,
+            &mint_keypair.pubkey(),
+            &validator_pubkey,
+            &voting_keypairs[0].borrow().vote_keypair.pubkey(),
+            &voting_keypairs[0].borrow().stake_keypair.pubkey(),
+            stakes[0],
+            VALIDATOR_LAMPORTS,
+            FeeRateGovernor::default(),
+            Rent::default(),
+            cluster_type,
+            vec![],
+        );
+
+        let mut genesis_config_info = GenesisConfigInfo {
+            genesis_config,
+            mint_keypair,
+            voting_keypair,
+            validator_pubkey,
+        };
+
+        for (validator_voting_keypairs, stake) in voting_keypairs[1..].iter().zip(&stakes[1..]) {
+            let node_pubkey = validator_voting_keypairs.borrow().node_keypair.pubkey();
+            let vote_pubkey = validator_voting_keypairs.borrow().vote_keypair.pubkey();
+            let stake_pubkey = validator_voting_keypairs.borrow().stake_keypair.pubkey();
+
+            // Create accounts
+            let node_account = Account::new(VALIDATOR_LAMPORTS, 0, &system_program::id());
+            let vote_account = vote_state::create_account(&vote_pubkey, &node_pubkey, 0, *stake);
+            let stake_account = Account::from(stake_state::create_account(
+                &stake_pubkey,
+                &vote_pubkey,
+                &vote_account,
+                &genesis_config_info.genesis_config.rent,
+                *stake,
+            ));
+
+            let vote_account = Account::from(vote_account);
+
+            // Put newly created accounts into genesis
+            genesis_config_info.genesis_config.accounts.extend(vec![
+                (node_pubkey, node_account),
+                (vote_pubkey, vote_account),
+                (stake_pubkey, stake_account),
+            ]);
+        }
+
+        genesis_config_info
     }
 
     pub fn run(&self) -> Result<(), Box<dyn std::error::Error>> {

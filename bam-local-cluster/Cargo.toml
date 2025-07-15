@@ -27,3 +27,5 @@ solana-rpc = { workspace = true }
 solana-runtime = { workspace = true }
 solana-sdk = { workspace = true }
 solana-streamer = { workspace = true } 
+solana-vote-program = { workspace = true }
+solana-stake-program = { workspace = true }
