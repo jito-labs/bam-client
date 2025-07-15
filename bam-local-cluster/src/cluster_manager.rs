@@ -10,6 +10,7 @@ use {
         create_genesis_config_with_vote_accounts_and_cluster_type, ValidatorVoteKeypairs,
     },
     solana_sdk::{
+        fee_calculator::FeeRateGovernor,
         genesis_config::{ClusterType, GenesisConfig},
         shred_version::compute_shred_version,
         signature::Keypair,
@@ -49,8 +50,7 @@ impl BamLocalCluster {
             stakes,
             ClusterType::MainnetBeta,
         );
-        // TODO: set fee rate governor
-        // genesis_config_info.genesis_config.fee_rate_governor = FeeRateGovernor::new(
+        genesis_config_info.genesis_config.fee_rate_governor = FeeRateGovernor::default();
 
         // Add SPL programs
         for (pubkey, account) in spl_programs(&genesis_config_info.genesis_config.rent) {
@@ -227,9 +227,16 @@ impl BamLocalCluster {
             .arg("--no-wait-for-vote-to-start-leader")
             .arg("--wait-for-supermajority")
             .arg("0")
+            .arg("--rpc-faucet-address")
+            .arg(config.faucet_address.to_string())
+            .arg("--rpc-pubsub-enable-block-subscription")
+            .arg("--rpc-pubsub-enable-vote-subscription")
+            .arg("--account-index")
+            .arg("program-id")
             .arg("--allow-private-addr")
             .arg("--full-rpc-api")
             .arg("--enable-rpc-transaction-history")
+            .arg("--enable-extended-tx-metadata-storage")
             .arg("--expected-shred-version")
             .arg(compute_shred_version(&genesis_config.hash(), None).to_string())
             .arg("--bam-url")
