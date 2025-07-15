@@ -97,7 +97,7 @@ impl BamConnection {
         let mut last_heartbeat = std::time::Instant::now();
         let mut heartbeat_interval = interval(std::time::Duration::from_secs(5));
         heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut metrics_and_health_check_interval = interval(std::time::Duration::from_millis(50));
+        let mut metrics_and_health_check_interval = interval(std::time::Duration::from_millis(25));
         metrics_and_health_check_interval
             .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 

@@ -152,7 +152,7 @@ where
                 .iter()
                 .for_each(|metrics| metrics.maybe_report_and_reset());
 
-            if should_report
+            if self.bam_controller
                 && decision.bank_start().is_some()
                 && last_container_update.elapsed() > Duration::from_millis(20)
             {

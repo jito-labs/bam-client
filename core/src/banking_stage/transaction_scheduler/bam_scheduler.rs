@@ -28,7 +28,7 @@ use {
     solana_pubkey::Pubkey,
     solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
     solana_sdk::clock::Slot,
-    solana_svm_transaction::svm_message::SVMMessage,
+    solana_svm_transaction::svm_message::SVMMessage, std::time::Instant,
 };
 
 type SchedulerPrioGraph = PrioGraph<
@@ -55,8 +55,13 @@ pub struct BamScheduler<Tx: TransactionWithMeta> {
     finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
     response_sender: Sender<StartSchedulerMessageV0>,
 
+    last_metrics_update: Instant,
+
     next_batch_id: u64,
     inflight_batch_info: HashMap<TransactionBatchId, InflightBatchInfo>,
+
+    scheduled_count: usize,
+    in_prio_graph_count: usize,
     prio_graph: SchedulerPrioGraph,
     slot: Option<Slot>,
 
@@ -86,8 +91,11 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             consume_work_senders,
             finished_consume_work_receiver,
             response_sender,
+            last_metrics_update: Instant::now(),
             next_batch_id: 0,
             inflight_batch_info: HashMap::default(),
+            scheduled_count: 0,
+            in_prio_graph_count: 0,
             prio_graph: PrioGraph::new(passthrough_priority),
             slot: None,
             reusable_consume_work: Vec::new(),
@@ -131,6 +139,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 next_batch_id,
                 Self::get_transactions_account_access(txns.into_iter()),
             );
+            self.in_prio_graph_count += 1;
         }
     }
 
@@ -179,6 +188,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                     slot,
                 );
                 self.send_to_worker(worker_index, priority_ids, work, slot);
+                self.scheduled_count += 1;
                 *num_scheduled += len;
             }
         }
@@ -200,6 +210,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
     ) {
         let mut current_batch_ids = self.get_or_create_priority_ids();
         while let Some(next_batch_id) = self.prio_graph.pop() {
+            self.in_prio_graph_count -= 1;
             let Some((_, revert_on_error, slot)) = container.get_batch(next_batch_id.id) else {
                 continue;
             };
@@ -531,6 +542,21 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
         _pre_lock_filter: impl Fn(&Tx) -> bool,
     ) -> Result<SchedulingSummary, SchedulerError> {
         let mut num_scheduled = 0;
+
+        let now = Instant::now();
+        if now.duration_since(self.last_metrics_update).as_millis() >= 25 {
+            datapoint_info!("bam-schedule-metrics",
+                ("num_scheduled", num_scheduled, i64),
+                ("in_prio_graph_count", self.in_prio_graph_count, i64),
+                ("next_batch_id", self.next_batch_id, i64),
+                ("inflight_info_len", self.inflight_batch_info.len(), i64),
+                ("slot", self.slot.unwrap_or(0), i64),
+                ("scheduled_count", self.scheduled_count, i64),
+            );
+            info!("workers={:?}", self.workers_scheduled_count);
+            self.num_scheduled = 0;
+            self.last_metrics_update = now;
+        }
 
         self.pull_into_prio_graph(container);
         self.send_to_workers(container, &mut num_scheduled);
