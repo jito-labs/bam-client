@@ -48,7 +48,7 @@ impl BamValidator {
         log_file_path: &PathBuf,
         node_name: &str,
         gossip_port: Option<u16>,
-        rpc_port: Option<u16>,
+        rpc_port: u16,
         dynamic_port_range_start: u64,
         dynamic_port_range_end: u64,
         cluster_config: &LocalClusterConfig,
@@ -85,6 +85,8 @@ impl BamValidator {
             .arg("--no-wait-for-vote-to-start-leader")
             .arg("--wait-for-supermajority")
             .arg("0")
+            .arg("--rpc-port")
+            .arg(rpc_port.to_string());
             .arg("--rpc-faucet-address")
             .arg(cluster_config.faucet_address.to_string())
             .arg("--rpc-pubsub-enable-block-subscription")
@@ -114,10 +116,6 @@ impl BamValidator {
 
         if let Some(gossip_port) = gossip_port {
             cmd.arg("--gossip-port").arg(gossip_port.to_string());
-        }
-
-        if let Some(rpc_port) = rpc_port {
-            cmd.arg("--rpc-port").arg(rpc_port.to_string());
         }
 
         if let Some(bootstrap_gossip) = bootstrap_gossip {
@@ -424,7 +422,11 @@ impl BamLocalCluster {
                 &log_file_path,
                 &node_name,
                 is_bootstrap.then_some(BOOTSTRAP_GOSSIP_PORT),
-                is_bootstrap.then_some(BOOTSTRAP_RPC_PORT),
+                if is_bootstrap {
+                    BOOTSTRAP_RPC_PORT
+                } else {
+                    dynamic_port_range_start as u16 + 100
+                },
                 dynamic_port_range_start,
                 dynamic_port_range_end,
                 &config,
