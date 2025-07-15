@@ -6,9 +6,6 @@
 # BAM service URL
 bam_url = "http://127.0.0.1:45678"
 
-# HTTP server address for cluster info
-info_address = "127.0.0.1:12346"
-
 # Tip manager configuration
 tip_payment_program_id = "T1pyyaTNZsKv2WcRAB8oVnk93mLJw2XzjtVYqCsaHqt"
 tip_distribution_program_id = "4R3gSG8BpU4t19KYj8CfnbtRpnT8gtk4dvTHxVRwc2r7"
@@ -16,16 +13,27 @@ tip_distribution_program_id = "4R3gSG8BpU4t19KYj8CfnbtRpnT8gtk4dvTHxVRwc2r7"
 # Faucet address for airdrops
 faucet_address = "127.0.0.1:12345"
 
+# Base directory for ledger storage
+ledger_base_directory = "config"
+
+# Build output directory (e.g., "target/debug" or "target/release")
+validator_build_path = "./target/debug"
+
 # Validator configurations
-# Each validator can have an optional geyser plugin configuration
+# The first validator is automatically the bootstrap node
+# Other validators will connect to the bootstrap node
 [[validators]]
-# geyser_config = "/path/to/geyser/config.json"  # Optional
+# Optional: Path to geyser plugin configuration
+# geyser_config = "/path/to/geyser/config.json"
 
 [[validators]]
-# geyser_config = "/path/to/geyser/config.json"  # Optional
+# Second validator (optional)
+# geyser_config = "/path/to/geyser/config.json"
 
 [[validators]]
-# geyser_config = "/path/to/geyser/config.json"  # Optional
+# Third validator (optional)
+# geyser_config = "/path/to/geyser/config.json"
 
 [[validators]]
-# geyser_config = "/path/to/geyser/config.json"  # Optional
+# Fourth validator (optional)
+# geyser_config = "/path/to/geyser/config.json"

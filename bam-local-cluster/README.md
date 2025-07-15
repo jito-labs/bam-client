@@ -1,95 +1,83 @@
 # BAM Local Cluster
 
-This package provides a local Solana cluster bootstrapper specifically designed for BAM (Block Assembly Marketplace) testing.
+A tool for spinning up local Solana clusters with BAM (Block Assembly Marketplace) support for testing purposes. This tool uses subprocess-based execution to spawn `agave-validator` instances.
 
 ## Overview
 
-The `bam-local-cluster` package contains a binary that spins up a local Solana cluster from a TOML configuration file. It's designed to be used for BAM (Block Assembly Marketplace) testing scenarios and includes:
+BAM Local Cluster is a development tool for spinning up local Solana clusters with BAM (Block Assembly Marketplace) support. It's designed for testing BAM-related functionality in a controlled local environment.
 
-- Local cluster setup with configurable validators
-- HTTP server for cluster information and health checks
-- Faucet integration for airdrops
-- Tip manager configuration for BAM-specific features
+The tool automatically handles:
+- Validator process management and monitoring
+- Genesis configuration with SPL programs
+- Keypair generation and ledger setup
+- Bootstrap node coordination
+- Process health monitoring and graceful shutdown
 
-## Usage
+## Quick Start
 
-```bash
-# Run with info logging (from top-level directory)
-RUST_LOG=info cargo run --bin bam-local-cluster -- --config bam-local-cluster/examples/example_config.toml
+1. **Build the binaries**:
+   ```bash
+   # Build agave-validator
+   cargo build --release --bin agave-validator
+   
+   # Build bam-local-cluster
+   cargo build --release --bin bam-local-cluster
+   ```
 
-# Run with debug logging (more verbose)
-RUST_LOG=debug cargo run --bin bam-local-cluster -- --config bam-local-cluster/examples/example_config.toml
+2. **Create a configuration file** (see `examples/example_config.toml`)
 
-# Run from within the bam-local-cluster directory
-cd bam-local-cluster
-RUST_LOG=info cargo run -- --config examples/example_config.toml
-```
+3. **Run the cluster**:
+   ```bash
+   ./target/release/bam-local-cluster --config examples/example_config.toml
+   ```
 
 ## Configuration
 
-The configuration file should be in TOML format and include:
+The configuration file specifies BAM service URLs, tip program IDs, and validator settings. See `examples/example_config.toml` for a complete example.
 
-- `bam_url`: URL for BAM service (currently unused but required)
-- `info_address`: HTTP server address for cluster info
-- `tip_payment_program_id`: Program ID for tip payments
-- `tip_distribution_program_id`: Program ID for tip distribution
-- `faucet_address`: Address for the faucet service
-- `validators`: Array of validator configurations
+Key configuration options:
+- `bam_url`: BAM service endpoint
+- `tip_payment_program_id` / `tip_distribution_program_id`: Tip manager programs
+- `faucet_address`: Faucet service for airdrops
+- `ledger_base_directory`: Base directory for validator ledgers
+- `validator_build_path`: Build output directory (e.g., "target/debug" or "target/release") - required
+- `validators`: Array of validator configurations (first is bootstrap node)
 
-### Validator Configuration
 
-Each validator in the `validators` array can have:
 
-- `geyser_config`: Optional path to geyser plugin configuration file
+## How It Works
 
-RPC ports are assigned dynamically by the local cluster system.
+The tool spawns `agave-validator` processes as subprocesses, automatically handling:
 
-See `examples/example_config.toml` for a complete example.
+1. Genesis configuration with SPL programs
+2. Keypair generation and ledger setup
+3. Bootstrap node startup and coordination
+4. Validator process spawning and monitoring
+5. Graceful shutdown on Ctrl+C or process failure
 
-## RPC Port Discovery
+## Usage
 
-**Important Gotcha**: RPC ports are assigned dynamically by the local cluster system and cannot be hard-coded in the configuration. The ports you specify in config files will be overwritten.
+The cluster runs until you press Ctrl+C or a validator process fails. All validator output is streamed to the console for debugging.
 
-To discover the actual RPC endpoint at runtime, use the HTTP server endpoint:
 
-```bash
-# Get cluster info including the RPC endpoint
-curl http://127.0.0.1:12346/cluster-info
 
-# Example response:
-# {
-#   "rpc_endpoint": "http://127.0.0.1:12345"
-# }
-```
+## Troubleshooting
 
-You can then use the returned RPC endpoint in your applications:
+Common issues:
+- **Port conflicts**: Bootstrap node uses gossip port 8001 and RPC port 8899
+- **Binary not found**: Ensure `agave-validator` and `agave-ledger-tool` are built in your target directory
+- **Permission errors**: Make sure the ledger base directory is writable
 
-```bash
-# Use the discovered RPC endpoint
-curl -X POST -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}' \
-  http://127.0.0.1:12345
-```
-
-## HTTP Endpoints
-
-- `/cluster-info`: Returns one of the RPC endpoints that can be used to discover the rest of the cluster
-- `/exit`: Graceful shutdown endpoint
-
-## Building
-
-```bash
-# Build the binary
-cargo build
-
-# Build and run with logging
-RUST_LOG=info cargo run -- --config examples/example_config.toml
-```
+Validator output is streamed to the console for debugging.
 
 ## Development
 
-The code is organized into modules:
-- `src/config.rs`: Configuration parsing and structures
-- `src/http_server.rs`: HTTP server and endpoints
-- `src/cluster_manager.rs`: Main cluster management logic
-- `src/main.rs`: Binary entry point 
+To modify the cluster behavior:
+
+1. Update `src/cluster_manager.rs` for process spawning logic
+2. Modify `src/config.rs` for configuration structure
+3. Update `src/main.rs` for command-line interface
+
+## License
+
+This project is part of the Jito Solana JDS repository and follows the same license terms. 
