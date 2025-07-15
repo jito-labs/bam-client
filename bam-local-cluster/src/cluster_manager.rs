@@ -93,8 +93,6 @@ impl BamValidator {
             .arg("program-id")
             .arg("--allow-private-addr")
             .arg("--full-rpc-api")
-            .arg("--accounts-db-hash-threads")
-            .arg("1")
             .arg("--enable-rpc-transaction-history")
             .arg("--enable-extended-tx-metadata-storage")
             .arg("--expected-shred-version")
