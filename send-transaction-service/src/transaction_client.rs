@@ -1,6 +1,6 @@
 use {
     crate::{send_transaction_service_stats::SendTransactionServiceStats, tpu_info::TpuInfo},
-    log::warn,
+    log::{info, warn},
     solana_client::connection_cache::ConnectionCache,
     solana_connection_cache::client_connection::ClientConnection as TpuConnection,
     solana_gossip::cluster_info::ClusterInfo,
@@ -132,6 +132,7 @@ where
         }
 
         for address in &addresses {
+            info!("Sending transactions to {}", address);
             self.send_transactions(address, wire_transactions.clone(), stats);
         }
     }

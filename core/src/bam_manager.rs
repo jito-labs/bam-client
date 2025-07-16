@@ -130,7 +130,9 @@ impl BamManager {
 
             // Check if block builder info has changed
             if let Some(builder_config) = connection.get_latest_config() {
+                info!("Block builder config: {:?}", builder_config);
                 if Some(&builder_config) != cached_builder_config.as_ref() {
+                    info!("Updating block builder config");
                     Self::update_tpu_config(Some(&builder_config), &dependencies.cluster_info);
                     Self::update_block_engine_key_and_commission(
                         Some(&builder_config),
@@ -192,9 +194,11 @@ impl BamManager {
         };
 
         if let Some(tpu) = Self::get_sockaddr(tpu_info.tpu_sock.as_ref()) {
+            info!("Setting TPU: {:?}", tpu);
             let _ = cluster_info.set_tpu(tpu);
         }
         if let Some(tpu_fwd) = Self::get_sockaddr(tpu_info.tpu_fwd_sock.as_ref()) {
+            info!("Setting TPU forward: {:?}", tpu_fwd);
             let _ = cluster_info.set_tpu_forwards(tpu_fwd);
         }
     }

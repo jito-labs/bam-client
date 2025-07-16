@@ -86,7 +86,7 @@ impl BamValidator {
             .arg("--wait-for-supermajority")
             .arg("0")
             .arg("--rpc-port")
-            .arg(rpc_port.to_string());
+            .arg(rpc_port.to_string())
             .arg("--rpc-faucet-address")
             .arg(cluster_config.faucet_address.to_string())
             .arg("--rpc-pubsub-enable-block-subscription")
