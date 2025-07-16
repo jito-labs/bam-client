@@ -144,7 +144,7 @@ pub fn create_genesis_config_with_vote_accounts_and_cluster_type(
         // Create accounts
         let node_account = Account::new(VALIDATOR_LAMPORTS, 0, &system_program::id());
         let vote_account = vote_state::create_account(&vote_pubkey, &node_pubkey, 0, *stake);
-        let stake_account: Account = Account::from(stake_state::create_account(
+        let stake_account = Account::from(stake_state::create_account(
             &stake_pubkey,
             &vote_pubkey,
             &vote_account,
