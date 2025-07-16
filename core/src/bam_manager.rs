@@ -130,9 +130,7 @@ impl BamManager {
 
             // Check if block builder info has changed
             if let Some(builder_config) = connection.get_latest_config() {
-                info!("Block builder config: {:?}", builder_config);
                 if Some(&builder_config) != cached_builder_config.as_ref() {
-                    info!("Updating block builder config");
                     Self::update_tpu_config(Some(&builder_config), &dependencies.cluster_info);
                     Self::update_block_engine_key_and_commission(
                         Some(&builder_config),

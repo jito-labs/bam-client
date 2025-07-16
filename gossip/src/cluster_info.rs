@@ -423,14 +423,12 @@ impl ClusterInfo {
     }
 
     pub fn set_tpu(&self, tpu_addr: SocketAddr) -> Result<(), ContactInfoError> {
-        info!("Setting TPU: {:?}", tpu_addr);
         self.my_contact_info.write().unwrap().set_tpu(tpu_addr)?;
         self.refresh_my_gossip_contact_info();
         Ok(())
     }
 
     pub fn set_tpu_forwards(&self, tpu_forwards_addr: SocketAddr) -> Result<(), ContactInfoError> {
-        info!("Setting TPU forwards: {:?}", tpu_forwards_addr);
         self.my_contact_info
             .write()
             .unwrap()
