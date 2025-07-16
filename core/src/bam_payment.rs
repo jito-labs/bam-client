@@ -11,9 +11,8 @@ use {
     solana_pubkey::Pubkey,
     solana_sdk::{
         clock::Slot, commitment_config::CommitmentConfig, compute_budget::ComputeBudgetInstruction,
-        signature::Keypair, signer::Signer, transaction::VersionedTransaction,
+        signature::Keypair, signer::Signer, transaction::{SanitizedVersionedTransaction, VersionedTransaction},
     },
-    solana_runtime_transaction::runtime_transaction::SanitizedVersionedTransaction,
     solana_svm_transaction::svm_message::SVMMessage,
     std::{
         collections::BTreeSet,
@@ -213,29 +212,31 @@ impl BamPaymentSender {
         };
 
         const BASE_FEE_LAMPORT_PER_SIGNATURE: u64 = 5_000;
+
         Some(
             block
                 .transactions
                 .iter()
                 .map(|tx| {
                     let fee = tx.meta.fee;
-                    
+
                     // Calculate base fee for transaction signatures
                     let txn_signature_fee = BASE_FEE_LAMPORT_PER_SIGNATURE
                         .saturating_mul(tx.transaction.signatures.len() as u64);
-                    
+
                     // Calculate precompile signature fees
-                    let precompile_signature_fee = if let Ok(sanitized_tx) = 
-                        SanitizedVersionedTransaction::try_from(tx.transaction.clone()) {
-                        let ed25519_sigs = sanitized_tx.num_ed25519_signatures();
-                        let secp256k1_sigs = sanitized_tx.num_secp256k1_signatures();  
-                        let secp256r1_sigs = sanitized_tx.num_secp256r1_signatures();
+                    let precompile_signature_fee = if let Ok(sanitized_tx) =
+                        SanitizedVersionedTransaction::try_from(tx.transaction.clone())
+                    {
+                        let ed25519_sigs = sanitized_tx.get_message().num_ed25519_signatures();
+                        let secp256k1_sigs = sanitized_tx.get_message().num_secp256k1_signatures();
+                        let secp256r1_sigs = sanitized_tx.get_message().num_secp256r1_signatures();
                         let total_precompile_sigs = ed25519_sigs + secp256k1_sigs + secp256r1_sigs;
                         BASE_FEE_LAMPORT_PER_SIGNATURE.saturating_mul(total_precompile_sigs)
                     } else {
                         0
                     };
-                    
+
                     let total_base_fee = txn_signature_fee.saturating_add(precompile_signature_fee);
                     fee.saturating_sub(total_base_fee)
                 })
