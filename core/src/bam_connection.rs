@@ -458,10 +458,11 @@ impl BamConnection {
     ) -> Result<BamNodeApiClient<tonic::transport::channel::Channel>, TryInitError> {
         let endpoint = tonic::transport::Endpoint::from_shared(url.to_string())
             .map_err(TryInitError::EndpointConnectError)?
-            .tcp_keepalive(Some(std::time::Duration::from_secs(60)))
+            .http2_keep_alive_interval(Duration::from_secs(20))
+            .http2_adaptive_window(true)
             .initial_stream_window_size(Some(1024 * 1024))
-            .initial_connection_window_size(Some(1024 * 1024))
-            .http2_adaptive_window(true);
+            .tcp_nodelay(true)
+            .initial_connection_window_size(Some(10 * 1024 * 1024));
         let channel = timeout(std::time::Duration::from_secs(5), endpoint.connect())
             .await
             .map_err(TryInitError::ConnectionTimeout)??;
