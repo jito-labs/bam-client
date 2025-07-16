@@ -13,6 +13,8 @@ use {
         clock::Slot, commitment_config::CommitmentConfig, compute_budget::ComputeBudgetInstruction,
         signature::Keypair, signer::Signer, transaction::VersionedTransaction,
     },
+    solana_runtime_transaction::runtime_transaction::SanitizedVersionedTransaction,
+    solana_svm_transaction::svm_message::SVMMessage,
     std::{
         collections::BTreeSet,
         sync::{Arc, RwLock},
@@ -21,6 +23,7 @@ use {
 };
 
 pub const COMMISSION_PERCENTAGE: u64 = 1; // 1% commission
+pub const COMMISSION_BASIS_POINTS: u64 = 100; // 1% = 100 basis points
 const LOCALHOST: &str = "http://localhost:8899";
 
 pub struct BamPaymentSender {
@@ -216,13 +219,29 @@ impl BamPaymentSender {
                 .iter()
                 .map(|tx| {
                     let fee = tx.meta.fee;
-                    let base_fee = BASE_FEE_LAMPORT_PER_SIGNATURE
+                    
+                    // Calculate base fee for transaction signatures
+                    let txn_signature_fee = BASE_FEE_LAMPORT_PER_SIGNATURE
                         .saturating_mul(tx.transaction.signatures.len() as u64);
-                    fee.saturating_sub(base_fee)
+                    
+                    // Calculate precompile signature fees
+                    let precompile_signature_fee = if let Ok(sanitized_tx) = 
+                        SanitizedVersionedTransaction::try_from(tx.transaction.clone()) {
+                        let ed25519_sigs = sanitized_tx.num_ed25519_signatures();
+                        let secp256k1_sigs = sanitized_tx.num_secp256k1_signatures();  
+                        let secp256r1_sigs = sanitized_tx.num_secp256r1_signatures();
+                        let total_precompile_sigs = ed25519_sigs + secp256k1_sigs + secp256r1_sigs;
+                        BASE_FEE_LAMPORT_PER_SIGNATURE.saturating_mul(total_precompile_sigs)
+                    } else {
+                        0
+                    };
+                    
+                    let total_base_fee = txn_signature_fee.saturating_add(precompile_signature_fee);
+                    fee.saturating_sub(total_base_fee)
                 })
                 .sum::<u64>()
-                .saturating_mul(COMMISSION_PERCENTAGE)
-                .saturating_div(100),
+                .saturating_mul(COMMISSION_BASIS_POINTS)
+                .saturating_div(10_000),
         )
     }
 

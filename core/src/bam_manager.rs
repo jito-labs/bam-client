@@ -12,7 +12,7 @@ use std::{
         Arc, Mutex, RwLock,
     },
 };
-use crate::bam_payment::COMMISSION_PERCENTAGE;
+use crate::bam_payment::COMMISSION_BASIS_POINTS;
 
 use {
     crate::{
@@ -230,10 +230,10 @@ impl BamManager {
             return false;
         };
 
-        if bam_info.commission_bps != COMMISSION_PERCENTAGE.saturating_mul(100) {
+        if bam_info.commission_bps != COMMISSION_BASIS_POINTS {
             error!(
                 "BAM commission bps mismatch: expected {}, got {}",
-                COMMISSION_PERCENTAGE, bam_info.commission_bps
+                COMMISSION_BASIS_POINTS, bam_info.commission_bps
             );
             return false;
         }
