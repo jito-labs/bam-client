@@ -83,8 +83,8 @@ impl BamConnection {
     #[allow(clippy::too_many_arguments)]
     async fn connection_task(
         exit: Arc<AtomicBool>,
-        mut inbound_stream: tonic::Streaming<StartSchedulerResponse>,
-        mut outbound_sender: mpsc::Sender<StartSchedulerMessage>,
+        mut inbound_stream: tonic::Streaming<StartSchedulerResponse>, // GRPC
+        mut outbound_sender: mpsc::Sender<StartSchedulerMessage>, // GRPC
         mut validator_client: BamNodeApiClient<tonic::transport::channel::Channel>,
         config: Arc<Mutex<Option<ConfigResponse>>>,
         batch_sender: crossbeam_channel::Sender<AtomicTxnBatch>,
@@ -94,7 +94,7 @@ impl BamConnection {
         outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessageV0>,
         url: String,
     ) {
-        let mut last_heartbeat = std::time::Instant::now();
+        let last_heartbeat = Arc::new(Mutex::new(std::time::Instant::now()));
         let mut heartbeat_interval = interval(std::time::Duration::from_secs(5));
         heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut metrics_and_health_check_interval = interval(std::time::Duration::from_millis(25));
@@ -151,6 +151,14 @@ impl BamConnection {
                 )
             })
             .expect("Failed to spawn outbound forwarder thread");
+
+        let inbound_forwarder_task = tokio::spawn(Self::inbound_forwarder_task(
+            exit.clone(),
+            inbound_stream,
+            batch_sender,
+            metrics.clone(),
+            last_heartbeat.clone(),
+        ));
         while !exit.load(Relaxed) {
             tokio::select! {
                 _ = heartbeat_interval.tick() => {
@@ -161,7 +169,7 @@ impl BamConnection {
                 }
                 _ = metrics_and_health_check_interval.tick() => {
                     const TIMEOUT_DURATION: std::time::Duration = std::time::Duration::from_secs(6);
-                    let is_healthy_now = last_heartbeat.elapsed() < TIMEOUT_DURATION;
+                    let is_healthy_now = last_heartbeat.lock().unwrap().elapsed() < TIMEOUT_DURATION;
                     is_healthy.store(is_healthy_now, Relaxed);
                     if !is_healthy_now {
                         metrics
@@ -171,43 +179,12 @@ impl BamConnection {
 
                     metrics.report();
                 }
-                inbound = inbound_stream.message() => {
-                    let inbound = match inbound {
-                        Ok(Some(msg)) => msg,
-                        Ok(None) => {
-                            error!("Inbound stream closed");
-                            break;
-                        }
-                        Err(e) => {
-                            error!("Failed to receive message from inbound stream: {:?}", e);
-                            break;
-                        }
-                    };
-
-                    let Some(VersionedMsg::V0(inbound)) = inbound.versioned_msg else {
-                        error!("Received unsupported versioned message: {:?}", inbound);
-                        break;
-                    };
-
-                    match inbound {
-                        StartSchedulerResponseV0 { resp: Some(Resp::HeartBeat(_)), .. } => {
-                            last_heartbeat = std::time::Instant::now();
-                            metrics.heartbeat_received.fetch_add(1, Relaxed);
-                        }
-                        StartSchedulerResponseV0 { resp: Some(Resp::AtomicTxnBatch(batch)), .. } => {
-                            let _ = batch_sender.try_send(batch).inspect_err(|_| {
-                                error!("Failed to send bundle to receiver");
-                            });
-                            metrics.bundle_received.fetch_add(1, Relaxed);
-                        }
-                        _ => {}
-                    }
-                }
             }
         }
         is_healthy.store(false, Relaxed);
         let _ = builder_config_task.await.ok();
         let _ = outbound_forwarder_task.join();
+        let _ = inbound_forwarder_task.await.ok();
     }
 
     async fn refresh_config_task(
@@ -265,6 +242,48 @@ impl BamConnection {
                 });
             metrics.outbound_sent.fetch_add(1, Relaxed);
         }
+    }
+
+    async fn inbound_forwarder_task(
+        exit: Arc<AtomicBool>,
+        mut inbound_stream: tonic::Streaming<StartSchedulerResponse>,
+        batch_sender: crossbeam_channel::Sender<AtomicTxnBatch>,
+        metrics: Arc<BamConnectionMetrics>,
+        last_heartbeat: Arc<Mutex<std::time::Instant>>,
+    ) {
+        while !exit.load(Relaxed) {
+            match inbound_stream.message().await {
+                Ok(Some(msg)) => {
+                    let Some(VersionedMsg::V0(inbound)) = msg.versioned_msg else {
+                        error!("Received unsupported versioned message: {:?}", msg);
+                        continue;
+                    };
+
+                    match inbound {
+                        StartSchedulerResponseV0 { resp: Some(Resp::HeartBeat(_)), .. } => {
+                            *last_heartbeat.lock().unwrap() = std::time::Instant::now();
+                            metrics.heartbeat_received.fetch_add(1, Relaxed);
+                        }
+                        StartSchedulerResponseV0 { resp: Some(Resp::AtomicTxnBatch(batch)), .. } => {
+                            let _ = batch_sender.try_send(batch).inspect_err(|_| {
+                                error!("Failed to send bundle to receiver");
+                            });
+                            metrics.bundle_received.fetch_add(1, Relaxed);
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(None) => {
+                    info!("Inbound stream closed");
+                    break;
+                }
+                Err(e) => {
+                    error!("Failed to receive message from inbound stream: {:?}", e);
+                    break;
+                }
+            }
+        }
+        exit.store(true, Relaxed);
     }
 
     fn sign_message(keypair: &Keypair, message: &[u8]) -> Option<String> {
