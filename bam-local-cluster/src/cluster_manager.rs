@@ -83,6 +83,7 @@ impl BamValidator {
                 dynamic_port_range_start, dynamic_port_range_end
             ))
             .arg("--no-wait-for-vote-to-start-leader")
+            .arg("--no-os-network-limits-test")
             .arg("--wait-for-supermajority")
             .arg("0")
             .arg("--rpc-port")
