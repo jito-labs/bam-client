@@ -83,7 +83,7 @@ impl BamConnection {
     #[allow(clippy::too_many_arguments)]
     async fn connection_task(
         exit: Arc<AtomicBool>,
-        mut inbound_stream: tonic::Streaming<StartSchedulerResponse>, // GRPC
+        inbound_stream: tonic::Streaming<StartSchedulerResponse>, // GRPC
         mut outbound_sender: mpsc::Sender<StartSchedulerMessage>, // GRPC
         mut validator_client: BamNodeApiClient<tonic::transport::channel::Channel>,
         config: Arc<Mutex<Option<ConfigResponse>>>,
@@ -252,6 +252,8 @@ impl BamConnection {
         last_heartbeat: Arc<Mutex<std::time::Instant>>,
     ) {
         while !exit.load(Relaxed) {
+            let start = std::time::Instant::now();
+
             match inbound_stream.message().await {
                 Ok(Some(msg)) => {
                     let Some(VersionedMsg::V0(inbound)) = msg.versioned_msg else {
@@ -282,6 +284,7 @@ impl BamConnection {
                     break;
                 }
             }
+            info!("Processed inbound message in {:?}", start.elapsed());
         }
         exit.store(true, Relaxed);
     }
