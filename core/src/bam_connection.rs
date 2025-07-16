@@ -39,7 +39,7 @@ impl BamConnection {
         batch_sender: crossbeam_channel::Sender<AtomicTxnBatch>,
         outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessageV0>,
     ) -> Result<Self, TryInitError> {
-        let mut validator_client = Self::build_client(&url).await?;
+        let mut validator_client = Self::build_client(&url, Some(1024 * 1024)).await?;
         let (outbound_sender, outbound_receiver_internal) = mpsc::channel(100_000);
         let outbound_stream =
             tonic::Request::new(outbound_receiver_internal.map(|req: StartSchedulerMessage| req));
@@ -125,7 +125,7 @@ impl BamConnection {
             return;
         }
 
-        let Ok(config_client) = Self::build_client(&url).await else {
+        let Ok(config_client) = Self::build_client(&url, None).await else {
             error!("Failed to build client for config task");
             is_healthy.store(false, Relaxed);
             return;
@@ -310,10 +310,12 @@ impl BamConnection {
 
     async fn build_client(
         url: &str,
+        stream_window_size_change: Option<u32>,
     ) -> Result<BamNodeApiClient<tonic::transport::channel::Channel>, TryInitError> {
         let endpoint = tonic::transport::Endpoint::from_shared(url.to_string())
             .map_err(TryInitError::EndpointConnectError)?
-            .tcp_keepalive(Some(std::time::Duration::from_secs(60)));
+            .tcp_keepalive(Some(std::time::Duration::from_secs(60)))
+            .initial_stream_window_size(stream_window_size_change);
         let channel = timeout(std::time::Duration::from_secs(5), endpoint.connect())
             .await
             .map_err(TryInitError::ConnectionTimeout)??;
