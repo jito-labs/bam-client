@@ -15,12 +15,12 @@ use {
     },
     solana_gossip::cluster_info::ClusterInfo,
     solana_sdk::{signature::Keypair, signer::Signer},
-    std::sync::{
+    std::{os::unix::process, sync::{
         atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
         Arc, Mutex,
-    },
+    }},
     thiserror::Error,
-    tokio::time::{interval, timeout},
+    tokio::time::{interval, timeout}, tokio_metrics::TaskMonitor,
 };
 
 pub struct BamConnection {
@@ -152,13 +152,16 @@ impl BamConnection {
             })
             .expect("Failed to spawn outbound forwarder thread");
 
-        let inbound_forwarder_task = tokio::spawn(Self::inbound_forwarder_task(
+        let inbound_task_monitor = TaskMonitor::new();
+
+        let inbound_forwarder_task = tokio::spawn(inbound_task_monitor.instrument(Self::inbound_forwarder_task(
             exit.clone(),
             inbound_stream,
             batch_sender,
             metrics.clone(),
             last_heartbeat.clone(),
-        ));
+        )));
+        let mut inbound_task_metrics_interval = inbound_task_monitor.intervals();
         while !exit.load(Relaxed) {
             tokio::select! {
                 _ = heartbeat_interval.tick() => {
@@ -176,6 +179,13 @@ impl BamConnection {
                             .unhealthy_connection_count
                             .fetch_add(1, Relaxed);
                     }
+
+                    // Report inbound_task metrics
+                    let inbound_task_metrics = inbound_task_metrics_interval.next().unwrap_or_default();
+                    Self::report_task_metrics(
+                        "bam-inbound-forwarder",
+                        inbound_task_metrics,
+                    );
 
                     metrics.report();
                 }
@@ -213,6 +223,113 @@ impl BamConnection {
                 }
             }
         }
+    }
+
+    fn report_task_metrics(task_name: &str, interval: tokio_metrics::TaskMetrics) {
+        datapoint_info!(
+            "tokio_task_metrics",
+            "task_name" => task_name,
+            ("instrumented_count", interval.instrumented_count, i64),
+            ("dropped_count", interval.dropped_count, i64),
+            ("first_poll_count", interval.first_poll_count, i64),
+            ("total_poll_count", interval.total_poll_count, i64),
+            ("total_idled_count", interval.total_idled_count, i64),
+            ("total_scheduled_count", interval.total_scheduled_count, i64),
+            ("total_fast_poll_count", interval.total_fast_poll_count, i64),
+            ("total_slow_poll_count", interval.total_slow_poll_count, i64),
+            (
+                "total_short_delay_count",
+                interval.total_short_delay_count,
+                i64
+            ),
+            (
+                "total_long_delay_count",
+                interval.total_long_delay_count,
+                i64
+            ),
+            (
+                "total_first_poll_delay_us",
+                interval.total_first_poll_delay.as_micros(),
+                i64
+            ),
+            (
+                "total_idle_duration_us",
+                interval.total_idle_duration.as_micros(),
+                i64
+            ),
+            (
+                "total_scheduled_duration_us",
+                interval.total_scheduled_duration.as_micros(),
+                i64
+            ),
+            (
+                "total_poll_duration_us",
+                interval.total_poll_duration.as_micros(),
+                i64
+            ),
+            (
+                "total_fast_poll_duration_us",
+                interval.total_fast_poll_duration.as_micros(),
+                i64
+            ),
+            (
+                "total_slow_poll_duration_us",
+                interval.total_slow_poll_duration.as_micros(),
+                i64
+            ),
+            (
+                "total_short_delay_duration_us",
+                interval.total_short_delay_duration.as_micros(),
+                i64
+            ),
+            (
+                "total_long_delay_duration_us",
+                interval.total_long_delay_duration.as_micros(),
+                i64
+            ),
+            (
+                "mean_first_poll_delay_us",
+                interval.mean_first_poll_delay().as_micros(),
+                i64
+            ),
+            (
+                "mean_idle_duration_us",
+                interval.mean_idle_duration().as_micros(),
+                i64
+            ),
+            (
+                "mean_scheduled_duration_us",
+                interval.mean_scheduled_duration().as_micros(),
+                i64
+            ),
+            (
+                "mean_poll_duration_us",
+                interval.mean_poll_duration().as_micros(),
+                i64
+            ),
+            (
+                "mean_fast_poll_duration_us",
+                interval.mean_fast_poll_duration().as_micros(),
+                i64
+            ),
+            (
+                "mean_slow_poll_duration_us",
+                interval.mean_slow_poll_duration().as_micros(),
+                i64
+            ),
+            (
+                "mean_short_delay_duration_us",
+                interval.mean_short_delay_duration().as_micros(),
+                i64
+            ),
+            (
+                "mean_long_delay_duration_us",
+                interval.mean_long_delay_duration().as_micros(),
+                i64
+            ),
+            ("slow_poll_ratio", if interval.slow_poll_ratio().is_nan() { 0.0 } else { interval.slow_poll_ratio() }, f64),
+            ("long_delay_ratio", if interval.long_delay_ratio().is_nan() { 0.0 } else { interval.long_delay_ratio() }, f64),
+        );
     }
 
     fn outbound_forwarder_task(
@@ -256,6 +373,10 @@ impl BamConnection {
 
             match inbound_stream.message().await {
                 Ok(Some(msg)) => {
+                    let processing_start = std::time::Instant::now();
+                    let polling_duration = processing_start.duration_since(start);
+                    info!("Received inbound message in {:?}", polling_duration);
+
                     let Some(VersionedMsg::V0(inbound)) = msg.versioned_msg else {
                         error!("Received unsupported versioned message: {:?}", msg);
                         continue;
@@ -274,6 +395,8 @@ impl BamConnection {
                         }
                         _ => {}
                     }
+                    let processing_duration = processing_start.elapsed();
+                    info!("Processed inbound message in {:?}", processing_duration);
                 }
                 Ok(None) => {
                     info!("Inbound stream closed");
@@ -284,7 +407,6 @@ impl BamConnection {
                     break;
                 }
             }
-            info!("Processed inbound message in {:?}", start.elapsed());
         }
         exit.store(true, Relaxed);
     }
