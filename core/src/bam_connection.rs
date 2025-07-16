@@ -18,7 +18,7 @@ use {
     std::{os::unix::process, sync::{
         atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
         Arc, Mutex,
-    }},
+    }, time::Duration},
     thiserror::Error,
     tokio::time::{interval, timeout}, tokio_metrics::TaskMonitor,
 };
@@ -397,6 +397,7 @@ impl BamConnection {
                     }
                     let processing_duration = processing_start.elapsed();
                     info!("Processed inbound message in {:?}", processing_duration);
+                    tokio::time::sleep(Duration::from_micros(1)).await; // Yield to allow other tasks to run
                 }
                 Ok(None) => {
                     info!("Inbound stream closed");
