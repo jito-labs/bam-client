@@ -15,7 +15,7 @@ use {
     },
     solana_gossip::cluster_info::ClusterInfo,
     solana_sdk::{signature::Keypair, signer::Signer},
-    std::{os::unix::process, sync::{
+    std::{ sync::{
         atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
         Arc, Mutex,
     }, time::Duration},
@@ -40,7 +40,7 @@ impl BamConnection {
         outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessageV0>,
     ) -> Result<Self, TryInitError> {
         let mut validator_client = Self::build_client(&url).await?;
-        let (outbound_sender, outbound_receiver_internal) = mpsc::channel(1);
+        let (outbound_sender, outbound_receiver_internal) = mpsc::unbounded();
         let outbound_stream =
             tonic::Request::new(outbound_receiver_internal.map(|req: StartSchedulerMessage| req));
         let inbound_stream = validator_client
@@ -84,7 +84,7 @@ impl BamConnection {
     async fn connection_task(
         exit: Arc<AtomicBool>,
         inbound_stream: tonic::Streaming<StartSchedulerResponse>, // GRPC
-        mut outbound_sender: mpsc::Sender<StartSchedulerMessage>, // GRPC
+        mut outbound_sender: mpsc::UnboundedSender<StartSchedulerMessage>, // GRPC
         mut validator_client: BamNodeApiClient<tonic::transport::channel::Channel>,
         config: Arc<Mutex<Option<ConfigResponse>>>,
         batch_sender: crossbeam_channel::Sender<AtomicTxnBatch>,
@@ -165,9 +165,9 @@ impl BamConnection {
         while !exit.load(Relaxed) {
             tokio::select! {
                 _ = heartbeat_interval.tick() => {
-                    let _ = outbound_sender.try_send(v0_to_versioned_proto(StartSchedulerMessageV0 {
+                    let _ = outbound_sender.send(v0_to_versioned_proto(StartSchedulerMessageV0 {
                         msg: Some(Msg::HeartBeat(ValidatorHeartBeat {})),
-                    }));
+                    })).await;
                     metrics.heartbeat_sent.fetch_add(1, Relaxed);
                 }
                 _ = metrics_and_health_check_interval.tick() => {
@@ -335,7 +335,7 @@ impl BamConnection {
     fn outbound_forwarder_task(
         exit: Arc<AtomicBool>,
         outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessageV0>,
-        mut outbound_sender: mpsc::Sender<StartSchedulerMessage>,
+        mut outbound_sender: mpsc::UnboundedSender<StartSchedulerMessage>,
         metrics: Arc<BamConnectionMetrics>,
     ) {
         while !exit.load(Relaxed) {
@@ -456,10 +456,10 @@ impl BamConnection {
         let endpoint = tonic::transport::Endpoint::from_shared(url.to_string())
             .map_err(TryInitError::EndpointConnectError)?
             .http2_keep_alive_interval(Duration::from_secs(20))
-            .http2_adaptive_window(true)
-            .initial_stream_window_size(Some(1024 * 1024))
+            .http2_adaptive_window(false)
+            .initial_stream_window_size(Some(30 * 1024 * 1024))
             .tcp_nodelay(true)
-            .initial_connection_window_size(Some(10 * 1024 * 1024));
+            .initial_connection_window_size(Some(30 * 1024 * 1024));
         let channel = timeout(std::time::Duration::from_secs(5), endpoint.connect())
             .await
             .map_err(TryInitError::ConnectionTimeout)??;
