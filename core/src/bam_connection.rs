@@ -3,7 +3,6 @@
 
 use {
     crate::bam_dependencies::v0_to_versioned_proto,
-    futures::{channel::mpsc, SinkExt, StreamExt},
     jito_protos::proto::{
         bam_api::{
             bam_node_api_client::BamNodeApiClient, start_scheduler_message_v0::Msg,
@@ -20,8 +19,9 @@ use {
         Arc, Mutex,
     }, time::Duration},
     thiserror::Error,
-    tokio::time::{interval, timeout}, tokio_metrics::TaskMonitor,
+    tokio::{sync::mpsc, time::{interval, timeout}}, tokio_metrics::TaskMonitor,
 };
+use tokio_stream::wrappers::ReceiverStream;
 
 pub struct BamConnection {
     config: Arc<Mutex<Option<ConfigResponse>>>,
@@ -40,9 +40,9 @@ impl BamConnection {
         outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessageV0>,
     ) -> Result<Self, TryInitError> {
         let mut validator_client = Self::build_client(&url).await?;
-        let (outbound_sender, outbound_receiver_internal) = mpsc::unbounded();
+        let (outbound_sender, outbound_receiver_internal) = tokio::sync::mpsc::channel(64);
         let outbound_stream =
-            tonic::Request::new(outbound_receiver_internal.map(|req: StartSchedulerMessage| req));
+            tonic::Request::new(ReceiverStream::new(outbound_receiver_internal));
         let inbound_stream = validator_client
             .start_scheduler_stream(outbound_stream)
             .await
@@ -84,7 +84,7 @@ impl BamConnection {
     async fn connection_task(
         exit: Arc<AtomicBool>,
         inbound_stream: tonic::Streaming<StartSchedulerResponse>, // GRPC
-        mut outbound_sender: mpsc::UnboundedSender<StartSchedulerMessage>, // GRPC
+        outbound_sender: mpsc::Sender<StartSchedulerMessage>, // GRPC
         mut validator_client: BamNodeApiClient<tonic::transport::channel::Channel>,
         config: Arc<Mutex<Option<ConfigResponse>>>,
         batch_sender: crossbeam_channel::Sender<AtomicTxnBatch>,
@@ -335,7 +335,7 @@ impl BamConnection {
     fn outbound_forwarder_task(
         exit: Arc<AtomicBool>,
         outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessageV0>,
-        mut outbound_sender: mpsc::UnboundedSender<StartSchedulerMessage>,
+        outbound_sender: mpsc::Sender<StartSchedulerMessage>,
         metrics: Arc<BamConnectionMetrics>,
     ) {
         while !exit.load(Relaxed) {
