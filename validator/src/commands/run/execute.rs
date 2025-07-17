@@ -642,6 +642,8 @@ pub fn execute(
         trust_packets: matches.is_present("trust_block_engine_packets"),
     }));
 
+    let bam_url = Arc::new(Mutex::new(crate::commands::bam::extract_bam_url(matches)?));
+
     // Defaults are set in cli definition, safe to use unwrap() here
     let expected_heartbeat_interval_ms: u64 =
         value_of(matches, "relayer_expected_heartbeat_interval_ms").unwrap();
@@ -838,6 +840,7 @@ pub fn execute(
         tip_manager_config,
         preallocated_bundle_cost: value_of(matches, "preallocated_bundle_cost")
             .expect("preallocated_bundle_cost set as default"),
+        bam_url,
         ..ValidatorConfig::default()
     };
 
@@ -1180,6 +1183,7 @@ pub fn execute(
             tower_storage: validator_config.tower_storage.clone(),
             staked_nodes_overrides,
             rpc_to_plugin_manager_sender,
+            bam_url: validator_config.bam_url.clone(),
         },
     );
 
