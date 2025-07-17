@@ -18,11 +18,14 @@ use {
         transaction_scheduler::transaction_state_container::StateContainer,
         TOTAL_BUFFERED_PACKETS,
     },
+    solana_clock::MAX_PROCESSING_AGE,
     solana_measure::measure_us,
     solana_runtime::{bank::Bank, bank_forks::BankForks},
-    solana_clock::MAX_PROCESSING_AGE,
     solana_svm::transaction_error_metrics::TransactionErrorMetrics,
-    std::{num::Saturating, sync::{Arc, RwLock}},
+    std::{
+        num::Saturating,
+        sync::{atomic::AtomicBool, Arc, RwLock},
+    },
 };
 
 /// Controls packet and transaction flow into scheduler, and scheduling execution.
@@ -52,6 +55,10 @@ where
     worker_metrics: Vec<Arc<ConsumeWorkerMetrics>>,
     /// Detailed scheduling metrics.
     scheduling_details: SchedulingDetails,
+    /// This is the BAM controller.
+    bam_controller: bool,
+    /// Whether BAM is enabled.
+    bam_enabled: Arc<AtomicBool>,
 }
 
 impl<R, S> SchedulerController<R, S>
@@ -65,6 +72,8 @@ where
         bank_forks: Arc<RwLock<BankForks>>,
         scheduler: S,
         worker_metrics: Vec<Arc<ConsumeWorkerMetrics>>,
+        bam_controller: bool,
+        bam_enabled: Arc<AtomicBool>,
     ) -> Self {
         Self {
             decision_maker,
@@ -77,6 +86,8 @@ where
             timing_metrics: SchedulerTimingMetrics::default(),
             worker_metrics,
             scheduling_details: SchedulingDetails::default(),
+            bam_controller,
+            bam_enabled,
         }
     }
 
@@ -105,14 +116,14 @@ where
             self.timing_metrics
                 .maybe_report_and_reset_slot(new_leader_slot);
 
-            self.receive_completed()?;
+            self.receive_completed(&decision)?;
             self.process_transactions(&decision)?;
             if self.receive_and_buffer_packets(&decision).is_err() {
                 break;
             }
             // Report metrics only if there is data.
             // Reset intervals when appropriate, regardless of report.
-            let should_report = self.count_metrics.interval_has_data();
+            let should_report = self.count_metrics.interval_has_data() && self.scheduling_enabled();
             let priority_min_max = self.container.get_min_max_priority();
             self.count_metrics.update(|count_metrics| {
                 count_metrics.update_priority_stats(priority_min_max);
@@ -137,6 +148,10 @@ where
     ) -> Result<(), SchedulerError> {
         match decision {
             BufferedPacketsDecision::Consume(bank_start) => {
+                if !self.scheduling_enabled() {
+                    return Ok(());
+                }
+
                 let (scheduling_summary, schedule_time_us) = measure_us!(self.scheduler.schedule(
                     &mut self.container,
                     |txs, results| {
@@ -152,14 +167,15 @@ where
 
                 self.count_metrics.update(|count_metrics| {
                     count_metrics.num_scheduled += scheduling_summary.num_scheduled;
-                    count_metrics.num_unschedulable_conflicts += scheduling_summary.num_unschedulable_conflicts;
-                    count_metrics.num_unschedulable_threads += scheduling_summary.num_unschedulable_threads;
+                    count_metrics.num_unschedulable_conflicts +=
+                        scheduling_summary.num_unschedulable_conflicts;
+                    count_metrics.num_unschedulable_threads +=
+                        scheduling_summary.num_unschedulable_threads;
                     count_metrics.num_schedule_filtered_out += scheduling_summary.num_filtered_out;
                 });
 
                 self.timing_metrics.update(|timing_metrics| {
-                    timing_metrics.schedule_filter_time_us +=
-                        scheduling_summary.filter_time_us;
+                    timing_metrics.schedule_filter_time_us += scheduling_summary.filter_time_us;
                     timing_metrics.schedule_time_us += schedule_time_us;
                 });
                 self.scheduling_details.update(&scheduling_summary);
@@ -211,7 +227,12 @@ where
     /// Clears the transaction state container.
     /// This only clears pending transactions, and does **not** clear in-flight transactions.
     fn clear_container(&mut self) {
+        if self.bam_controller {
+            return;
+        }
+
         let mut num_dropped_on_clear = Saturating::<usize>(0);
+
         while let Some(id) = self.container.pop() {
             self.container.remove_by_id(id.id);
             num_dropped_on_clear += 1;
@@ -226,6 +247,10 @@ where
     /// expired, already processed, or are no longer sanitizable.
     /// This only clears pending transactions, and does **not** clear in-flight transactions.
     fn clean_queue(&mut self) {
+        if self.bam_controller {
+            return;
+        }
+
         // Clean up any transactions that have already been processed, are too old, or do not have
         // valid nonce accounts.
         const MAX_TRANSACTION_CHECKS: usize = 10_000;
@@ -233,7 +258,7 @@ where
 
         while transaction_ids.len() < MAX_TRANSACTION_CHECKS {
             let Some(id) = self.container.pop() else {
-                break
+                break;
             };
             transaction_ids.push(id);
         }
@@ -285,9 +310,13 @@ where
     }
 
     /// Receives completed transactions from the workers and updates metrics.
-    fn receive_completed(&mut self) -> Result<(), SchedulerError> {
-        let ((num_transactions, num_retryable), receive_completed_time_us) =
-            measure_us!(self.scheduler.receive_completed(&mut self.container)?);
+    fn receive_completed(
+        &mut self,
+        decision: &BufferedPacketsDecision,
+    ) -> Result<(), SchedulerError> {
+        let ((num_transactions, num_retryable), receive_completed_time_us) = measure_us!(self
+            .scheduler
+            .receive_completed(&mut self.container, decision)?);
 
         self.count_metrics.update(|count_metrics| {
             count_metrics.num_finished += num_transactions;
@@ -312,10 +341,15 @@ where
             decision,
         )
     }
+
+    fn scheduling_enabled(&self) -> bool {
+        self.bam_controller == self.bam_enabled.load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use {
         super::*,
         crate::banking_stage::{
@@ -332,21 +366,21 @@ mod tests {
         agave_banking_stage_ingress_types::{BankingPacketBatch, BankingPacketReceiver},
         crossbeam_channel::{unbounded, Receiver, Sender},
         itertools::Itertools,
+        solana_compute_budget_interface::ComputeBudgetInstruction,
+        solana_fee_calculator::FeeRateGovernor,
+        solana_hash::Hash,
+        solana_keypair::Keypair,
         solana_ledger::{
             blockstore::Blockstore, genesis_utils::GenesisConfigInfo,
             get_tmp_ledger_path_auto_delete, leader_schedule_cache::LeaderScheduleCache,
         },
+        solana_message::Message,
         solana_perf::packet::{to_packet_batches, PacketBatch, NUM_PACKETS},
         solana_poh::poh_recorder::PohRecorder,
-        solana_runtime::bank::Bank,
-        solana_runtime_transaction::transaction_meta::StaticMeta,
-        solana_compute_budget_interface::ComputeBudgetInstruction,
-        solana_fee_calculator::FeeRateGovernor,
-        solana_hash::Hash,
-        solana_message::Message,
         solana_poh_config::PohConfig,
         solana_pubkey::Pubkey,
-        solana_keypair::Keypair,
+        solana_runtime::bank::Bank,
+        solana_runtime_transaction::transaction_meta::StaticMeta,
         solana_signer::Signer,
         solana_system_interface::instruction as system_instruction,
         solana_transaction::Transaction,
@@ -354,7 +388,6 @@ mod tests {
         tempfile::TempDir,
         test_case::test_case,
     };
-    use std::collections::HashSet;
 
     fn create_channels<T>(num: usize) -> (Vec<Sender<T>>, Vec<Receiver<T>>) {
         (0..num).map(|_| unbounded()).unzip()
@@ -465,6 +498,8 @@ mod tests {
             bank_forks,
             scheduler,
             vec![], // no actual workers with metrics to report, this can be empty
+            false,
+            Arc::new(AtomicBool::new(false)),
         );
 
         (test_frame, scheduler_controller)
@@ -514,7 +549,7 @@ mod tests {
             .decision_maker
             .make_consume_or_forward_decision();
         assert!(matches!(decision, BufferedPacketsDecision::Consume(_)));
-        assert!(scheduler_controller.receive_completed().is_ok());
+        assert!(scheduler_controller.receive_completed(&decision).is_ok());
 
         // Time is not a reliable way for deterministic testing.
         // Loop here until no more packets are received, this avoids parallel
@@ -551,8 +586,12 @@ mod tests {
                     ids: vec![],
                     transactions: vec![],
                     max_ages: vec![],
+                    revert_on_error: false,
+                    respond_with_extra_info: false,
+                    schedulable_slot: None,
                 },
                 retryable_indexes: vec![],
+                extra_info: None,
             })
             .unwrap();
 
@@ -906,6 +945,7 @@ mod tests {
             .send(FinishedConsumeWork {
                 work: consume_work,
                 retryable_indexes: vec![1],
+                extra_info: None,
             })
             .unwrap();
 
