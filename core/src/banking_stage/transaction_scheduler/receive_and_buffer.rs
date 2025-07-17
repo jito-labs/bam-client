@@ -159,7 +159,7 @@ impl SanitizedTransactionReceiveAndBuffer {
         }
     }
 
-    fn buffer_packets(
+    pub fn buffer_packets(
         &mut self,
         container: &mut TransactionStateContainer<RuntimeTransaction<SanitizedTransaction>>,
         _timing_metrics: &mut SchedulerTimingMetrics,
@@ -229,6 +229,7 @@ impl SanitizedTransactionReceiveAndBuffer {
                     fee_budget_limits_vec.push(fee_budget_limits);
                 });
 
+            // Check 4
             let check_results = working_bank.check_transactions(
                 &transactions,
                 &lock_results[..transactions.len()],
@@ -632,7 +633,7 @@ impl TransactionViewReceiveAndBuffer {
 /// from user input. They should never be zero.
 /// Any difference in the prioritization is negligible for
 /// the current transaction costs.
-fn calculate_priority_and_cost(
+pub fn calculate_priority_and_cost(
     transaction: &impl TransactionWithMeta,
     fee_budget_limits: &FeeBudgetLimits,
     bank: &Bank,
@@ -669,7 +670,7 @@ fn calculate_priority_and_cost(
 /// slots, the value used here is the lower-bound on the deactivation
 /// period, i.e. the transaction's address lookups are valid until
 /// AT LEAST this slot.
-fn calculate_max_age(
+pub fn calculate_max_age(
     sanitized_epoch: Epoch,
     deactivation_slot: Slot,
     current_slot: Slot,

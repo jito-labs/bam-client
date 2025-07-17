@@ -84,6 +84,8 @@ pub fn app<'a>(version: &'a str, default_args: &'a DefaultArgs) -> App<'a, 'a> {
         .subcommand(commands::staked_nodes_overrides::command())
         .subcommand(commands::wait_for_restart_window::command())
         .subcommand(commands::set_public_address::command())
+        // bam subcommands
+        .subcommand(commands::bam::command(default_args))
         // jito subcommands
         .subcommand(commands::block_engine::command(default_args))
         .subcommand(commands::relayer::command(default_args))
@@ -92,7 +94,6 @@ pub fn app<'a>(version: &'a str, default_args: &'a DefaultArgs) -> App<'a, 'a> {
             default_args,
         ))
         .subcommand(commands::runtime_plugin::command(default_args));
-
     commands::run::add_args(app, default_args)
         .args(&thread_args(&default_args.thread_args))
         .args(&get_deprecated_arguments())
@@ -1064,6 +1065,12 @@ pub fn test_app<'a>(version: &'a str, default_args: &'a DefaultTestArgs) -> App<
                      argument in the genesis configuration. If the ledger \
                      already exists then this parameter is silently ignored",
                 ),
+        )
+        .arg(
+            Arg::with_name("bam_url")
+                .long("bam-url")
+                .help("URL of BAM Node; leave empty to disable BAM")
+                .takes_value(true),
         )
 }
 
