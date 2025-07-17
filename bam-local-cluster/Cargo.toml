@@ -29,3 +29,4 @@ solana-sdk = { workspace = true }
 solana-streamer = { workspace = true } 
 solana-vote-program = { workspace = true }
 solana-stake-program = { workspace = true }
+solana-rpc-client = { workspace = true }

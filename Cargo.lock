@@ -1210,6 +1210,7 @@ dependencies = [
  "solana-logger",
  "solana-program-test",
  "solana-rpc",
+ "solana-rpc-client",
  "solana-runtime",
  "solana-sdk",
  "solana-stake-program",

@@ -9,11 +9,15 @@ use {
     },
     solana_local_cluster::integration_tests::DEFAULT_NODE_STAKE,
     solana_program_test::programs::spl_programs,
+    solana_rpc_client::rpc_client::RpcClient,
     solana_runtime::genesis_utils::{
-        activate_all_features, create_genesis_config_with_leader_ex, ValidatorVoteKeypairs,
+        activate_feature, create_genesis_config_with_leader_ex, ValidatorVoteKeypairs,
     },
     solana_sdk::{
         account::Account,
+        commitment_config::CommitmentConfig,
+        feature,
+        feature_set::FEATURE_NAMES,
         fee_calculator::FeeRateGovernor,
         genesis_config::{ClusterType, GenesisConfig},
         native_token::LAMPORTS_PER_SOL,
@@ -491,7 +495,30 @@ impl BamLocalCluster {
             cluster_type,
             vec![],
         );
-        activate_all_features(&mut genesis_config);
+
+        // copy features from mainnet-beta
+        let rpc_client = RpcClient::new_with_commitment(
+            "https://api.mainnet-beta.solana.com",
+            CommitmentConfig::confirmed(),
+        );
+        let feature_set_keys = FEATURE_NAMES.keys().cloned().collect::<Vec<_>>();
+        let feature_set_keys_chunks = feature_set_keys.chunks(100);
+        for chunk in feature_set_keys_chunks {
+            info!("Getting features from mainnet-beta...");
+            let response = rpc_client
+                .get_multiple_accounts(chunk)
+                .expect("Failed to get features from mainnet-beta");
+            for (pubkey, account) in chunk.iter().zip(response) {
+                if let Some(account) = account {
+                    if let Some(feature) = feature::from_account(&account) {
+                        if feature.activated_at.is_some() {
+                            info!("Activating feature: {:?}", FEATURE_NAMES.get(pubkey));
+                            activate_feature(&mut genesis_config, *pubkey);
+                        }
+                    }
+                }
+            }
+        }
 
         let mut genesis_config_info = GenesisConfigInfo {
             genesis_config,
