@@ -9,6 +9,7 @@ license = { workspace = true }
 edition = { workspace = true }
 
 [dependencies]
+agave-feature-set = { workspace = true }
 clap = { workspace = true }
 log = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

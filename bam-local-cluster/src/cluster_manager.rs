@@ -17,7 +17,6 @@ use {
         account::Account,
         commitment_config::CommitmentConfig,
         feature,
-        feature_set::FEATURE_NAMES,
         fee_calculator::FeeRateGovernor,
         genesis_config::{ClusterType, GenesisConfig},
         native_token::LAMPORTS_PER_SOL,
@@ -519,6 +518,11 @@ impl BamLocalCluster {
                 }
             }
         }
+        info!("Activating remaining compute units syscall enabled");
+        activate_feature(
+            &mut genesis_config,
+            agave_feature_set::remaining_compute_units_syscall_enabled::id(),
+        );
 
         let mut genesis_config_info = GenesisConfigInfo {
             genesis_config,
