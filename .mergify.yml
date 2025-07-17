@@ -33,7 +33,7 @@ pull_request_rules:
     actions:
       request_reviews:
         teams:
-          - "@anza-xyz/community-pr-subscribers"
+          - "@jito-labs/engineering-team"
   - name: label changes from monorepo-triage
     conditions:
       - author≠@anza
@@ -111,7 +111,7 @@ pull_request_rules:
     actions:
       backport:
         assignees: &BackportAssignee
-          - "{{ merged_by|replace('mergify[bot]', label|select('equalto', 'community')|first|default(author)|replace('community', '@anza-xyz/community-pr-subscribers')) }}"
+          - "{{ merged_by|replace('mergify[bot]', label|select('equalto', 'community')|first|default(author)|replace('community', '@jito-labs/engineering-team')) }}"
         title: "{{ destination_branch }}: {{ title }} (backport of #{{ number }})"
         ignore_conflicts: true
         labels:
@@ -223,4 +223,4 @@ commands_restrictions:
   # Restrict `copy` access to Core Contributors
   copy:
     conditions:
-    - author=@anza
+    - author=@jito-labs/engineering-team
