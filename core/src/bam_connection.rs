@@ -40,7 +40,7 @@ impl BamConnection {
         outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessageV0>,
     ) -> Result<Self, TryInitError> {
         let mut validator_client = Self::build_client(&url).await?;
-        let (outbound_sender, outbound_receiver_internal) = mpsc::channel(100_000);
+        let (outbound_sender, outbound_receiver_internal) = mpsc::channel(1);
         let outbound_stream =
             tonic::Request::new(outbound_receiver_internal.map(|req: StartSchedulerMessage| req));
         let inbound_stream = validator_client
@@ -353,10 +353,7 @@ impl BamConnection {
                 _ => {}
             }
             let _ = outbound_sender
-                .try_send(v0_to_versioned_proto(outbound))
-                .inspect_err(|_| {
-                    error!("Failed to send outbound message");
-                });
+                .send(v0_to_versioned_proto(outbound));
             metrics.outbound_sent.fetch_add(1, Relaxed);
         }
     }
