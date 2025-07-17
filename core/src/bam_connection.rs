@@ -137,20 +137,13 @@ impl BamConnection {
             metrics.clone(),
         ));
 
-        let exit_clone = exit.clone();
         let outbound_sender_clone = outbound_sender.clone();
-        let metrics_clone = metrics.clone();
-        let outbound_forwarder_task = std::thread::Builder::new()
-            .name("bam-outbound-forwarder".to_string())
-            .spawn(move || {
-                Self::outbound_forwarder_task(
-                    exit_clone,
-                    outbound_receiver,
-                    outbound_sender_clone,
-                    metrics_clone,
-                )
-            })
-            .expect("Failed to spawn outbound forwarder thread");
+        let outbound_forwarder_task = tokio::spawn(Self::outbound_forwarder_task(
+            exit.clone(),
+            outbound_receiver,
+            outbound_sender_clone,
+            metrics.clone(),
+        ));
 
         let inbound_task_monitor = TaskMonitor::new();
 
@@ -193,7 +186,7 @@ impl BamConnection {
         }
         is_healthy.store(false, Relaxed);
         let _ = builder_config_task.await.ok();
-        let _ = outbound_forwarder_task.join();
+        let _ = outbound_forwarder_task.await.ok();
         let _ = inbound_forwarder_task.await.ok();
     }
 
@@ -332,7 +325,7 @@ impl BamConnection {
         );
     }
 
-    fn outbound_forwarder_task(
+    async fn outbound_forwarder_task(
         exit: Arc<AtomicBool>,
         outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessageV0>,
         outbound_sender: mpsc::Sender<StartSchedulerMessage>,
@@ -353,7 +346,7 @@ impl BamConnection {
                 _ => {}
             }
             let _ = outbound_sender
-                .send(v0_to_versioned_proto(outbound));
+                .send(v0_to_versioned_proto(outbound)).await;
             metrics.outbound_sent.fetch_add(1, Relaxed);
         }
     }
@@ -454,12 +447,7 @@ impl BamConnection {
         url: &str,
     ) -> Result<BamNodeApiClient<tonic::transport::channel::Channel>, TryInitError> {
         let endpoint = tonic::transport::Endpoint::from_shared(url.to_string())
-            .map_err(TryInitError::EndpointConnectError)?
-            .http2_keep_alive_interval(Duration::from_secs(20))
-            .http2_adaptive_window(false)
-            .initial_stream_window_size(Some(30 * 1024 * 1024))
-            .tcp_nodelay(true)
-            .initial_connection_window_size(Some(30 * 1024 * 1024));
+            .map_err(TryInitError::EndpointConnectError)?;
         let channel = timeout(std::time::Duration::from_secs(5), endpoint.connect())
             .await
             .map_err(TryInitError::ConnectionTimeout)??;
