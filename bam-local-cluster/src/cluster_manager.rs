@@ -518,6 +518,7 @@ impl BamLocalCluster {
                 }
             }
         }
+        // needed for afterburner program
         info!("Activating remaining compute units syscall enabled");
         activate_feature(
             &mut genesis_config,
