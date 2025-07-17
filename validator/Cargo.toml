@@ -87,6 +87,7 @@ symlink = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tonic = { workspace = true, features = ["tls", "tls-roots"] }
+url = { workspace = true }
 
 [target.'cfg(not(any(target_env = "msvc", target_os = "freebsd")))'.dependencies]
 jemallocator = { workspace = true }
@@ -106,3 +107,4 @@ solana-time-utils = { workspace = true }
 spl-generic-token = { workspace = true }
 spl-token-2022 = { workspace = true, features = ["no-entrypoint"] }
 tempfile = { workspace = true }
+test-case = { workspace = true }
