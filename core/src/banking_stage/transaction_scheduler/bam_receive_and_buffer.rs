@@ -353,13 +353,9 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
         }
 
         let mut result = 0;
-        const MAX_BUNDLES_PER_RECV: usize = 24;
         match decision {
             BufferedPacketsDecision::Consume(_) | BufferedPacketsDecision::Hold => {
-                while result < MAX_BUNDLES_PER_RECV {
-                    let Ok(batch) = self.bundle_receiver.try_recv() else {
-                        break;
-                    };
+                while let Ok(batch) = self.bundle_receiver.try_recv() {
                     let ParsedBatch {
                         transaction_ttls,
                         packets,

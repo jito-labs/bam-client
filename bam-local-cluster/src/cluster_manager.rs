@@ -9,7 +9,9 @@ use {
     },
     solana_local_cluster::integration_tests::DEFAULT_NODE_STAKE,
     solana_program_test::programs::spl_programs,
-    solana_runtime::genesis_utils::{create_genesis_config_with_leader_ex, ValidatorVoteKeypairs},
+    solana_runtime::genesis_utils::{
+        activate_all_features, create_genesis_config_with_leader_ex, ValidatorVoteKeypairs,
+    },
     solana_sdk::{
         account::Account,
         fee_calculator::FeeRateGovernor,
@@ -476,7 +478,7 @@ impl BamLocalCluster {
         let voting_keypair = voting_keypairs[0].borrow().vote_keypair.insecure_clone();
 
         let validator_pubkey = voting_keypairs[0].borrow().node_keypair.pubkey();
-        let genesis_config = create_genesis_config_with_leader_ex(
+        let mut genesis_config = create_genesis_config_with_leader_ex(
             mint_lamports,
             &mint_keypair.pubkey(),
             &validator_pubkey,
@@ -489,6 +491,7 @@ impl BamLocalCluster {
             cluster_type,
             vec![],
         );
+        activate_all_features(&mut genesis_config);
 
         let mut genesis_config_info = GenesisConfigInfo {
             genesis_config,
