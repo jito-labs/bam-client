@@ -141,6 +141,7 @@ tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-metrics = { workspace = true }
+tokio-stream = { workspace = true }
 tonic = { workspace = true }
 trees = { workspace = true }
 
