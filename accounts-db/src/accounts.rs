@@ -27,6 +27,7 @@ use {
     solana_transaction_context::TransactionAccount,
     solana_transaction_error::{TransactionError, TransactionResult as Result},
     std::{
+        cell::RefCell,
         cmp::Reverse,
         collections::{BinaryHeap, HashMap, HashSet},
         ops::RangeBounds,
@@ -36,6 +37,11 @@ use {
         },
     },
 };
+
+thread_local! {
+    /// Reusable deduped locks for batched account locking.
+    static REUSABLE_DEDUPED_LOCKS: RefCell<HashMap<Pubkey, bool>> = RefCell::new(HashMap::new());
+}
 
 pub type PubkeyAccountSlot = (Pubkey, AccountSharedData, Slot);
 
@@ -588,6 +594,11 @@ impl Accounts {
             })
             .collect::<Vec<_>>();
 
+        // TODO(seg): Triple check
+        // if batched {
+        //     return self.lock_accounts_batched(validated_batch_keys, &|_| false, &|_| false);
+        // }
+
         let account_locks = &mut self.account_locks.lock().unwrap();
 
         if relax_intrabatch_account_locks {
@@ -611,12 +622,99 @@ impl Accounts {
         }
     }
 
+    // TODO(seg)
+    // Lock accounts in batches, deduplicating locks across transactions.
+    // Returns a vec with all transaction locks associated with the
+    // first transaction result, and `Ok(())` for all other transactions (If successful).
+    // fn lock_accounts_batched<'a>(
+    //     &self,
+    //     validated_batch_keys: Vec<Result<impl Iterator<Item = (&'a Pubkey, bool)> + Clone>>,
+    //     is_read_prelocked_callback: &impl Fn(&Pubkey) -> bool,
+    //     is_write_prelocked_callback: &impl Fn(&Pubkey) -> bool,
+    // ) -> Vec<Result<()>> {
+    //     if let Some(err) = validated_batch_keys.iter().find_map(|res| {
+    //         if let Err(err) = res {
+    //             Some(err.clone())
+    //         } else {
+    //             None
+    //         }
+    //     }) {
+    //         return validated_batch_keys
+    //             .into_iter()
+    //             .map(|_| Err(err.clone()))
+    //             .collect();
+    //     }
+    //
+    //     let len = validated_batch_keys.len();
+    //     let result = REUSABLE_DEDUPED_LOCKS.with_borrow_mut(|deduped_locks| {
+    //         deduped_locks.clear();
+    //         Self::get_deduped_batch_locks(
+    //             deduped_locks,
+    //             validated_batch_keys
+    //                 .into_iter()
+    //                 .map(|res| res.unwrap())
+    //                 .collect(),
+    //         );
+    //         let account_locks = &mut self.account_locks.lock().unwrap();
+    //         account_locks.try_lock_accounts(
+    //             deduped_locks
+    //                 .iter()
+    //                 .map(|(pubkey, is_writable)| (pubkey, *is_writable)),
+    //             is_read_prelocked_callback,
+    //             is_write_prelocked_callback,
+    //         )
+    //     });
+    //
+    //     (0..len).map(|_| result.clone()).collect()
+    // }
+
+    /// Deduplicate the locks across all transactions in a batch; promoting read-only locks to writable
+    /// if a writable lock exists for the same pubkey.
+    fn get_deduped_batch_locks<'a>(
+        deduped_locks: &mut HashMap<Pubkey, bool>,
+        is_writable_locks: Vec<impl Iterator<Item = (&'a Pubkey, bool)> + Clone>,
+    ) {
+        for locks in is_writable_locks {
+            for (pubkey, is_writable) in locks {
+                if let Some(existing) = deduped_locks.get(pubkey) {
+                    if *existing && !is_writable {
+                        continue;
+                    }
+                }
+                deduped_locks.insert(*pubkey, is_writable);
+            }
+        }
+    }
+
     /// Once accounts are unlocked, new transactions that modify that state can enter the pipeline
     pub fn unlock_accounts<'a, Tx: SVMMessage + 'a>(
         &self,
         txs_and_results: impl Iterator<Item = (&'a Tx, &'a Result<()>)> + Clone,
+        batched: bool,
     ) {
         if !txs_and_results.clone().any(|(_, res)| res.is_ok()) {
+            return;
+        }
+
+        if batched {
+            REUSABLE_DEDUPED_LOCKS.with_borrow_mut(|deduped_locks| {
+                deduped_locks.clear();
+                Self::get_deduped_batch_locks(
+                    deduped_locks,
+                    txs_and_results
+                        .clone()
+                        .map(|(tx, _)| {
+                            TransactionAccountLocksIterator::new(tx).accounts_with_is_writable()
+                        })
+                        .collect(),
+                );
+                let mut account_locks = self.account_locks.lock().unwrap();
+                account_locks.unlock_accounts(
+                    deduped_locks
+                        .iter()
+                        .map(|(pubkey, is_writable)| (pubkey, *is_writable)),
+                );
+            });
             return;
         }
 
@@ -1021,7 +1119,7 @@ mod tests {
                 &|_| false,
             );
             assert_eq!(results, vec![Ok(())]);
-            accounts.unlock_accounts(txs.iter().zip(&results));
+            accounts.unlock_accounts(txs.iter().zip(&results), false);
         }
 
         // Disallow over MAX_TX_ACCOUNT_LOCKS
@@ -1141,8 +1239,8 @@ mod tests {
             .unwrap()
             .is_locked_readonly(&keypair1.pubkey()));
 
-        accounts.unlock_accounts(iter::once(&tx).zip(&results0));
-        accounts.unlock_accounts(txs.iter().zip(&results1));
+        accounts.unlock_accounts(iter::once(&tx).zip(&results0), false);
+        accounts.unlock_accounts(txs.iter().zip(&results1), false);
         let instructions = vec![CompiledInstruction::new(2, &(), vec![0, 1])];
         let message = Message::new_with_compiled_instructions(
             1,
@@ -1236,7 +1334,7 @@ mod tests {
                     counter_clone.clone().fetch_add(1, Ordering::Release);
                 }
             }
-            accounts_clone.unlock_accounts(txs.iter().zip(&results));
+            accounts_clone.unlock_accounts(txs.iter().zip(&results), false);
             if exit_clone.clone().load(Ordering::Relaxed) {
                 break;
             }
@@ -1257,7 +1355,7 @@ mod tests {
                 thread::sleep(time::Duration::from_millis(50));
                 assert_eq!(counter_value, counter_clone.clone().load(Ordering::Acquire));
             }
-            accounts_arc.unlock_accounts(txs.iter().zip(&results));
+            accounts_arc.unlock_accounts(txs.iter().zip(&results), false);
             thread::sleep(time::Duration::from_millis(50));
         }
         exit.store(true, Ordering::Relaxed);
@@ -1817,5 +1915,90 @@ mod tests {
                 &sum, &account, &None
             ));
         }
+    }
+
+    #[test]
+    fn test_batched_locking() {
+        let keypair0 = Keypair::new();
+        let keypair1 = Keypair::new();
+        let keypair2 = Keypair::new();
+        let keypair3 = Keypair::new();
+
+        let account0 = AccountSharedData::new(1, 0, &Pubkey::default());
+        let account1 = AccountSharedData::new(2, 0, &Pubkey::default());
+        let account2 = AccountSharedData::new(3, 0, &Pubkey::default());
+        let account3 = AccountSharedData::new(4, 0, &Pubkey::default());
+
+        let accounts_db = AccountsDb::new_single_for_tests();
+        let accounts = Accounts::new(Arc::new(accounts_db));
+        accounts.store_for_tests(0, &keypair0.pubkey(), &account0);
+        accounts.store_for_tests(0, &keypair1.pubkey(), &account1);
+        accounts.store_for_tests(0, &keypair2.pubkey(), &account2);
+        accounts.store_for_tests(0, &keypair3.pubkey(), &account3);
+
+        let instructions = vec![CompiledInstruction::new(2, &(), vec![0, 1])];
+        let message = Message::new_with_compiled_instructions(
+            1,
+            0,
+            2,
+            vec![keypair1.pubkey(), keypair0.pubkey(), native_loader::id()],
+            Hash::default(),
+            instructions,
+        );
+        let tx0 = new_sanitized_tx(&[&keypair1], message, Hash::default());
+        let instructions = vec![CompiledInstruction::new(2, &(), vec![0, 1])];
+        let message = Message::new_with_compiled_instructions(
+            1,
+            0,
+            2,
+            vec![keypair2.pubkey(), keypair0.pubkey(), native_loader::id()],
+            Hash::default(),
+            instructions,
+        );
+        let tx1 = new_sanitized_tx(&[&keypair2], message, Hash::default());
+        let instructions = vec![CompiledInstruction::new(2, &(), vec![0, 1])];
+        let message = Message::new_with_compiled_instructions(
+            1,
+            0,
+            2,
+            vec![keypair3.pubkey(), keypair0.pubkey(), native_loader::id()],
+            Hash::default(),
+            instructions,
+        );
+        let tx2 = new_sanitized_tx(&[&keypair3], message, Hash::default());
+        let txs = vec![tx0, tx1, tx2];
+
+        let qos_results = vec![Ok(()), Ok(()), Ok(())];
+
+        let results = accounts.lock_accounts(
+            txs.iter(),
+            qos_results.into_iter(),
+            MAX_TX_ACCOUNT_LOCKS,
+            true,
+            &|_| false,
+            &|_| false,
+        );
+
+        assert_eq!(
+            results,
+            vec![
+                Ok(()), // Read-only account (keypair0) can be referenced multiple times
+                Ok(()), // Read-only account (keypair0) can be referenced multiple times
+                Ok(()), // Read-only account (keypair0) can be referenced multiple times
+            ],
+        );
+
+        // verify that keypair0 read-only locked
+        assert!(accounts
+            .account_locks
+            .lock()
+            .unwrap()
+            .is_locked_readonly(&keypair0.pubkey()));
+        // verify that keypair2 (for tx1) is write-locked (2 txns referencing it)
+        assert!(accounts
+            .account_locks
+            .lock()
+            .unwrap()
+            .is_locked_write(&keypair2.pubkey()));
     }
 }

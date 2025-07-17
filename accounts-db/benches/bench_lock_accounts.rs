@@ -98,7 +98,10 @@ fn bench_entry_lock_accounts(c: &mut Criterion) {
                         &|_| false,
                         &|_| false,
                     );
-                    accounts.unlock_accounts(batch.iter().zip(&results));
+                    accounts.unlock_accounts(
+                        batch.iter().zip(&results),
+                        relax_intrabatch_account_locks,
+                    );
                 }
             })
         });
