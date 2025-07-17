@@ -5,12 +5,12 @@
 
 version: 2
 updates:
-- package-ecosystem: cargo
-  directory: "/"
-  schedule:
-    interval: daily
-    time: "01:00"
-    timezone: America/Los_Angeles
-  #labels:
-  #  - "automerge"
-  open-pull-requests-limit: 6
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      time: "01:00"
+      timezone: America/Los_Angeles
+    #labels:
+    #  - "automerge"
+    open-pull-requests-limit: 6
