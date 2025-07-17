@@ -90,7 +90,6 @@ pub fn convert_deserialize_error_to_proto(
     match err {
         DeserializedPacketError::ShortVecError(_) => DeserializationErrorReason::BincodeError,
         DeserializedPacketError::DeserializationError(err) => {
-            print!("Deserialization error: {err}");
             DeserializationErrorReason::BincodeError
         }
         DeserializedPacketError::SignatureOverflowed(_) => {
