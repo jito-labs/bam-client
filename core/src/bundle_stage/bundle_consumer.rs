@@ -800,7 +800,6 @@ mod tests {
         },
         std::{
             collections::HashSet,
-            str::FromStr,
             sync::{
                 atomic::{AtomicBool, Ordering},
                 Arc, Mutex, RwLock,
@@ -998,12 +997,12 @@ mod tests {
 
     fn get_tip_manager(vote_account: &Pubkey) -> TipManager {
         TipManager::new(TipManagerConfig {
-            tip_payment_program_id: Pubkey::from_str("T1pyyaTNZsKv2WcRAB8oVnk93mLJw2XzjtVYqCsaHqt")
-                .unwrap(),
-            tip_distribution_program_id: Pubkey::from_str(
+            tip_payment_program_id: Pubkey::from_str_const(
+                "T1pyyaTNZsKv2WcRAB8oVnk93mLJw2XzjtVYqCsaHqt",
+            ),
+            tip_distribution_program_id: Pubkey::from_str_const(
                 "4R3gSG8BpU4t19KYj8CfnbtRpnT8gtk4dvTHxVRwc2r7",
-            )
-            .unwrap(),
+            ),
             tip_distribution_account_config: TipDistributionAccountConfig {
                 merkle_root_upload_authority: Pubkey::new_unique(),
                 vote_account: *vote_account,

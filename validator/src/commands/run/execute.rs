@@ -1140,6 +1140,7 @@ pub fn execute(
             tower_storage: validator_config.tower_storage.clone(),
             staked_nodes_overrides,
             rpc_to_plugin_manager_sender,
+            bam_url: validator_config.bam_url.clone(),
         },
     );
 
