@@ -3193,15 +3193,25 @@ impl Bank {
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(TransactionBatch::new(
-            self.try_lock_accounts(&sanitized_txs),
+            self.try_lock_accounts(&sanitized_txs, false),
             self,
             OwnedOrBorrowed::Owned(sanitized_txs),
         ))
     }
 
     /// Attempt to take locks on the accounts in a transaction batch
-    pub fn try_lock_accounts(&self, txs: &[impl TransactionWithMeta]) -> Vec<Result<()>> {
-        self.try_lock_accounts_with_results(txs, txs.iter().map(|_| Ok(())), &|_| false, &|_| false)
+    pub fn try_lock_accounts(
+        &self,
+        txs: &[impl TransactionWithMeta],
+        batched: bool,
+    ) -> Vec<Result<()>> {
+        self.try_lock_accounts_with_results(
+            txs,
+            txs.iter().map(|_| Ok(())),
+            &|_| false,
+            &|_| false,
+            batched,
+        )
     }
 
     /// Attempt to take locks on the accounts in a transaction batch, and their cost
@@ -3212,11 +3222,13 @@ impl Bank {
         tx_results: impl Iterator<Item = Result<()>>,
         is_read_locked_callback: &impl Fn(&Pubkey) -> bool,
         is_write_locked_callback: &impl Fn(&Pubkey) -> bool,
+        batched_locking: bool,
     ) -> Vec<Result<()>> {
         let tx_account_lock_limit = self.get_transaction_account_lock_limit();
         let relax_intrabatch_account_locks = self
             .feature_set
-            .is_active(&feature_set::relax_intrabatch_account_locks::id());
+            .is_active(&feature_set::relax_intrabatch_account_locks::id())
+            || batched_locking;
 
         // with simd83 enabled, we must fail transactions that duplicate a prior message hash
         // previously, conflicting account locks would fail such transactions as a side effect
@@ -3256,6 +3268,7 @@ impl Bank {
             txs.iter().map(|_| Ok(())),
             &|_| false,
             &|_| false,
+            false,
         )
     }
 
@@ -3267,6 +3280,7 @@ impl Bank {
         transaction_results: impl Iterator<Item = Result<()>>,
         is_read_locked_callback: &impl Fn(&Pubkey) -> bool,
         is_write_locked_callback: &impl Fn(&Pubkey) -> bool,
+        batched_locking: bool,
     ) -> TransactionBatch<'a, 'b, Tx> {
         // this lock_results could be: Ok, AccountInUse, WouldExceedBlockMaxLimit or WouldExceedAccountMaxLimit
         TransactionBatch::new(
@@ -3275,6 +3289,7 @@ impl Bank {
                 transaction_results,
                 is_read_locked_callback,
                 is_write_locked_callback,
+                batched_locking,
             ),
             self,
             OwnedOrBorrowed::Borrowed(transactions),
@@ -3489,7 +3504,7 @@ impl Bank {
         &self,
         txs_and_results: impl Iterator<Item = (&'a Tx, &'a Result<()>)> + Clone,
     ) {
-        self.rc.accounts.unlock_accounts(txs_and_results)
+        self.rc.accounts.unlock_accounts(txs_and_results);
     }
 
     pub fn remove_unrooted_slots(&self, slots: &[(Slot, BankId)]) {
@@ -7020,6 +7035,13 @@ impl Bank {
     pub fn set_accounts_lt_hash_for_snapshot_minimizer(&self, accounts_lt_hash: AccountsLtHash) {
         *self.accounts_lt_hash.lock().unwrap() = accounts_lt_hash;
     }
+
+    /// Total priority fees (lamports) that this bank collected
+    /// **Only populated once the bank is Executed. Always call
+    /// it after the bank is rooted.**
+    pub fn priority_fee_total(&self) -> u64 {
+        self.collector_fee_details.read().unwrap().priority_fee
+    }
 }
 
 impl InvokeContextCallback for Bank {
@@ -7247,7 +7269,7 @@ impl Bank {
             .map(RuntimeTransaction::from_transaction_for_tests)
             .collect::<Vec<_>>();
         TransactionBatch::new(
-            self.try_lock_accounts(&sanitized_txs),
+            self.try_lock_accounts(&sanitized_txs, false),
             self,
             OwnedOrBorrowed::Owned(sanitized_txs),
         )
