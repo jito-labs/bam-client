@@ -615,6 +615,10 @@ impl PohRecorder {
         self.slot_for_tick_height(next_tick_height)
     }
 
+    pub fn get_current_slot(&self) -> Slot {
+        self.slot_for_tick_height(self.tick_height)
+    }
+
     pub fn leader_after_n_slots(&self, slots: u64) -> Option<Pubkey> {
         self.leader_schedule_cache
             .slot_leader_at(self.current_poh_slot() + slots, None)
@@ -879,6 +883,10 @@ impl PohRecorder {
     #[cfg(feature = "dev-context-only-utils")]
     pub fn clear_bank_for_test(&mut self) {
         self.clear_bank();
+    }
+
+    pub fn get_blockstore(&self) -> Arc<Blockstore> {
+        self.blockstore.clone()
     }
 }
 
