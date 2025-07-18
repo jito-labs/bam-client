@@ -40,7 +40,7 @@ impl BamConnection {
         outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessageV0>,
     ) -> Result<Self, TryInitError> {
         let mut validator_client = Self::build_client(&url).await?;
-        let (outbound_sender, outbound_receiver_internal) = tokio::sync::mpsc::channel(64);
+        let (outbound_sender, outbound_receiver_internal) = tokio::sync::mpsc::channel(100_000);
         let outbound_stream =
             tonic::Request::new(ReceiverStream::new(outbound_receiver_internal));
         let inbound_stream = validator_client
