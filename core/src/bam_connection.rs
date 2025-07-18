@@ -40,17 +40,35 @@ impl BamConnection {
         outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessageV0>,
     ) -> Result<Self, TryInitError> {
         let mut validator_client = Self::build_client(&url).await?;
-        let (outbound_sender, outbound_receiver_internal) = tokio::sync::mpsc::channel(100_000);
-        let outbound_stream =
-            tonic::Request::new(ReceiverStream::new(outbound_receiver_internal));
+
+        // 1. Prepare the auth proof
+        let Some(auth_proof) = Self::prepare_auth_proof(&mut validator_client, cluster_info.clone()).await
+        else {
+            return Err(TryInitError::MidLeaderSlotError);
+        };
+
+        // 2. Create inbound stream
         let inbound_stream = validator_client
-            .start_scheduler_stream(outbound_stream)
+            .start_scheduler_response_stream(auth_proof.clone())
             .await
             .map_err(|e| {
                 error!("Failed to start scheduler stream: {:?}", e);
                 TryInitError::StreamStartError(e)
             })?
             .into_inner();
+
+        // 3. Create outbound stream
+        let (outbound_sender, outbound_receiver_internal) =
+            tokio::sync::mpsc::channel(100_000);
+        let outbound_stream =
+            tonic::Request::new(ReceiverStream::new(outbound_receiver_internal));
+        validator_client
+            .start_scheduler_message_stream(outbound_stream)
+            .await
+            .map_err(|e| {
+                error!("Failed to start outbound message stream: {:?}", e);
+                TryInitError::StreamStartError(e)
+            })?;
 
         let metrics = Arc::new(BamConnectionMetrics::default());
         let is_healthy = Arc::new(AtomicBool::new(true));
@@ -61,14 +79,13 @@ impl BamConnection {
             exit.clone(),
             inbound_stream,
             outbound_sender,
-            validator_client,
             config.clone(),
             batch_sender,
-            cluster_info,
             metrics.clone(),
             is_healthy.clone(),
             outbound_receiver,
             url.clone(),
+            auth_proof,
         ));
 
         Ok(Self {
@@ -85,14 +102,13 @@ impl BamConnection {
         exit: Arc<AtomicBool>,
         inbound_stream: tonic::Streaming<StartSchedulerResponse>, // GRPC
         outbound_sender: mpsc::Sender<StartSchedulerMessage>, // GRPC
-        mut validator_client: BamNodeApiClient<tonic::transport::channel::Channel>,
         config: Arc<Mutex<Option<ConfigResponse>>>,
         batch_sender: crossbeam_channel::Sender<AtomicTxnBatch>,
-        cluster_info: Arc<ClusterInfo>,
         metrics: Arc<BamConnectionMetrics>,
         is_healthy: Arc<AtomicBool>,
         outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessageV0>,
         url: String,
+        auth_proof: AuthProof,
     ) {
         let last_heartbeat = Arc::new(Mutex::new(std::time::Instant::now()));
         let mut heartbeat_interval = interval(std::time::Duration::from_secs(5));
@@ -100,14 +116,6 @@ impl BamConnection {
         let mut metrics_and_health_check_interval = interval(std::time::Duration::from_millis(25));
         metrics_and_health_check_interval
             .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-        // Create auth proof
-        let Some(auth_proof) = Self::prepare_auth_proof(&mut validator_client, cluster_info).await
-        else {
-            error!("Failed to prepare auth response");
-            is_healthy.store(false, Relaxed);
-            return;
-        };
 
         // Send it as first message
         let start_message = StartSchedulerMessageV0 {
