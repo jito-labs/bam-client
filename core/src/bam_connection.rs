@@ -332,8 +332,9 @@ impl BamConnection {
         metrics: Arc<BamConnectionMetrics>,
     ) {
         while !exit.load(Relaxed) {
-            let Ok(outbound) = outbound_receiver.recv_timeout(std::time::Duration::from_millis(10))
+            let Ok(outbound) = outbound_receiver.try_recv()
             else {
+                tokio::time::sleep(Duration::from_millis(1)).await;
                 continue;
             };
             match outbound.msg.as_ref() {
