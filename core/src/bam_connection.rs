@@ -365,7 +365,7 @@ impl BamConnection {
                 Ok(Some(msg)) => {
                     let processing_start = std::time::Instant::now();
                     let polling_duration = processing_start.duration_since(start);
-                    info!("Received inbound message in {:?}", polling_duration);
+                    //info!("Received inbound message in {:?}", polling_duration);
 
                     let Some(VersionedMsg::V0(inbound)) = msg.versioned_msg else {
                         error!("Received unsupported versioned message: {:?}", msg);
@@ -386,8 +386,7 @@ impl BamConnection {
                         _ => {}
                     }
                     let processing_duration = processing_start.elapsed();
-                    info!("Processed inbound message in {:?}", processing_duration);
-                    tokio::time::sleep(Duration::from_micros(1)).await; // Yield to allow other tasks to run
+                    //info!("Processed inbound message in {:?}", processing_duration);
                 }
                 Ok(None) => {
                     info!("Inbound stream closed");
