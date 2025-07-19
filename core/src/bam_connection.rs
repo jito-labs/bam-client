@@ -62,6 +62,7 @@ impl BamConnection {
             tokio::sync::mpsc::channel(100_000);
         let outbound_stream =
             tonic::Request::new(ReceiverStream::new(outbound_receiver_internal));
+        let mut validator_client = Self::build_client(&url).await?;
         validator_client
             .start_scheduler_message_stream(outbound_stream)
             .await
@@ -113,7 +114,7 @@ impl BamConnection {
         let last_heartbeat = Arc::new(Mutex::new(std::time::Instant::now()));
         let mut heartbeat_interval = interval(std::time::Duration::from_secs(5));
         heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut metrics_and_health_check_interval = interval(std::time::Duration::from_millis(25));
+        let mut metrics_and_health_check_interval = interval(std::time::Duration::from_secs(1));
         metrics_and_health_check_interval
             .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -342,7 +343,7 @@ impl BamConnection {
         while !exit.load(Relaxed) {
             let Ok(outbound) = outbound_receiver.try_recv()
             else {
-                tokio::time::sleep(Duration::from_millis(1)).await;
+                tokio::time::sleep(Duration::from_micros(100)).await;
                 continue;
             };
             match outbound.msg.as_ref() {
