@@ -137,6 +137,7 @@ impl BamConnection {
             validator_client.clone(),
             metrics.clone(),
         ));
+        let mut waiting_results = Vec::new();
         while !exit.load(Relaxed) {
             tokio::select! {
                 _ = heartbeat_interval.tick() => {
@@ -191,19 +192,24 @@ impl BamConnection {
                 }
                 _ = outbound_tick_interval.tick() => {
                     while let Ok(outbound) = outbound_receiver.try_recv() {
-                        match outbound.msg.as_ref() {
-                            Some(Msg::LeaderState(_)) => {
+                        match outbound.msg {
+                            Some(Msg::LeaderState(mut leader_state)) => {
+                                leader_state.results = std::mem::take(&mut waiting_results);
                                 metrics.leaderstate_sent.fetch_add(1, Relaxed);
+                                let outbound = StartSchedulerMessageV0 {
+                                    msg: Some(Msg::LeaderState(leader_state)),
+                                };
+                                let _ = outbound_sender.try_send(v0_to_versioned_proto(outbound)).inspect_err(|_| {
+                                    error!("Failed to send outbound message");
+                                });
                             }
-                            Some(Msg::AtomicTxnBatchResult(_)) => {
+                            Some(Msg::AtomicTxnBatchResult(result)) => {
                                 metrics.bundleresult_sent.fetch_add(1, Relaxed);
+                                waiting_results.push(result.clone());
                             }
                             _ => {}
                         }
-                        let _ = outbound_sender.try_send(v0_to_versioned_proto(outbound)).inspect_err(|_| {
-                            error!("Failed to send outbound message");
-                        });
-                        metrics.outbound_sent.fetch_add(1, Relaxed);
+
                     }
                 }
             }

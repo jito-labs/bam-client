@@ -174,6 +174,7 @@ impl BamManager {
             slot: bank.slot(),
             tick: (bank.tick_height() % bank.ticks_per_slot()) as u32,
             slot_cu_budget,
+            results: vec![],
         }
     }
 
