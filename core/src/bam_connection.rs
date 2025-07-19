@@ -181,10 +181,12 @@ impl BamConnection {
                             last_heartbeat = std::time::Instant::now();
                             metrics.heartbeat_received.fetch_add(1, Relaxed);
                         }
-                        StartSchedulerResponseV0 { resp: Some(Resp::AtomicTxnBatch(batch)), .. } => {
-                            let _ = batch_sender.try_send(batch).inspect_err(|_| {
-                                error!("Failed to send bundle to receiver");
-                            });
+                        StartSchedulerResponseV0 { resp: Some(Resp::MicroBlock(microblock)), .. } => {
+                            for batch in microblock.atomic_txn_batches {
+                                let _ = batch_sender.try_send(batch).inspect_err(|_| {
+                                    error!("Failed to send bundle to receiver");
+                                });
+                            }
                             metrics.bundle_received.fetch_add(1, Relaxed);
                         }
                         _ => {}
