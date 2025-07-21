@@ -619,6 +619,7 @@ x509-parser = "0.14.0"
 # See "zeroize versioning issues" below if you are updating this version.
 zeroize = { version = "1.7", default-features = false }
 zstd = "0.13.2"
+websocket-lite = "0.4"
 [profile.release-with-debug]
 inherits = "release"
 debug = true

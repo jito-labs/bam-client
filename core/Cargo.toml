@@ -140,8 +140,10 @@ sys-info = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
+tokio-tungstenite = { workspace = true }
 tonic = { workspace = true }
 trees = { workspace = true }
+websocket-lite = { workspace = true }
 
 [target."cfg(unix)".dependencies]
 sysctl = { workspace = true }

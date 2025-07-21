@@ -2,9 +2,7 @@
 // Keeps track of last received heartbeat 'behind the scenes' and will mark itself as unhealthy if no heartbeat is received
 
 use {
-    crate::bam_dependencies::v0_to_versioned_proto,
-    futures::{channel::mpsc, SinkExt, StreamExt},
-    jito_protos::proto::{
+    crate::bam_dependencies::v0_to_versioned_proto, futures::{channel::mpsc, SinkExt, StreamExt}, jito_protos::proto::{
         bam_api::{
             bam_node_api_client::BamNodeApiClient, start_scheduler_message_v0::Msg,
             start_scheduler_response::VersionedMsg, start_scheduler_response_v0::Resp,
@@ -12,18 +10,14 @@ use {
             StartSchedulerMessageV0, StartSchedulerResponse, StartSchedulerResponseV0,
         },
         bam_types::{AtomicTxnBatch, AuthProof, ValidatorHeartBeat},
-    },
-    solana_gossip::cluster_info::ClusterInfo,
-    solana_sdk::{signature::Keypair, signer::Signer},
-    std::sync::{
+    }, prost::Message, solana_gossip::cluster_info::ClusterInfo, solana_sdk::{signature::Keypair, signer::Signer}, std::sync::{
         atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
         Arc, Mutex,
-    },
-    thiserror::Error,
-    tokio::time::{interval, timeout},
+    }, thiserror::Error, tokio::time::{interval, timeout}, tokio_tungstenite::connect_async, websocket_lite::ClientBuilder
 };
 
 pub struct BamConnection {
+    websocket_thread: tokio::task::JoinHandle<()>,
     config: Arc<Mutex<Option<ConfigResponse>>>,
     background_task: tokio::task::JoinHandle<()>,
     is_healthy: Arc<AtomicBool>,
@@ -44,25 +38,29 @@ impl BamConnection {
 
         let channel = timeout(connection_timeout, backend_endpoint.connect()).await??;
 
-        let mut validator_client = BamNodeApiClient::new(channel);
+        let validator_client = BamNodeApiClient::new(channel);
 
         let (outbound_sender, outbound_receiver_internal) = mpsc::channel(100_000);
-        let outbound_stream =
-            tonic::Request::new(outbound_receiver_internal.map(|req: StartSchedulerMessage| req));
-        let inbound_stream = validator_client
-            .start_scheduler_stream(outbound_stream)
-            .await
-            .map_err(|e| {
-                error!("Failed to start scheduler stream: {:?}", e);
-                TryInitError::StreamStartError(e)
-            })?
-            .into_inner();
+        let (inbound_sender, inbound_receiver) = mpsc::channel(100_000);
+        let inbound_stream = inbound_receiver;
+
+        let exit = Arc::new(AtomicBool::new(false));
+
+        let exit_clone = exit.clone();
+        let url_clone = url.clone();
+        let websocket_thread = tokio::spawn(Self::run_websocket(
+                exit_clone,
+                url_clone,
+                outbound_receiver_internal,
+                inbound_sender,
+            )
+        );
+
 
         let metrics = Arc::new(BamConnectionMetrics::default());
         let is_healthy = Arc::new(AtomicBool::new(true));
         let config = Arc::new(Mutex::new(None));
 
-        let exit = Arc::new(AtomicBool::new(false));
         let background_task = tokio::spawn(Self::connection_task(
             exit.clone(),
             inbound_stream,
@@ -77,6 +75,7 @@ impl BamConnection {
         ));
 
         Ok(Self {
+            websocket_thread,
             config,
             background_task,
             is_healthy,
@@ -85,10 +84,73 @@ impl BamConnection {
         })
     }
 
+    async fn run_websocket(
+        exit: Arc<AtomicBool>,
+        url: String,
+        mut outbound_receiver: mpsc::Receiver<StartSchedulerMessage>,
+        mut inbound_sender: mpsc::Sender<StartSchedulerResponse>,
+    ) {
+        // Add one to the port
+        let url = if let Some(port) = url.split(':').last() {
+            if let Ok(port_num) = port.parse::<u16>() {
+                let new_port = port_num + 1;
+                url.replace(&format!(":{}", port_num), &format!(":{}", new_port))
+
+            } else {
+                panic!("Invalid port number in URL");
+            }
+        } else {
+            panic!("Invalid URL format, missing port");
+        };
+
+        // Replace http with ws
+        let url = url.replace("http://", "ws://").replace("https://", "wss://");
+
+         // Connect to a WebSocket server
+        let (ws_stream, _) = connect_async(url.as_str()).await.expect("Failed to connect to WebSocket");
+        let (mut write, mut read) = ws_stream.split();
+
+        info!("WEBSOCK connected at {}", url);
+
+        // IGRESS
+        let exit_clone = exit.clone();
+        tokio::spawn(async move {
+            while !exit_clone.load(Relaxed) {
+                if let Some(outbound) = outbound_receiver.next().await {
+                    let msg = outbound.encode_to_vec();
+                    if let Err(e) = write.send(tokio_tungstenite::tungstenite::Message::Binary(msg)).await {
+                        break;
+                    }
+                }
+            }
+        });
+
+        // INGEST
+        let exit_clone = exit.clone();
+        tokio::spawn(async move {
+            while !exit_clone.load(Relaxed) {
+                let Some(Ok(message)) = read.next().await else {
+                    break;
+                };
+                let tokio_tungstenite::tungstenite::Message::Binary(data) = message else {
+                    continue;
+                };
+
+                let Ok(msg) = StartSchedulerResponse::decode(data.as_slice()) else {
+                        continue;
+                    };
+                let _ = inbound_sender.try_send(msg);
+            }
+        });
+
+        info!("WEBSOCK WebSocket thread exiting");
+
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn connection_task(
         exit: Arc<AtomicBool>,
-        mut inbound_stream: tonic::Streaming<StartSchedulerResponse>,
+        mut inbound_stream: mpsc::Receiver<StartSchedulerResponse>,
         mut outbound_sender: mpsc::Sender<StartSchedulerMessage>,
         mut validator_client: BamNodeApiClient<tonic::transport::channel::Channel>,
         config: Arc<Mutex<Option<ConfigResponse>>>,
@@ -157,17 +219,11 @@ impl BamConnection {
 
                     metrics.report();
                 }
-                inbound = inbound_stream.message() => {
-                    let inbound = match inbound {
-                        Ok(Some(msg)) => msg,
-                        Ok(None) => {
-                            error!("Inbound stream closed");
-                            break;
-                        }
-                        Err(e) => {
-                            error!("Failed to receive message from inbound stream: {:?}", e);
-                            break;
-                        }
+                inbound = inbound_stream.next() => {
+                    let Some(inbound) = inbound else {
+                        error!("Inbound stream closed unexpectedly");
+                        is_healthy.store(false, Relaxed);
+                        break;
                     };
 
                     let Some(VersionedMsg::V0(inbound)) = inbound.versioned_msg else {
