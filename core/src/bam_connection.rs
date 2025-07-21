@@ -22,6 +22,7 @@ use {
     thiserror::Error,
     tokio::time::{interval, timeout},
 };
+use jito_protos::proto::bam_types::BatchesResults;
 
 pub struct BamConnection {
     config: Arc<Mutex<Option<ConfigResponse>>>,
@@ -195,8 +196,7 @@ impl BamConnection {
                 _ = outbound_tick_interval.tick() => {
                     while let Ok(outbound) = outbound_receiver.try_recv() {
                         match outbound.msg {
-                            Some(Msg::LeaderState(mut leader_state)) => {
-                                leader_state.results = std::mem::take(&mut waiting_results);
+                            Some(Msg::LeaderState(leader_state)) => {
                                 metrics.leaderstate_sent.fetch_add(1, Relaxed);
                                 let outbound = StartSchedulerMessageV0 {
                                     msg: Some(Msg::LeaderState(leader_state)),
@@ -211,7 +211,16 @@ impl BamConnection {
                             }
                             _ => {}
                         }
-
+                    }
+                    if !waiting_results.is_empty() {
+                        let outbound = StartSchedulerMessageV0 {
+                            msg: Some(Msg::AtomicTxnBatchesResults(BatchesResults {
+                                results: std::mem::take(&mut waiting_results),
+                            })),
+                        };
+                        let _ = outbound_sender.try_send(v0_to_versioned_proto(outbound)).inspect_err(|_| {
+                            error!("Failed to send outbound message with results");
+                        });
                     }
                 }
             }
