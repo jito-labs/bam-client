@@ -3,7 +3,7 @@
 
 use {
     crate::bam_dependencies::v0_to_versioned_proto,
-    futures::{channel::mpsc, SinkExt, StreamExt},
+    futures::{SinkExt, StreamExt},
     jito_protos::proto::{
         bam_api::{
             bam_node_api_client::BamNodeApiClient, start_scheduler_message_v0::Msg,
@@ -21,6 +21,7 @@ use {
     },
     thiserror::Error,
     tokio::time::{interval, timeout},
+    tokio_stream::wrappers::ReceiverStream,
 };
 
 pub struct BamConnection {
@@ -46,9 +47,8 @@ impl BamConnection {
 
         let mut validator_client = BamNodeApiClient::new(channel);
 
-        let (outbound_sender, outbound_receiver_internal) = mpsc::channel(100_000);
-        let outbound_stream =
-            tonic::Request::new(outbound_receiver_internal.map(|req: StartSchedulerMessage| req));
+        let (outbound_sender, outbound_receiver_internal) = tokio::sync::mpsc::channel(8);
+        let outbound_stream = tonic::Request::new(ReceiverStream::new(outbound_receiver_internal));
         let inbound_stream = validator_client
             .start_scheduler_stream(outbound_stream)
             .await
@@ -89,7 +89,7 @@ impl BamConnection {
     async fn connection_task(
         exit: Arc<AtomicBool>,
         mut inbound_stream: tonic::Streaming<StartSchedulerResponse>,
-        mut outbound_sender: mpsc::Sender<StartSchedulerMessage>,
+        outbound_sender: tokio::sync::mpsc::Sender<StartSchedulerMessage>,
         mut validator_client: BamNodeApiClient<tonic::transport::channel::Channel>,
         config: Arc<Mutex<Option<ConfigResponse>>>,
         batch_sender: crossbeam_channel::Sender<AtomicTxnBatch>,
@@ -137,12 +137,19 @@ impl BamConnection {
             validator_client.clone(),
             metrics.clone(),
         ));
+        let outbound_forwarder_task = tokio::spawn(Self::outbound_forwarder(
+            exit.clone(),
+            outbound_receiver,
+            outbound_sender.clone(),
+            metrics.clone(),
+        ));
+
         while !exit.load(Relaxed) {
             tokio::select! {
                 _ = heartbeat_interval.tick() => {
-                    let _ = outbound_sender.try_send(v0_to_versioned_proto(StartSchedulerMessageV0 {
+                    let _ = outbound_sender.send(v0_to_versioned_proto(StartSchedulerMessageV0 {
                         msg: Some(Msg::HeartBeat(ValidatorHeartBeat {})),
-                    }));
+                    })).await;
                     metrics.heartbeat_sent.fetch_add(1, Relaxed);
                 }
                 _ = metrics_and_health_check_interval.tick() => {
@@ -189,27 +196,43 @@ impl BamConnection {
                         _ => {}
                     }
                 }
-                _ = outbound_tick_interval.tick() => {
-                    while let Ok(outbound) = outbound_receiver.try_recv() {
-                        match outbound.msg.as_ref() {
-                            Some(Msg::LeaderState(_)) => {
-                                metrics.leaderstate_sent.fetch_add(1, Relaxed);
-                            }
-                            Some(Msg::AtomicTxnBatchResult(_)) => {
-                                metrics.bundleresult_sent.fetch_add(1, Relaxed);
-                            }
-                            _ => {}
-                        }
-                        let _ = outbound_sender.try_send(v0_to_versioned_proto(outbound)).inspect_err(|_| {
-                            error!("Failed to send outbound message");
-                        });
-                        metrics.outbound_sent.fetch_add(1, Relaxed);
-                    }
-                }
             }
         }
+
         is_healthy.store(false, Relaxed);
         let _ = builder_config_task.await.ok();
+        let _ = outbound_forwarder_task.await.ok();
+    }
+
+    async fn outbound_forwarder(
+        exit: Arc<AtomicBool>,
+        outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessageV0>,
+        outbound_sender: tokio::sync::mpsc::Sender<StartSchedulerMessage>,
+        metrics: Arc<BamConnectionMetrics>,
+    ) {
+        while !exit.load(Relaxed) {
+            let Ok(outbound) = outbound_receiver.try_recv() else {
+                tokio::time::sleep(std::time::Duration::from_micros(100)).await;
+                continue;
+            };
+            match outbound.msg.as_ref() {
+                Some(Msg::LeaderState(_)) => {
+                    metrics.leaderstate_sent.fetch_add(1, Relaxed);
+                }
+                Some(Msg::AtomicTxnBatchResult(_)) => {
+                    metrics.bundleresult_sent.fetch_add(1, Relaxed);
+                }
+                _ => {}
+            }
+
+            outbound_sender
+                .send(v0_to_versioned_proto(outbound))
+                .await
+                .inspect_err(|_| {
+                    error!("Failed to send outbound message");
+                })
+                .ok();
+        }
     }
 
     async fn refresh_config_task(

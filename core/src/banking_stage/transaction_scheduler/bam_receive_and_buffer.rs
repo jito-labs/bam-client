@@ -355,7 +355,7 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
         let mut result = 0;
         const MAX_BUNDLES_PER_RECV: usize = 24;
         match decision {
-            BufferedPacketsDecision::Consume(_) | BufferedPacketsDecision::Hold => {
+            BufferedPacketsDecision::Consume(_) => {
                 while result < MAX_BUNDLES_PER_RECV {
                     let Ok(batch) = self.bundle_receiver.try_recv() else {
                         break;
@@ -389,6 +389,12 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
                     };
 
                     result += 1;
+                }
+            }
+            BufferedPacketsDecision::Hold => {
+                let deadline = Instant::now() + Duration::from_millis(1);
+                while let Ok(batch) = self.bundle_receiver.recv_deadline(deadline) {
+                    self.send_no_leader_slot_txn_batch_result(batch.seq_id);
                 }
             }
             BufferedPacketsDecision::ForwardAndHold | BufferedPacketsDecision::Forward => {
