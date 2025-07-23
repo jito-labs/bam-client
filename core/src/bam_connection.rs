@@ -13,7 +13,7 @@ use {
     }, prost::Message, solana_gossip::cluster_info::ClusterInfo, solana_sdk::{signature::Keypair, signer::Signer}, std::sync::{
         atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
         Arc, Mutex,
-    }, thiserror::Error, tokio::time::{interval, timeout}, tokio_tungstenite::connect_async, websocket_lite::ClientBuilder
+    }, thiserror::Error, tokio::time::{interval, timeout}, tokio_tungstenite::connect_async,
 };
 
 pub struct BamConnection {
@@ -118,7 +118,7 @@ impl BamConnection {
             while !exit_clone.load(Relaxed) {
                 if let Some(outbound) = outbound_receiver.next().await {
                     let msg = outbound.encode_to_vec();
-                    if let Err(e) = write.send(tokio_tungstenite::tungstenite::Message::Binary(msg)).await {
+                    if let Err(_) = write.send(tokio_tungstenite::tungstenite::Message::Binary(msg)).await {
                         break;
                     }
                 }
@@ -344,6 +344,7 @@ impl Drop for BamConnection {
         self.exit.store(true, Relaxed);
         std::thread::sleep(std::time::Duration::from_millis(10));
         self.background_task.abort();
+        self.websocket_thread.abort();
     }
 }
 
