@@ -2,7 +2,7 @@
 /// for the slots it was connected to as a leader.
 /// It will calculate the payment amount based on the fees collected in that slot.
 /// The payment is sent as a transfer transaction with a memo indicating the slot.
-/// The payment is sent with a 1% commission.
+/// The payment is sent with a 3% commission.
 use {
     crate::bam_dependencies::BamDependencies,
     solana_client::rpc_client::RpcClient,
@@ -20,7 +20,7 @@ use {
     },
 };
 
-pub const COMMISSION_PERCENTAGE: u64 = 1; // 1% commission
+pub const COMMISSION_PERCENTAGE: u64 = 3; // 3% commission
 const LOCALHOST: &str = "http://localhost:8899";
 
 pub struct BamPaymentSender {
