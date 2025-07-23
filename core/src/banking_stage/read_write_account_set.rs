@@ -48,18 +48,18 @@ impl ReadWriteAccountSet {
     }
 
     /// Check if an account can be read-locked
-    fn can_read(&self, pubkey: &Pubkey) -> bool {
+    pub fn can_read(&self, pubkey: &Pubkey) -> bool {
         !self.write_set.contains(pubkey)
     }
 
     /// Check if an account can be write-locked
-    fn can_write(&self, pubkey: &Pubkey) -> bool {
+    pub fn can_write(&self, pubkey: &Pubkey) -> bool {
         !self.write_set.contains(pubkey) && !self.read_set.contains(pubkey)
     }
 
     /// Add an account to the read-set.
     /// Returns true if the lock was available.
-    fn add_read(&mut self, pubkey: &Pubkey) -> bool {
+    pub fn add_read(&mut self, pubkey: &Pubkey) -> bool {
         let can_read = self.can_read(pubkey);
         self.read_set.insert(*pubkey);
 
@@ -68,7 +68,7 @@ impl ReadWriteAccountSet {
 
     /// Add an account to the write-set.
     /// Returns true if the lock was available.
-    fn add_write(&mut self, pubkey: &Pubkey) -> bool {
+    pub fn add_write(&mut self, pubkey: &Pubkey) -> bool {
         let can_write = self.can_write(pubkey);
         self.write_set.insert(*pubkey);
 
