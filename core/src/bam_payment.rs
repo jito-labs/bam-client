@@ -105,7 +105,7 @@ impl BamPaymentSender {
             return true;
         }
 
-        let payment_pubkey = dependencies.bam_node_pubkey.lock().unwrap().clone();
+        let payment_pubkey = *dependencies.bam_node_pubkey.lock().unwrap();
         let rpc_url = dependencies
             .cluster_info
             .my_contact_info()
@@ -159,7 +159,7 @@ impl BamPaymentSender {
             if current_slot.saturating_sub(*slot) < 32 {
                 continue;
             }
-            let Some(payment_amount) = Self::calculate_payment_amount(&blockstore, *slot) else {
+            let Some(payment_amount) = Self::calculate_payment_amount(blockstore, *slot) else {
                 break;
             };
 
