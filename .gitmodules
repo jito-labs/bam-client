@@ -7,6 +7,6 @@
 [submodule "jito-protos/protos"]
 	path = jito-protos/protos
 	url = https://github.com/jito-labs/mev-protos.git
-[submodule "jito-protos/jss-protos"]
-	path = jito-protos/jss-protos
-	url = git@github.com:jito-labs/jss-protos.git
+[submodule "jito-protos/bam-protos"]
+	path = jito-protos/bam-protos
+	url = git@github.com:jito-labs/bam-protos.git
