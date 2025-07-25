@@ -1,4 +1,5 @@
 use agave_feature_set::FEATURE_NAMES;
+use solana_sdk::signature::read_keypair_file;
 use {
     crate::config::{CustomValidatorConfig, LocalClusterConfig},
     anyhow::{Context, Result},
@@ -31,9 +32,8 @@ use {
     solana_vote_program::vote_state,
     std::{
         borrow::Borrow,
-        fs,
         net::SocketAddr,
-        path::{Path, PathBuf},
+        path::PathBuf,
         process::{Child, Command, Stdio},
         str::FromStr,
         sync::{Arc, Mutex},
@@ -333,16 +333,16 @@ impl BamLocalCluster {
         const BOOTSTRAP_GOSSIP_PORT: u16 = 8001;
         const BOOTSTRAP_RPC_PORT: u16 = 8899;
 
-        // Generate keypairs for all validators
-        let num_validators = config.validators.len();
-        let vote_keypairs: Vec<ValidatorVoteKeypairs> = (0..num_validators)
-            .map(|_| ValidatorVoteKeypairs {
-                node_keypair: Keypair::new(),
-                vote_keypair: Keypair::new(),
+        let mut vote_keypairs = Vec::new();
+        for validator in &config.validators {
+            vote_keypairs.push(ValidatorVoteKeypairs {
+                node_keypair: read_keypair_file(&validator.node_keypair)?,
+                vote_keypair: read_keypair_file(&validator.vote_keypair)?,
                 stake_keypair: Keypair::new(),
-            })
-            .collect();
-        let stakes = vec![DEFAULT_NODE_STAKE; num_validators];
+            });
+        }
+
+        let stakes = vec![DEFAULT_NODE_STAKE; config.validators.len()];
         let genesis_config_info = Self::create_genesis_config_with_vote_accounts_and_cluster_type(
             solana_local_cluster::local_cluster::DEFAULT_MINT_LAMPORTS,
             &vote_keypairs,
@@ -368,26 +368,14 @@ impl BamLocalCluster {
         // Process all validators
         for (i, validator_config) in config.validators.iter().enumerate() {
             let is_bootstrap = i == 0; // First validator is always bootstrap
-            let ValidatorVoteKeypairs {
-                node_keypair,
-                vote_keypair,
-                stake_keypair: _,
-            } = &vote_keypairs[i];
-
-            // Setup ledger before creating validator
-            let node_name = if is_bootstrap {
-                "bootstrap-ledger".to_string()
-            } else {
-                format!("validator-{}", i)
-            };
-            let ledger_path = Path::new(&config.ledger_base_directory).join(&node_name);
-            if ledger_path.exists() {
-                fs::remove_dir_all(&ledger_path)?;
+            let ledger_path = validator_config.ledger_path.clone();
+            if !ledger_path.exists() {
+                return Err(anyhow::anyhow!(
+                    "Ledger path does not exist: {}",
+                    ledger_path.display()
+                )
+                .into());
             }
-            fs::create_dir_all(&ledger_path).context(format!(
-                "Failed to create ledger directory: {:?}",
-                ledger_path
-            ))?;
 
             // Create ledger and snapshot if bootstrap; other validators need to have snapshot
             // to download from the bootstrap validator to start
@@ -407,18 +395,6 @@ impl BamLocalCluster {
                 expected_bank_hash = Some(bank_hash);
             }
 
-            let identity_path = ledger_path.join("identity.json");
-            let vote_path = ledger_path.join("vote.json");
-
-            fs::write(
-                &identity_path,
-                serde_json::to_string_pretty(&node_keypair.to_bytes().to_vec())?,
-            )?;
-            fs::write(
-                &vote_path,
-                serde_json::to_string_pretty(&vote_keypair.to_bytes().to_vec())?,
-            )?;
-
             let log_file_path = ledger_path.join("validator.log");
 
             let dynamic_port_range_start = 8_000 + (i * 1000) as u64;
@@ -427,7 +403,7 @@ impl BamLocalCluster {
             let validator = BamValidator::start_process(
                 &ledger_path,
                 &log_file_path,
-                &node_name,
+                &format!("validator-{}", i + 1),
                 is_bootstrap.then_some(BOOTSTRAP_GOSSIP_PORT),
                 if is_bootstrap {
                     BOOTSTRAP_RPC_PORT
@@ -444,8 +420,8 @@ impl BamLocalCluster {
                     None
                 },
                 expected_bank_hash.clone(),
-                &identity_path,
-                &vote_path,
+                &validator_config.node_keypair,
+                &validator_config.vote_keypair,
                 &runtime,
                 &validator_config,
             )?;

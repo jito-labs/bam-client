@@ -14,9 +14,14 @@ pub struct LocalClusterConfig {
     pub validators: Vec<CustomValidatorConfig>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CustomValidatorConfig {
     pub geyser_config: Option<PathBuf>,
+    pub node_keypair: PathBuf,
+    pub node_pubkey: String,
+    pub vote_keypair: PathBuf,
+    pub vote_pubkey: String,
+    pub ledger_path: PathBuf,
 }
 
 #[derive(Debug, Serialize, Clone)]
