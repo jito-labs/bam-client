@@ -132,8 +132,8 @@ solana-unified-scheduler-pool = { workspace = true }
 solana-version = { workspace = true }
 solana-vote = { workspace = true }
 solana-vote-program = { workspace = true }
-spl-memo = { workspace = true, features = ["no-entrypoint"] }
 solana-wen-restart = { workspace = true }
+spl-memo = { workspace = true, features = ["no-entrypoint"] }
 strum = { workspace = true, features = ["derive"] }
 strum_macros = { workspace = true }
 sys-info = { workspace = true }
