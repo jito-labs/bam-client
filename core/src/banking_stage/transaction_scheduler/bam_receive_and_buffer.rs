@@ -10,6 +10,8 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use crate::bam_dependencies::BamOutboundMessage;
+
 use {
     super::{
         receive_and_buffer::ReceiveAndBuffer,
@@ -28,7 +30,6 @@ use {
     crossbeam_channel::Sender,
     itertools::Itertools,
     jito_protos::proto::{
-        bam_api::{start_scheduler_message_v0::Msg, StartSchedulerMessageV0},
         bam_types::{
             atomic_txn_batch_result, not_committed::Reason, AtomicTxnBatch,
             DeserializationErrorReason, Packet, SchedulingError,
@@ -50,7 +51,7 @@ use {
 pub struct BamReceiveAndBuffer {
     bam_enabled: Arc<AtomicBool>,
     bundle_receiver: crossbeam_channel::Receiver<AtomicTxnBatch>,
-    response_sender: Sender<StartSchedulerMessageV0>,
+    response_sender: Sender<BamOutboundMessage>,
     bank_forks: Arc<RwLock<BankForks>>,
 }
 
@@ -58,7 +59,7 @@ impl BamReceiveAndBuffer {
     pub fn new(
         bam_enabled: Arc<AtomicBool>,
         bundle_receiver: crossbeam_channel::Receiver<AtomicTxnBatch>,
-        response_sender: Sender<StartSchedulerMessageV0>,
+        response_sender: Sender<BamOutboundMessage>,
         bank_forks: Arc<RwLock<BankForks>>,
     ) -> Self {
         Self {
@@ -81,25 +82,12 @@ impl BamReceiveAndBuffer {
             solana_packet.buffer_mut()[0..len_to_copy]
                 .copy_from_slice(&packet.data[0..len_to_copy]);
             if let Some(meta) = &packet.meta {
-                if let Some(addr) = &meta.addr.parse().ok() {
-                    solana_packet.meta_mut().addr = *addr;
-                }
-                solana_packet.meta_mut().port = meta.port as u16;
                 if let Some(flags) = &meta.flags {
                     if flags.simple_vote_tx {
                         solana_packet
                             .meta_mut()
                             .flags
                             .insert(PacketFlags::SIMPLE_VOTE_TX);
-                    }
-                    if flags.forwarded {
-                        solana_packet
-                            .meta_mut()
-                            .flags
-                            .insert(PacketFlags::FORWARDED);
-                    }
-                    if flags.repair {
-                        solana_packet.meta_mut().flags.insert(PacketFlags::REPAIR);
                     }
                 }
             }
@@ -111,52 +99,43 @@ impl BamReceiveAndBuffer {
     }
 
     fn send_bundle_not_committed_result(&self, seq_id: u32, reason: Reason) {
-        let _ = self.response_sender.try_send(StartSchedulerMessageV0 {
-            msg: Some(Msg::AtomicTxnBatchResult(
-                jito_protos::proto::bam_types::AtomicTxnBatchResult {
-                    seq_id,
-                    result: Some(atomic_txn_batch_result::Result::NotCommitted(
-                        jito_protos::proto::bam_types::NotCommitted {
-                            reason: Some(reason),
-                        },
-                    )),
-                },
-            )),
-        });
+        let _ = self.response_sender.try_send(BamOutboundMessage::AtomicTxnBatchResult(
+            jito_protos::proto::bam_types::AtomicTxnBatchResult {
+                seq_id,
+                result: Some(atomic_txn_batch_result::Result::NotCommitted(
+                    jito_protos::proto::bam_types::NotCommitted {
+                        reason: Some(reason),
+                    },
+                )),
+            }));
     }
 
     fn send_no_leader_slot_txn_batch_result(&self, seq_id: u32) {
-        let _ = self.response_sender.try_send(StartSchedulerMessageV0 {
-            msg: Some(Msg::AtomicTxnBatchResult(
-                jito_protos::proto::bam_types::AtomicTxnBatchResult {
-                    seq_id,
-                    result: Some(atomic_txn_batch_result::Result::NotCommitted(
-                        jito_protos::proto::bam_types::NotCommitted {
-                            reason: Some(Reason::SchedulingError(
-                                SchedulingError::OutsideLeaderSlot as i32,
-                            )),
-                        },
-                    )),
-                },
-            )),
-        });
+        let _ = self.response_sender.try_send(BamOutboundMessage::AtomicTxnBatchResult(
+            jito_protos::proto::bam_types::AtomicTxnBatchResult {
+                seq_id,
+                result: Some(atomic_txn_batch_result::Result::NotCommitted(
+                    jito_protos::proto::bam_types::NotCommitted {
+                        reason: Some(Reason::SchedulingError(
+                            SchedulingError::OutsideLeaderSlot as i32,
+                        )),
+                    },
+                )),
+            }));
     }
 
     fn send_container_full_txn_batch_result(&self, seq_id: u32) {
-        let _ = self.response_sender.try_send(StartSchedulerMessageV0 {
-            msg: Some(Msg::AtomicTxnBatchResult(
-                jito_protos::proto::bam_types::AtomicTxnBatchResult {
-                    seq_id,
-                    result: Some(atomic_txn_batch_result::Result::NotCommitted(
-                        jito_protos::proto::bam_types::NotCommitted {
-                            reason: Some(Reason::SchedulingError(
-                                SchedulingError::ContainerFull as i32,
-                            )),
-                        },
-                    )),
-                },
-            )),
-        });
+        let _ = self.response_sender.try_send(BamOutboundMessage::AtomicTxnBatchResult(
+            jito_protos::proto::bam_types::AtomicTxnBatchResult {
+                seq_id,
+                result: Some(atomic_txn_batch_result::Result::NotCommitted(
+                    jito_protos::proto::bam_types::NotCommitted {
+                        reason: Some(Reason::SchedulingError(
+                            SchedulingError::ContainerFull as i32,
+                        )),
+                    },
+                )),
+            }));
     }
 
     fn parse_batch(
@@ -461,10 +440,10 @@ mod tests {
     ) -> (
         BamReceiveAndBuffer,
         TransactionStateContainer<RuntimeTransaction<SanitizedTransaction>>,
-        crossbeam_channel::Receiver<StartSchedulerMessageV0>,
+        crossbeam_channel::Receiver<BamOutboundMessage>,
     ) {
         let (response_sender, response_receiver) =
-            crossbeam_channel::unbounded::<StartSchedulerMessageV0>();
+            crossbeam_channel::unbounded::<BamOutboundMessage>();
         let receive_and_buffer = BamReceiveAndBuffer::new(
             Arc::new(AtomicBool::new(true)),
             receiver,
@@ -509,7 +488,7 @@ mod tests {
             Receiver<AtomicTxnBatch>,
             Arc<RwLock<BankForks>>,
         )
-            -> (R, R::Container, Receiver<StartSchedulerMessageV0>),
+            -> (R, R::Container, Receiver<BamOutboundMessage>),
     ) {
         let (sender, receiver) = unbounded();
         let (bank_forks, mint_keypair) = test_bank_forks();
@@ -576,8 +555,8 @@ mod tests {
         verify_container(&mut container, 0);
         let response = response_receiver.recv().unwrap();
         assert!(matches!(
-            response.msg,
-            Some(Msg::AtomicTxnBatchResult(txn_batch_result)) if txn_batch_result.seq_id == 1 &&
+            response,
+            BamOutboundMessage::AtomicTxnBatchResult(txn_batch_result) if txn_batch_result.seq_id == 1 &&
             matches!(&txn_batch_result.result, Some(atomic_txn_batch_result::Result::NotCommitted(not_committed)) if
                 matches!(not_committed.reason, Some(Reason::DeserializationError(_))))
         ));

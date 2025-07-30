@@ -10,8 +10,10 @@ use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, RwLock,
-    },
+    }, time::SystemTime,
 };
+use jito_protos::proto::bam_api::ConfigResponse;
+
 use {
     crate::{
         bam_connection::BamConnection,
@@ -20,7 +22,6 @@ use {
         proxy::block_engine_stage::BlockBuilderFeeInfo,
     },
     jito_protos::proto::{
-        bam_api::{start_scheduler_message_v0::Msg, ConfigResponse, StartSchedulerMessageV0},
         bam_types::{LeaderState, Socket},
     },
     solana_gossip::cluster_info::ClusterInfo,
@@ -151,9 +152,9 @@ impl BamManager {
                     payment_sender.send_slot(leader_state.slot);
                     let _ = dependencies
                         .outbound_sender
-                        .try_send(StartSchedulerMessageV0 {
-                            msg: Some(Msg::LeaderState(leader_state)),
-                        });
+                        .try_send(crate::bam_dependencies::BamOutboundMessage::LeaderState(
+                            leader_state,
+                        ));
                 }
             }
 
@@ -174,6 +175,10 @@ impl BamManager {
             slot: bank.slot(),
             tick: (bank.tick_height() % bank.ticks_per_slot()) as u32,
             slot_cu_budget,
+            time_sent_microseconds: SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_micros() as u64,
         }
     }
 

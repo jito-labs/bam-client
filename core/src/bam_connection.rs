@@ -2,7 +2,7 @@
 // Keeps track of last received heartbeat 'behind the scenes' and will mark itself as unhealthy if no heartbeat is received
 
 use {
-    crate::bam_dependencies::v0_to_versioned_proto,
+    crate::bam_dependencies::{v0_to_versioned_proto, BamOutboundMessage},
     futures::{channel::mpsc, SinkExt, StreamExt},
     jito_protos::proto::{
         bam_api::{
@@ -38,7 +38,7 @@ impl BamConnection {
         url: String,
         cluster_info: Arc<ClusterInfo>,
         batch_sender: crossbeam_channel::Sender<AtomicTxnBatch>,
-        outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessageV0>,
+        outbound_receiver: crossbeam_channel::Receiver<BamOutboundMessage>,
     ) -> Result<Self, TryInitError> {
         let backend_endpoint = tonic::transport::Endpoint::from_shared(url.clone())?;
         let connection_timeout = std::time::Duration::from_secs(5);
@@ -97,7 +97,7 @@ impl BamConnection {
         cluster_info: Arc<ClusterInfo>,
         metrics: Arc<BamConnectionMetrics>,
         is_healthy: Arc<AtomicBool>,
-        outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessageV0>,
+        outbound_receiver: crossbeam_channel::Receiver<BamOutboundMessage>,
     ) {
         let mut last_heartbeat = std::time::Instant::now();
         let mut heartbeat_interval = interval(std::time::Duration::from_secs(5));
@@ -195,8 +195,8 @@ impl BamConnection {
                 }
                 _ = outbound_tick_interval.tick() => {
                     while let Ok(outbound) = outbound_receiver.try_recv() {
-                        match outbound.msg {
-                            Some(Msg::LeaderState(leader_state)) => {
+                        match outbound {
+                            BamOutboundMessage::LeaderState(leader_state) => {
                                 metrics.leaderstate_sent.fetch_add(1, Relaxed);
                                 let outbound = StartSchedulerMessageV0 {
                                     msg: Some(Msg::LeaderState(leader_state)),
@@ -205,7 +205,7 @@ impl BamConnection {
                                     error!("Failed to send outbound message");
                                 });
                             }
-                            Some(Msg::AtomicTxnBatchResult(result)) => {
+                            BamOutboundMessage::AtomicTxnBatchResult(result) => {
                                 metrics.bundleresult_sent.fetch_add(1, Relaxed);
                                 waiting_results.push(result.clone());
                             }
