@@ -414,12 +414,6 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                 continue;
             }
 
-            info!(
-                "Scheduling batch {} with {} transactions",
-                next_batch_id.id,
-                batch_ids.len()
-            );
-
             let txns = batch_ids
                 .iter()
                 .filter_map(|id| container.get_transaction_ttl(*id))
@@ -447,8 +441,6 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                 continue;
             }
 
-            info!("passed blocking locks check");
-
             // 2. Check thread locks
             let thread_selector = |thead_set: ThreadSet| {
                 Self::least_loaded_worker(
@@ -473,16 +465,12 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                 continue;
             };
 
-            info!("passed thread locks check, worker index: {}", worker_index);
-
             // If too much scheduled on that thread; we skip as we want some optionality for parallelization down the line
             if self.workers_scheduled_count[worker_index] >= MAX_TXN_PER_BATCH {
                 self.thread_locks.unlock_accounts(write_account_locks.iter(), read_account_locks.iter(), worker_index);
                 skipped.push(next_batch_id);
                 continue;
             }
-
-            info!("Worker {} is selected for scheduling", worker_index);
 
             // 3. Send to worker
             let batch_id = self.get_next_schedule_id();
@@ -499,12 +487,6 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
             );
             self.send_to_worker(worker_index, priority_ids, work, write_account_locks, read_account_locks);
             num_scheduled += 1;
-
-            info!(
-                "Scheduled batch {} to worker {}",
-                next_batch_id.id,
-                worker_index
-            );
         }
 
         // Push everything skipped back into container
