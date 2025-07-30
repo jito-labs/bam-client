@@ -37,7 +37,7 @@ use {
     solana_svm_transaction::svm_message::SVMMessage,
 };
 
-const MAX_TXN_PER_BATCH: usize = 8;
+const MAX_TXN_PER_BATCH: usize = 2;
 
 pub struct BamScheduler<Tx: TransactionWithMeta> {
     workers_scheduled_count: Vec<usize>,
@@ -50,6 +50,8 @@ pub struct BamScheduler<Tx: TransactionWithMeta> {
     next_batch_id: u64,
     inflight_batch_info: HashMap<TransactionBatchId, InflightBatchInfo>,
     slot: Option<Slot>,
+
+    unblockable_accounts: HashSet<Pubkey>,
 
     // Reusable objects to avoid allocations
     reusable_consume_work: Vec<ConsumeWork<Tx>>,
@@ -72,6 +74,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         consume_work_senders: Vec<Sender<ConsumeWork<Tx>>>,
         finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
         response_sender: Sender<BamOutboundMessage>,
+        unblockable_accounts: HashSet<Pubkey>,
     ) -> Self {
         let worker_count = consume_work_senders.len();
         Self {
@@ -86,6 +89,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             reusable_consume_work: Vec::new(),
             reusable_priority_ids: Vec::new(),
             reusable_locks: Vec::new(),
+            unblockable_accounts,
         }
     }
 
@@ -401,13 +405,18 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         batch_id: TransactionPriorityId,
         read_locks: &HashSet<Pubkey>,
         write_locks: &HashSet<Pubkey>,
+        unblockable_accounts: &HashSet<Pubkey>,
     ) {
         skipped.push(batch_id);
         for write in write_locks.iter() {
-            blocking_locks.add_write(write);
+            if !unblockable_accounts.contains(write) {
+                blocking_locks.add_write(write);
+            }
         }
         for read in read_locks.iter() {
-            blocking_locks.add_read(read);
+            if !unblockable_accounts.contains(read) {
+                blocking_locks.add_read(read);
+            }
         }
     }
 }
@@ -472,8 +481,9 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                     &mut skipped,
                     &mut blocking_locks,
                     next_batch_id,
-                    &&&read_account_locks,
-                    &&&write_account_locks,
+                    &read_account_locks,
+                    &write_account_locks,
+                    &self.unblockable_accounts,
                 );
                 self.recycle_locks(write_account_locks);
                 self.recycle_locks(read_account_locks);
@@ -498,8 +508,9 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                     &mut skipped,
                     &mut blocking_locks,
                     next_batch_id,
-                    &&read_account_locks,
-                    &&write_account_locks,
+                    &read_account_locks,
+                    &write_account_locks,
+                    &self.unblockable_accounts,
                 );
                 self.recycle_locks(write_account_locks);
                 self.recycle_locks(read_account_locks);
@@ -515,6 +526,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                     next_batch_id,
                     &read_account_locks,
                     &write_account_locks,
+                    &self.unblockable_accounts,
                 );
                 self.recycle_locks(write_account_locks);
                 self.recycle_locks(read_account_locks);
@@ -648,22 +660,10 @@ mod tests {
                     transaction_state_container::{StateContainer, TransactionStateContainer},
                 },
             },
-        },
-        crossbeam_channel::unbounded,
-        itertools::Itertools,
-        jito_protos::proto::{
-            bam_types::{
+        }, ahash::HashSet, crossbeam_channel::unbounded, itertools::Itertools, jito_protos::proto::bam_types::{
                 atomic_txn_batch_result::Result::{Committed, NotCommitted},
                 TransactionCommittedResult,
-            },
-        },
-        solana_ledger::genesis_utils::GenesisConfigInfo,
-        solana_perf::packet::Packet,
-        solana_poh::poh_recorder::BankStart,
-        solana_pubkey::Pubkey,
-        solana_runtime::{bank::Bank, bank_forks::BankForks},
-        solana_runtime_transaction::runtime_transaction::RuntimeTransaction,
-        solana_sdk::{
+            }, solana_ledger::genesis_utils::GenesisConfigInfo, solana_perf::packet::Packet, solana_poh::poh_recorder::BankStart, solana_pubkey::Pubkey, solana_runtime::{bank::Bank, bank_forks::BankForks}, solana_runtime_transaction::runtime_transaction::RuntimeTransaction, solana_sdk::{
             compute_budget::ComputeBudgetInstruction,
             hash::Hash,
             message::Message,
@@ -671,12 +671,11 @@ mod tests {
             signer::Signer,
             system_instruction::transfer_many,
             transaction::{SanitizedTransaction, Transaction},
-        },
-        std::{
+        }, std::{
             borrow::Borrow,
             sync::{Arc, RwLock},
             time::Instant,
-        },
+        }
     };
 
     struct TestScheduler {
@@ -698,6 +697,7 @@ mod tests {
             consume_work_senders,
             finished_consume_work_receiver,
             response_sender,
+            HashSet::default(),
         );
         TestScheduler {
             scheduler,
