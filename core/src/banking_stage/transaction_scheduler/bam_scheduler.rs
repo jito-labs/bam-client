@@ -7,6 +7,8 @@ use crate::banking_stage::transaction_scheduler::scheduler_common::SchedulingCom
 use crate::banking_stage::transaction_scheduler::transaction_state::TransactionState;
 use solana_clock::Slot;
 use std::time::Instant;
+use crate::bam_dependencies::BamOutboundMessage;
+
 use {
     super::{
         bam_receive_and_buffer::priority_to_seq_id,
@@ -26,7 +28,6 @@ use {
     ahash::HashMap,
     crossbeam_channel::{Receiver, Sender},
     jito_protos::proto::{
-        bam_api::{start_scheduler_message_v0::Msg, StartSchedulerMessageV0},
         bam_types::{atomic_txn_batch_result, not_committed::Reason, SchedulingError},
     },
     prio_graph::{AccessKind, GraphNode, PrioGraph},
@@ -57,7 +58,7 @@ pub struct BamScheduler<Tx: TransactionWithMeta> {
     workers_scheduled_count: Vec<usize>,
     consume_work_senders: Vec<Sender<ConsumeWork<Tx>>>,
     finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
-    response_sender: Sender<StartSchedulerMessageV0>,
+    response_sender: Sender<BamOutboundMessage>,
 
     next_batch_id: u64,
     inflight_batch_info: HashMap<TransactionBatchId, InflightBatchInfo>,
@@ -83,7 +84,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
     pub fn new(
         consume_work_senders: Vec<Sender<ConsumeWork<Tx>>>,
         finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
-        response_sender: Sender<StartSchedulerMessageV0>,
+        response_sender: Sender<BamOutboundMessage>,
     ) -> Self {
         Self {
             workers_scheduled_count: vec![0; consume_work_senders.len()],
@@ -331,31 +332,25 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
     }
 
     fn send_no_leader_slot_bundle_result(&self, seq_id: u32) {
-        let _ = self.response_sender.try_send(StartSchedulerMessageV0 {
-            msg: Some(Msg::AtomicTxnBatchResult(
-                jito_protos::proto::bam_types::AtomicTxnBatchResult {
-                    seq_id,
-                    result: Some(atomic_txn_batch_result::Result::NotCommitted(
-                        jito_protos::proto::bam_types::NotCommitted {
-                            reason: Some(Reason::SchedulingError(
-                                SchedulingError::OutsideLeaderSlot as i32,
-                            )),
-                        },
-                    )),
-                },
-            )),
-        });
+        let _ = self.response_sender.try_send(BamOutboundMessage::AtomicTxnBatchResult(
+            jito_protos::proto::bam_types::AtomicTxnBatchResult {
+                seq_id,
+                result: Some(atomic_txn_batch_result::Result::NotCommitted(
+                    jito_protos::proto::bam_types::NotCommitted {
+                        reason: Some(Reason::SchedulingError(
+                            SchedulingError::OutsideLeaderSlot as i32,
+                        )),
+                    },
+                )),
+            }));
     }
 
     fn send_back_result(&self, seq_id: u32, result: atomic_txn_batch_result::Result) {
-        let _ = self.response_sender.try_send(StartSchedulerMessageV0 {
-            msg: Some(Msg::AtomicTxnBatchResult(
-                jito_protos::proto::bam_types::AtomicTxnBatchResult {
-                    seq_id,
-                    result: Some(result),
-                },
-            )),
-        });
+        let _ = self.response_sender.try_send(BamOutboundMessage::AtomicTxnBatchResult(
+            jito_protos::proto::bam_types::AtomicTxnBatchResult {
+                seq_id,
+                result: Some(result),
+            }));
     }
 
     /// Generates a `bundle_result::Result` based on the processed results for 'revert_on_error' batches.
@@ -624,7 +619,7 @@ mod tests {
         crossbeam_channel::unbounded,
         itertools::Itertools,
         jito_protos::proto::{
-            bam_api::{start_scheduler_message_v0::Msg, StartSchedulerMessageV0},
+            bam_api::{scheduler_message_v0::Msg, SchedulerMessageV0},
             bam_types::{
                 atomic_txn_batch_result::Result::{Committed, NotCommitted},
                 TransactionCommittedResult,
@@ -657,7 +652,7 @@ mod tests {
         finished_consume_work_sender: crossbeam_channel::Sender<
             FinishedConsumeWork<RuntimeTransaction<SanitizedTransaction>>,
         >,
-        response_receiver: crossbeam_channel::Receiver<StartSchedulerMessageV0>,
+        response_receiver: crossbeam_channel::Receiver<SchedulerMessageV0>,
     }
 
     fn create_test_scheduler(num_threads: usize) -> TestScheduler {
@@ -888,7 +883,7 @@ mod tests {
         let response = response_receiver.try_recv().unwrap();
         assert!(response.msg.is_some(), "Response should contain a message");
         let msg = response.msg.unwrap();
-        let Msg::AtomicTxnBatchResult(bundle_result) = msg else {
+        let Msg::BatchesResult(bundle_result) = msg else {
             panic!("Expected AtomicTxnBatchResult message");
         };
         assert_eq!(bundle_result.seq_id, 0);
@@ -914,7 +909,7 @@ mod tests {
         let response = response_receiver.try_recv().unwrap();
         assert!(response.msg.is_some(), "Response should contain a message");
         let msg = response.msg.unwrap();
-        let Msg::AtomicTxnBatchResult(bundle_result) = msg else {
+        let Msg::BatchesResult(bundle_result) = msg else {
             panic!("Expected AtomicTxnBatchResult message");
         };
         assert_eq!(bundle_result.seq_id, 3);
@@ -995,7 +990,7 @@ mod tests {
         let response = response_receiver.try_recv().unwrap();
         assert!(response.msg.is_some(), "Response should contain a message");
         let msg = response.msg.unwrap();
-        let Msg::AtomicTxnBatchResult(bundle_result) = msg else {
+        let Msg::BatchesResult(bundle_result) = msg else {
             panic!("Expected AtomicTxnBatchResult message");
         };
         assert_eq!(bundle_result.seq_id, 1);
@@ -1037,7 +1032,7 @@ mod tests {
         let response = response_receiver.try_recv().unwrap();
         assert!(response.msg.is_some(), "Response should contain a message");
         let msg = response.msg.unwrap();
-        let Msg::AtomicTxnBatchResult(bundle_result) = msg else {
+        let Msg::BatchesResult(bundle_result) = msg else {
             panic!("Expected AtomicTxnBatchResult message");
         };
         assert_eq!(bundle_result.seq_id, 2);
