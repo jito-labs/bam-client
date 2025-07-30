@@ -1,7 +1,7 @@
 /// A Scheduled implementation that pulls batches off the container, and then
 /// schedules them to workers in a FIFO, account-aware manner. This is facilitated by the
 /// `PrioGraph` data structure, which is a directed graph that tracks the dependencies.
-use ahash::HashSet;
+use ahash::{HashSet, HashSetExt};
 use prio_graph::AccessKind;
 
 use crate::banking_stage::{read_write_account_set::ReadWriteAccountSet, transaction_scheduler::thread_aware_account_locks::{ThreadAwareAccountLocks, ThreadSet}};
@@ -54,6 +54,7 @@ pub struct BamScheduler<Tx: TransactionWithMeta> {
     // Reusable objects to avoid allocations
     reusable_consume_work: Vec<ConsumeWork<Tx>>,
     reusable_priority_ids: Vec<Vec<TransactionPriorityId>>,
+    reusable_locks: Vec<HashSet<Pubkey>>,
 }
 
 // A structure to hold information about inflight batches.
@@ -84,6 +85,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             slot: None,
             reusable_consume_work: Vec::new(),
             reusable_priority_ids: Vec::new(),
+            reusable_locks: Vec::new(),
         }
     }
 
@@ -172,6 +174,19 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
     fn recycle_priority_ids(&mut self, mut priority_ids: Vec<TransactionPriorityId>) {
         priority_ids.clear();
         self.reusable_priority_ids.push(priority_ids);
+    }
+
+    fn get_or_create_locks(&mut self) -> HashSet<Pubkey> {
+        if let Some(locks) = self.reusable_locks.pop() {
+            locks
+        } else {
+            HashSet::with_capacity(MAX_TXN_PER_BATCH)
+        }
+    }
+
+    fn recycle_locks(&mut self, mut locks: HashSet<Pubkey>) {
+        locks.clear();
+        self.reusable_locks.push(locks);
     }
 
     fn generate_work(
@@ -384,8 +399,8 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         skipped: &mut Vec<TransactionPriorityId>,
         blocking_locks: &mut ReadWriteAccountSet,
         batch_id: TransactionPriorityId,
-        read_locks: HashSet<Pubkey>,
-        write_locks: HashSet<Pubkey>,
+        read_locks: &HashSet<Pubkey>,
+        write_locks: &HashSet<Pubkey>,
     ) {
         skipped.push(batch_id);
         for write in write_locks.iter() {
@@ -436,9 +451,10 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                 .collect::<Vec<_>>();
 
             // 1. Check blocking locks and extract account locks
-            let mut write_account_locks = HashSet::default();
-            let mut read_account_locks = HashSet::default();
+            let mut write_account_locks = self.get_or_create_locks();
+            let mut read_account_locks = self.get_or_create_locks();
             let mut any_blocked = false;
+            let mut thread_set = ThreadSet::any(self.consume_work_senders.len());
             for (key, kind) in Self::get_transactions_account_access(txns.iter().cloned()) {
                 let blocked = if matches!(kind, AccessKind::Write) {
                     write_account_locks.insert(key);
@@ -456,9 +472,11 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                     &mut skipped,
                     &mut blocking_locks,
                     next_batch_id,
-                    read_account_locks,
-                    write_account_locks,
+                    &&&read_account_locks,
+                    &&&write_account_locks,
                 );
+                self.recycle_locks(write_account_locks);
+                self.recycle_locks(read_account_locks);
                 continue;
             }
 
@@ -472,7 +490,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
             let Some(worker_index) = self.thread_locks.try_lock_accounts(
                 write_account_locks.iter(),
                 read_account_locks.iter(),
-                ThreadSet::any(self.consume_work_senders.len()),
+                thread_set,
                 thread_selector,
             )
             else {
@@ -480,9 +498,11 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                     &mut skipped,
                     &mut blocking_locks,
                     next_batch_id,
-                    read_account_locks,
-                    write_account_locks,
+                    &&read_account_locks,
+                    &&write_account_locks,
                 );
+                self.recycle_locks(write_account_locks);
+                self.recycle_locks(read_account_locks);
                 continue;
             };
 
@@ -493,10 +513,19 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                     &mut skipped,
                     &mut blocking_locks,
                     next_batch_id,
-                    read_account_locks,
-                    write_account_locks,
+                    &read_account_locks,
+                    &write_account_locks,
                 );
-                continue;
+                self.recycle_locks(write_account_locks);
+                self.recycle_locks(read_account_locks);
+
+                // If we have no more threads to schedule on; break-out of the loop
+                thread_set.remove(worker_index);
+                if thread_set.is_empty() {
+                    break;
+                } else {
+                    continue;
+                }
             }
 
             // 3. Send to worker
@@ -557,6 +586,8 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                 inflight_batch_info.read_account_locks.iter(),
                 inflight_batch_info.worker_index,
             );
+            self.recycle_locks(inflight_batch_info.write_account_locks);
+            self.recycle_locks(inflight_batch_info.read_account_locks);
 
             // Should never not be 1; but just in case
             let len = if revert_on_error {
