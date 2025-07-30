@@ -672,6 +672,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
         let mut num_transactions = 0;
         while let Ok(result) = self.finished_consume_work_receiver.try_recv() {
             num_transactions += result.work.ids.len();
+            let num = result.work.ids.len();
             let batch_id = result.work.batch_id;
             let revert_on_error = result.work.revert_on_error;
             self.recycle_work_object(result.work);
@@ -679,7 +680,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
             let Some(inflight_batch_info) = self.inflight_batch_info.remove(&batch_id) else {
                 continue;
             };
-            self.workers_scheduled_count[inflight_batch_info.worker_index] -= 1;
+            self.workers_scheduled_count[inflight_batch_info.worker_index] -= num;
             self.thread_locks.unlock_accounts(
                 inflight_batch_info.write_account_locks.iter(),
                 inflight_batch_info.read_account_locks.iter(),
