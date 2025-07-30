@@ -379,6 +379,22 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             .min_by_key(|&worker_index| workers_scheduled_count[worker_index])
             .unwrap_or(0)
     }
+
+    fn add_to_skipped(
+        skipped: &mut Vec<TransactionPriorityId>,
+        blocking_locks: &mut ReadWriteAccountSet,
+        batch_id: TransactionPriorityId,
+        read_locks: HashSet<Pubkey>,
+        write_locks: HashSet<Pubkey>,
+    ) {
+        skipped.push(batch_id);
+        for write in write_locks.iter() {
+            blocking_locks.add_write(write);
+        }
+        for read in read_locks.iter() {
+            blocking_locks.add_read(read);
+        }
+    }
 }
 
 impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
@@ -433,11 +449,16 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                 };
                 if blocked {
                     any_blocked = true;
-                    break;
                 }
             }
             if any_blocked {
-                skipped.push(next_batch_id);
+                Self::add_to_skipped(
+                    &mut skipped,
+                    &mut blocking_locks,
+                    next_batch_id,
+                    read_account_locks,
+                    write_account_locks,
+                );
                 continue;
             }
 
@@ -455,20 +476,26 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                 thread_selector,
             )
             else {
-                skipped.push(next_batch_id);
-                for write in write_account_locks.iter() {
-                    blocking_locks.add_write(write);
-                }
-                for read in read_account_locks.iter() {
-                    blocking_locks.add_read(read);
-                }
+                Self::add_to_skipped(
+                    &mut skipped,
+                    &mut blocking_locks,
+                    next_batch_id,
+                    read_account_locks,
+                    write_account_locks,
+                );
                 continue;
             };
 
             // If too much scheduled on that thread; we skip as we want some optionality for parallelization down the line
             if self.workers_scheduled_count[worker_index] >= MAX_TXN_PER_BATCH {
                 self.thread_locks.unlock_accounts(write_account_locks.iter(), read_account_locks.iter(), worker_index);
-                skipped.push(next_batch_id);
+                Self::add_to_skipped(
+                    &mut skipped,
+                    &mut blocking_locks,
+                    next_batch_id,
+                    read_account_locks,
+                    write_account_locks,
+                );
                 continue;
             }
 
