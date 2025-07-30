@@ -1,3 +1,5 @@
+use std::vec;
+
 /// A Scheduled implementation that pulls batches off the container, and then
 /// schedules them to workers in a FIFO, account-aware manner. This is facilitated by the
 /// `PrioGraph` data structure, which is a directed graph that tracks the dependencies.
@@ -37,7 +39,7 @@ use {
     solana_svm_transaction::svm_message::SVMMessage,
 };
 
-const MAX_TXN_PER_BATCH: usize = 2;
+const MAX_TXN_PER_BATCH: usize = 8;
 
 pub struct BamScheduler<Tx: TransactionWithMeta> {
     workers_scheduled_count: Vec<usize>,
@@ -421,6 +423,40 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
     }
 }
 
+#[derive(Debug, Default, Clone)]
+struct WaitingBatch {
+    priority_ids: Vec<TransactionPriorityId>,
+    write_account_locks: HashSet<Pubkey>,
+    read_account_locks: HashSet<Pubkey>,
+}
+
+impl WaitingBatch {
+    fn new() -> Self {
+        Self {
+            priority_ids: Vec::new(),
+            write_account_locks: HashSet::new(),
+            read_account_locks: HashSet::new(),
+        }
+    }
+
+    fn push(&mut self, priority_id: TransactionPriorityId, write_locks: HashSet<Pubkey>, read_locks: HashSet<Pubkey>) {
+        self.priority_ids.push(priority_id);
+        self.write_account_locks.extend(write_locks);
+        self.read_account_locks.extend(read_locks);
+    }
+
+    fn take(&mut self) -> (Vec<TransactionPriorityId>, HashSet<Pubkey>, HashSet<Pubkey>) {
+        let priority_ids = std::mem::take(&mut self.priority_ids);
+        let write_account_locks = std::mem::take(&mut self.write_account_locks);
+        let read_account_locks = std::mem::take(&mut self.read_account_locks);
+        (priority_ids, write_account_locks, read_account_locks)
+    }
+
+    fn len(&self) -> usize {
+        self.priority_ids.len()
+    }
+}
+
 impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
     fn schedule<S: StateContainer<Tx>>(
         &mut self,
@@ -442,6 +478,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
         let mut num_scheduled = 0;
         let mut blocking_locks = ReadWriteAccountSet::default();
         let mut skipped = vec![];
+        let mut worker_next_batch = vec![WaitingBatch::new(); self.consume_work_senders.len()];
         while let Some(next_batch_id) = container.pop() {
             let Some((batch_ids, revert_on_error, batch_slot)) = container.get_batch(next_batch_id.id)
             else {
@@ -518,7 +555,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
             };
 
             // If too much scheduled on that thread; we skip as we want some optionality for parallelization down the line
-            if self.workers_scheduled_count[worker_index] >= MAX_TXN_PER_BATCH {
+            if self.workers_scheduled_count[worker_index] + worker_next_batch.len() >= MAX_TXN_PER_BATCH {
                 self.thread_locks.unlock_accounts(write_account_locks.iter(), read_account_locks.iter(), worker_index);
                 Self::add_to_skipped(
                     &mut skipped,
@@ -539,22 +576,72 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                     continue;
                 }
             }
+            if revert_on_error {
+                // Flush the existing worker batch (if it exists)
+                let waiting_batch = worker_next_batch.get_mut(worker_index).unwrap();
+                if waiting_batch.len() > 0 {
+                    let (priority_ids, waiting_write_account_locks, waiting_read_account_locks) =
+                        waiting_batch.take();
+                    let batch_id = self.get_next_schedule_id();
+                    let mut work = self.get_or_create_work_object();
+                        Self::generate_work(
+                            &mut work,
+                            batch_id,
+                            &priority_ids,
+                            false,
+                            container,
+                            slot,
+                        );
+                    let len = priority_ids.len();
+                    self.send_to_worker(worker_index, priority_ids, work, waiting_write_account_locks, waiting_read_account_locks);
+                    num_scheduled += len;
+                }
 
-            // 3. Send to worker
-            let batch_id = self.get_next_schedule_id();
-            let mut priority_ids = self.get_or_create_priority_ids();
-            priority_ids.push(next_batch_id);
-            let mut work = self.get_or_create_work_object();
-            Self::generate_work(
-                &mut work,
-                batch_id,
-                &priority_ids,
-                revert_on_error,
-                container,
-                slot,
-            );
-            self.send_to_worker(worker_index, priority_ids, work, write_account_locks, read_account_locks);
-            num_scheduled += 1;
+                // Now schedule the current batch
+                let batch_id = self.get_next_schedule_id();
+                let mut priority_ids = self.get_or_create_priority_ids();
+                priority_ids.push(next_batch_id);
+                let mut work = self.get_or_create_work_object();
+                Self::generate_work(
+                    &mut work,
+                    batch_id,
+                    &priority_ids,
+                    revert_on_error,
+                    container,
+                    slot,
+                );
+                let len = priority_ids.len();
+                self.send_to_worker(worker_index, priority_ids, work, write_account_locks, read_account_locks);
+                num_scheduled += len;
+            } else {
+                worker_next_batch.get_mut(worker_index)
+                    .unwrap()
+                    .push(
+                        next_batch_id,
+                        write_account_locks,
+                        read_account_locks,
+                    );
+            }
+        }
+
+        // Flush the remaining worker batches
+        for (worker_index, mut waiting_batch) in worker_next_batch.into_iter().enumerate() {
+            let (priority_ids, write_account_locks, read_account_locks) = waiting_batch.take();
+            if !priority_ids.is_empty() {
+                let batch_id = self.get_next_schedule_id();
+                let mut work = self.get_or_create_work_object();
+                Self::generate_work(
+                    &mut work,
+                    batch_id,
+                    &priority_ids,
+                    false,
+                    container,
+                    slot,
+                );
+                let len = priority_ids.len();
+                self.send_to_worker(worker_index, priority_ids, work, write_account_locks, read_account_locks);
+                num_scheduled += len;
+            }
         }
 
         // Push everything skipped back into container
