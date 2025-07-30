@@ -126,6 +126,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         let consume_work_sender = &self.consume_work_senders[worker_index];
         let batch_id = work.batch_id;
         let _ = consume_work_sender.send(work);
+        let len = priority_ids.len();
         self.inflight_batch_info.insert(
             batch_id,
             InflightBatchInfo {
@@ -135,7 +136,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 read_account_locks,
             },
         );
-        self.workers_scheduled_count[worker_index] += 1;
+        self.workers_scheduled_count[worker_index] += len;
     }
 
     fn get_next_schedule_id(&mut self) -> TransactionBatchId {
