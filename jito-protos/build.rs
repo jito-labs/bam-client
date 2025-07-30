@@ -23,7 +23,7 @@ fn main() -> Result<(), std::io::Error> {
         protos.push(proto);
     }
 
-    let proto_base_path_jds = std::path::PathBuf::from("jss-protos");
+    let proto_base_path_jds = std::path::PathBuf::from("bam-protos");
     let proto_files = ["bam_api.proto", "bam_types.proto"];
     for proto_file in &proto_files {
         let proto = proto_base_path_jds.join(proto_file);
