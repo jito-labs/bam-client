@@ -37,7 +37,7 @@ use {
     solana_svm_transaction::svm_message::SVMMessage,
 };
 
-const MAX_TXN_PER_BATCH: usize = 2;
+const MAX_TXN_PER_BATCH: usize = 3;
 
 pub struct BamScheduler<Tx: TransactionWithMeta> {
     workers_scheduled_count: Vec<usize>,
