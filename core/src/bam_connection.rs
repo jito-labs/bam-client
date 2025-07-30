@@ -11,7 +11,7 @@ use {
             AuthChallengeRequest, ConfigRequest, ConfigResponse, StartSchedulerMessage,
             StartSchedulerMessageV0, StartSchedulerResponse, StartSchedulerResponseV0,
         },
-        bam_types::{AtomicTxnBatch, AuthProof, ValidatorHeartBeat},
+        bam_types::{AtomicTxnBatch, AuthProof, BatchesResults, ValidatorHeartBeat},
     },
     solana_gossip::cluster_info::ClusterInfo,
     solana_sdk::{signature::Keypair, signer::Signer},
@@ -22,7 +22,6 @@ use {
     thiserror::Error,
     tokio::time::{interval, timeout},
 };
-use jito_protos::proto::bam_types::BatchesResults;
 
 pub struct BamConnection {
     config: Arc<Mutex<Option<ConfigResponse>>>,

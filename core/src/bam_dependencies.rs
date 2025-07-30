@@ -1,14 +1,13 @@
 /// Dependencies that are needed for the BAM (Jito Scheduler Service) to function.
 /// All-in-one for convenience.
 use std::sync::{atomic::AtomicBool, Arc, Mutex};
-use jito_protos::proto::bam_types;
-
 use {
     crate::proxy::block_engine_stage::BlockBuilderFeeInfo,
     jito_protos::proto::{
         bam_api::{
             start_scheduler_message::VersionedMsg, StartSchedulerMessage, StartSchedulerMessageV0,
         },
+        bam_types,
     },
     solana_gossip::cluster_info::ClusterInfo,
     solana_pubkey::Pubkey,

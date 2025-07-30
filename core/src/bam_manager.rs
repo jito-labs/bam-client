@@ -10,10 +10,9 @@ use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, RwLock,
-    }, time::SystemTime,
+    },
+    time::SystemTime,
 };
-use jito_protos::proto::bam_api::ConfigResponse;
-
 use {
     crate::{
         bam_connection::BamConnection,
@@ -22,6 +21,7 @@ use {
         proxy::block_engine_stage::BlockBuilderFeeInfo,
     },
     jito_protos::proto::{
+        bam_api::ConfigResponse,
         bam_types::{LeaderState, Socket},
     },
     solana_gossip::cluster_info::ClusterInfo,
@@ -150,11 +150,9 @@ impl BamManager {
                 if bank_start.should_working_bank_still_be_processing_txs() {
                     let leader_state = Self::generate_leader_state(&bank_start.working_bank);
                     payment_sender.send_slot(leader_state.slot);
-                    let _ = dependencies
-                        .outbound_sender
-                        .try_send(crate::bam_dependencies::BamOutboundMessage::LeaderState(
-                            leader_state,
-                        ));
+                    let _ = dependencies.outbound_sender.try_send(
+                        crate::bam_dependencies::BamOutboundMessage::LeaderState(leader_state),
+                    );
                 }
             }
 

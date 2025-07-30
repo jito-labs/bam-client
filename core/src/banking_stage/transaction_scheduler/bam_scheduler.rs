@@ -2,8 +2,6 @@
 /// schedules them to workers in a FIFO, account-aware manner. This is facilitated by the
 /// `PrioGraph` data structure, which is a directed graph that tracks the dependencies.
 use std::time::Instant;
-use crate::bam_dependencies::BamOutboundMessage;
-
 use {
     super::{
         bam_receive_and_buffer::priority_to_seq_id,
@@ -13,18 +11,21 @@ use {
         transaction_state::SanitizedTransactionTTL,
         transaction_state_container::StateContainer,
     },
-    crate::banking_stage::{
-        decision_maker::BufferedPacketsDecision,
-        scheduler_messages::{
-            ConsumeWork, FinishedConsumeWork, NotCommittedReason, TransactionBatchId,
-            TransactionResult,
+    crate::{
+        bam_dependencies::BamOutboundMessage,
+        banking_stage::{
+            decision_maker::BufferedPacketsDecision,
+            scheduler_messages::{
+                ConsumeWork, FinishedConsumeWork, NotCommittedReason, TransactionBatchId,
+                TransactionResult,
+            },
+            transaction_scheduler::bam_utils::convert_txn_error_to_proto,
         },
-        transaction_scheduler::bam_utils::convert_txn_error_to_proto,
     },
     ahash::HashMap,
     crossbeam_channel::{Receiver, Sender},
-    jito_protos::proto::{
-        bam_types::{atomic_txn_batch_result, not_committed::Reason, SchedulingError},
+    jito_protos::proto::bam_types::{
+        atomic_txn_batch_result, not_committed::Reason, SchedulingError,
     },
     prio_graph::{AccessKind, GraphNode, PrioGraph},
     solana_pubkey::Pubkey,
@@ -334,25 +335,31 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
     }
 
     fn send_no_leader_slot_bundle_result(&self, seq_id: u32) {
-        let _ = self.response_sender.try_send(BamOutboundMessage::AtomicTxnBatchResult(
-            jito_protos::proto::bam_types::AtomicTxnBatchResult {
-                seq_id,
-                result: Some(atomic_txn_batch_result::Result::NotCommitted(
-                    jito_protos::proto::bam_types::NotCommitted {
-                        reason: Some(Reason::SchedulingError(
-                            SchedulingError::OutsideLeaderSlot as i32,
-                        )),
-                    },
-                )),
-            }));
+        let _ = self
+            .response_sender
+            .try_send(BamOutboundMessage::AtomicTxnBatchResult(
+                jito_protos::proto::bam_types::AtomicTxnBatchResult {
+                    seq_id,
+                    result: Some(atomic_txn_batch_result::Result::NotCommitted(
+                        jito_protos::proto::bam_types::NotCommitted {
+                            reason: Some(Reason::SchedulingError(
+                                SchedulingError::OutsideLeaderSlot as i32,
+                            )),
+                        },
+                    )),
+                },
+            ));
     }
 
     fn send_back_result(&self, seq_id: u32, result: atomic_txn_batch_result::Result) {
-        let _ = self.response_sender.try_send(BamOutboundMessage::AtomicTxnBatchResult(
-            jito_protos::proto::bam_types::AtomicTxnBatchResult {
-                seq_id,
-                result: Some(result),
-            }));
+        let _ = self
+            .response_sender
+            .try_send(BamOutboundMessage::AtomicTxnBatchResult(
+                jito_protos::proto::bam_types::AtomicTxnBatchResult {
+                    seq_id,
+                    result: Some(result),
+                },
+            ));
     }
 
     /// Generates a `bundle_result::Result` based on the processed results for 'revert_on_error' batches.
@@ -591,19 +598,22 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
 #[cfg(test)]
 mod tests {
     use {
-        crate::banking_stage::{
-            decision_maker::BufferedPacketsDecision,
-            immutable_deserialized_packet::ImmutableDeserializedPacket,
-            scheduler_messages::{
-                ConsumeWork, FinishedConsumeWork, MaxAge, NotCommittedReason, TransactionResult,
-            },
-            tests::create_slow_genesis_config,
-            transaction_scheduler::{
-                bam_receive_and_buffer::seq_id_to_priority,
-                bam_scheduler::BamScheduler,
-                scheduler::Scheduler,
-                transaction_state::SanitizedTransactionTTL,
-                transaction_state_container::{StateContainer, TransactionStateContainer},
+        crate::{
+            bam_dependencies::BamOutboundMessage,
+            banking_stage::{
+                decision_maker::BufferedPacketsDecision,
+                immutable_deserialized_packet::ImmutableDeserializedPacket,
+                scheduler_messages::{
+                    ConsumeWork, FinishedConsumeWork, MaxAge, NotCommittedReason, TransactionResult,
+                },
+                tests::create_slow_genesis_config,
+                transaction_scheduler::{
+                    bam_receive_and_buffer::seq_id_to_priority,
+                    bam_scheduler::BamScheduler,
+                    scheduler::Scheduler,
+                    transaction_state::SanitizedTransactionTTL,
+                    transaction_state_container::{StateContainer, TransactionStateContainer},
+                },
             },
         },
         crossbeam_channel::unbounded,
@@ -644,7 +654,7 @@ mod tests {
         finished_consume_work_sender: crossbeam_channel::Sender<
             FinishedConsumeWork<RuntimeTransaction<SanitizedTransaction>>,
         >,
-        response_receiver: crossbeam_channel::Receiver<StartSchedulerMessageV0>,
+        response_receiver: crossbeam_channel::Receiver<BamOutboundMessage>,
     }
 
     fn create_test_scheduler(num_threads: usize) -> TestScheduler {
@@ -872,9 +882,7 @@ mod tests {
 
         // Check the response for the first transaction (committed)
         let response = response_receiver.try_recv().unwrap();
-        assert!(response.msg.is_some(), "Response should contain a message");
-        let msg = response.msg.unwrap();
-        let Msg::BatchesResult(bundle_result) = msg else {
+        let BamOutboundMessage::AtomicTxnBatchResult(bundle_result) = response else {
             panic!("Expected AtomicTxnBatchResult message");
         };
         assert_eq!(bundle_result.seq_id, 0);
@@ -898,9 +906,7 @@ mod tests {
 
         // Check the response for the second transaction (not committed)
         let response = response_receiver.try_recv().unwrap();
-        assert!(response.msg.is_some(), "Response should contain a message");
-        let msg = response.msg.unwrap();
-        let Msg::BatchesResult(bundle_result) = msg else {
+        let BamOutboundMessage::AtomicTxnBatchResult(bundle_result) = response else {
             panic!("Expected AtomicTxnBatchResult message");
         };
         assert_eq!(bundle_result.seq_id, 3);
@@ -971,9 +977,7 @@ mod tests {
 
         // Check the response for the next transaction
         let response = response_receiver.try_recv().unwrap();
-        assert!(response.msg.is_some(), "Response should contain a message");
-        let msg = response.msg.unwrap();
-        let Msg::BatchesResult(bundle_result) = msg else {
+        let BamOutboundMessage::AtomicTxnBatchResult(bundle_result) = response else {
             panic!("Expected AtomicTxnBatchResult message");
         };
         assert_eq!(bundle_result.seq_id, 1);
@@ -1013,9 +1017,7 @@ mod tests {
 
         // Receive the NotCommitted Result
         let response = response_receiver.try_recv().unwrap();
-        assert!(response.msg.is_some(), "Response should contain a message");
-        let msg = response.msg.unwrap();
-        let Msg::BatchesResult(bundle_result) = msg else {
+        let BamOutboundMessage::AtomicTxnBatchResult(bundle_result) = response else {
             panic!("Expected AtomicTxnBatchResult message");
         };
         assert_eq!(bundle_result.seq_id, 2);

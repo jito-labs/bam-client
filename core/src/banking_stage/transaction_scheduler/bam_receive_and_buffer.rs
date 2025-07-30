@@ -10,30 +10,29 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use crate::bam_dependencies::BamOutboundMessage;
-
 use {
     super::{
         receive_and_buffer::ReceiveAndBuffer,
         transaction_state_container::TransactionStateContainer,
     },
-    crate::banking_stage::{
-        consumer::Consumer,
-        decision_maker::BufferedPacketsDecision,
-        immutable_deserialized_packet::{DeserializedPacketError, ImmutableDeserializedPacket},
-        transaction_scheduler::{
-            bam_utils::{convert_deserialize_error_to_proto, convert_txn_error_to_proto},
-            receive_and_buffer::{calculate_max_age, calculate_priority_and_cost},
-            transaction_state::SanitizedTransactionTTL,
+    crate::{
+        bam_dependencies::BamOutboundMessage,
+        banking_stage::{
+            consumer::Consumer,
+            decision_maker::BufferedPacketsDecision,
+            immutable_deserialized_packet::{DeserializedPacketError, ImmutableDeserializedPacket},
+            transaction_scheduler::{
+                bam_utils::{convert_deserialize_error_to_proto, convert_txn_error_to_proto},
+                receive_and_buffer::{calculate_max_age, calculate_priority_and_cost},
+                transaction_state::SanitizedTransactionTTL,
+            },
         },
     },
     crossbeam_channel::Sender,
     itertools::Itertools,
-    jito_protos::proto::{
-        bam_types::{
-            atomic_txn_batch_result, not_committed::Reason, AtomicTxnBatch,
-            DeserializationErrorReason, Packet, SchedulingError,
-        },
+    jito_protos::proto::bam_types::{
+        atomic_txn_batch_result, not_committed::Reason, AtomicTxnBatch, DeserializationErrorReason,
+        Packet, SchedulingError,
     },
     solana_accounts_db::account_locks::validate_account_locks,
     solana_runtime::bank_forks::BankForks,
@@ -99,43 +98,52 @@ impl BamReceiveAndBuffer {
     }
 
     fn send_bundle_not_committed_result(&self, seq_id: u32, reason: Reason) {
-        let _ = self.response_sender.try_send(BamOutboundMessage::AtomicTxnBatchResult(
-            jito_protos::proto::bam_types::AtomicTxnBatchResult {
-                seq_id,
-                result: Some(atomic_txn_batch_result::Result::NotCommitted(
-                    jito_protos::proto::bam_types::NotCommitted {
-                        reason: Some(reason),
-                    },
-                )),
-            }));
+        let _ = self
+            .response_sender
+            .try_send(BamOutboundMessage::AtomicTxnBatchResult(
+                jito_protos::proto::bam_types::AtomicTxnBatchResult {
+                    seq_id,
+                    result: Some(atomic_txn_batch_result::Result::NotCommitted(
+                        jito_protos::proto::bam_types::NotCommitted {
+                            reason: Some(reason),
+                        },
+                    )),
+                },
+            ));
     }
 
     fn send_no_leader_slot_txn_batch_result(&self, seq_id: u32) {
-        let _ = self.response_sender.try_send(BamOutboundMessage::AtomicTxnBatchResult(
-            jito_protos::proto::bam_types::AtomicTxnBatchResult {
-                seq_id,
-                result: Some(atomic_txn_batch_result::Result::NotCommitted(
-                    jito_protos::proto::bam_types::NotCommitted {
-                        reason: Some(Reason::SchedulingError(
-                            SchedulingError::OutsideLeaderSlot as i32,
-                        )),
-                    },
-                )),
-            }));
+        let _ = self
+            .response_sender
+            .try_send(BamOutboundMessage::AtomicTxnBatchResult(
+                jito_protos::proto::bam_types::AtomicTxnBatchResult {
+                    seq_id,
+                    result: Some(atomic_txn_batch_result::Result::NotCommitted(
+                        jito_protos::proto::bam_types::NotCommitted {
+                            reason: Some(Reason::SchedulingError(
+                                SchedulingError::OutsideLeaderSlot as i32,
+                            )),
+                        },
+                    )),
+                },
+            ));
     }
 
     fn send_container_full_txn_batch_result(&self, seq_id: u32) {
-        let _ = self.response_sender.try_send(BamOutboundMessage::AtomicTxnBatchResult(
-            jito_protos::proto::bam_types::AtomicTxnBatchResult {
-                seq_id,
-                result: Some(atomic_txn_batch_result::Result::NotCommitted(
-                    jito_protos::proto::bam_types::NotCommitted {
-                        reason: Some(Reason::SchedulingError(
-                            SchedulingError::ContainerFull as i32,
-                        )),
-                    },
-                )),
-            }));
+        let _ = self
+            .response_sender
+            .try_send(BamOutboundMessage::AtomicTxnBatchResult(
+                jito_protos::proto::bam_types::AtomicTxnBatchResult {
+                    seq_id,
+                    result: Some(atomic_txn_batch_result::Result::NotCommitted(
+                        jito_protos::proto::bam_types::NotCommitted {
+                            reason: Some(Reason::SchedulingError(
+                                SchedulingError::ContainerFull as i32,
+                            )),
+                        },
+                    )),
+                },
+            ));
     }
 
     fn parse_batch(
