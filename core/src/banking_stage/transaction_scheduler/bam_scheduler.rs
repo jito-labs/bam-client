@@ -340,18 +340,23 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
     ) {
         // Check if no bank or slot has changed
         let bank_start = decision.bank_start();
-        if bank_start.map(|bs| bs.working_bank.slot()) == self.slot {
+        let new_slot = bank_start
+            .and_then(|bs| {
+                if bs.should_working_bank_still_be_processing_txs() {
+                    Some(bs.working_bank.slot())
+                } else {
+                    None
+                }
+            });
+        if new_slot == self.slot {
             return;
         }
-        if let Some(bank_start) = bank_start {
-            info!(
-                "Bank boundary detected: slot changed from {:?} to {:?}",
-                self.slot,
-                bank_start.working_bank.slot()
-            );
-            self.slot = Some(bank_start.working_bank.slot());
+
+        if let Some(slot) = new_slot {
+            info!("Slot changed from {:?} to {:?}", self.slot, slot);
+            self.slot = Some(slot);
         } else {
-            info!("Bank boundary detected: slot changed to None");
+            info!("Slot changed to None");
             self.slot = None;
         }
 
