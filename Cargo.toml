@@ -8,6 +8,7 @@ members = [
     "accounts-db/accounts-hash-cache-tool",
     "accounts-db/store-histogram",
     "accounts-db/store-tool",
+    "bam-local-cluster",
     "banking-bench",
     "banking-stage-ingress-types",
     "banks-client",
@@ -54,7 +55,6 @@ members = [
     "ledger",
     "ledger-tool",
     "local-cluster",
-    "bam-local-cluster",
     "log-analyzer",
     "log-collector",
     "measure",
@@ -236,7 +236,6 @@ cfg_eval = "0.1.2"
 chrono = { version = "0.4.41", default-features = false }
 chrono-humanize = "0.2.3"
 clap = "2.33.1"
-solana-sdk = { version = "2.2.1", features = ["full"] }
 # Remove this dependency when procedural macros will support non-inline modules.
 conditional-mod = "0.1.0"
 console = "0.15.11"
@@ -520,6 +519,7 @@ solana-runtime-plugin = { path = "runtime-plugin", version = "=2.3.4" }
 solana-runtime-transaction = { path = "runtime-transaction", version = "=2.3.4" }
 solana-sanitize = "2.2.1"
 solana-sbpf = "=0.11.1"
+solana-sdk = { version = "2.2.1", features = ["full"] }
 solana-sdk-ids = "2.2.1"
 solana-secp256k1-program = "2.2.1"
 solana-secp256k1-recover = "2.2.1"
