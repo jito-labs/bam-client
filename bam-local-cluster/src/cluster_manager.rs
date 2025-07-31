@@ -1,14 +1,10 @@
-use std::path::Path;
-
-use agave_feature_set::FEATURE_NAMES;
-use solana_feature_gate_interface as feature;
-use solana_sdk::signature::read_keypair_file;
-use solana_system_interface::program as system_program;
 use {
     crate::config::{CustomValidatorConfig, LocalClusterConfig},
+    agave_feature_set::FEATURE_NAMES,
     anyhow::{Context, Result},
     log::{debug, error, info},
     solana_faucet::faucet::{run_faucet, Faucet},
+    solana_feature_gate_interface as feature,
     solana_ledger::{
         blockstore::create_new_ledger, blockstore_options::LedgerColumnOptions,
         genesis_utils::GenesisConfigInfo,
@@ -27,15 +23,16 @@ use {
         native_token::LAMPORTS_PER_SOL,
         rent::Rent,
         shred_version::compute_shred_version,
-        signature::Keypair,
+        signature::{read_keypair_file, Keypair},
         signer::Signer,
     },
     solana_stake_program::stake_state,
+    solana_system_interface::program as system_program,
     solana_vote_program::vote_state,
     std::{
         borrow::Borrow,
         net::SocketAddr,
-        path::PathBuf,
+        path::{Path, PathBuf},
         process::{Child, Command, Stdio},
         str::FromStr,
         sync::{Arc, Mutex},
@@ -242,9 +239,13 @@ impl BamValidator {
     }
 
     async fn tail_log_file(log_file_path: &PathBuf, node_name: &str) {
-        use std::io;
-        use tokio::fs::File;
-        use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader, SeekFrom};
+        use {
+            std::io,
+            tokio::{
+                fs::File,
+                io::{AsyncBufReadExt, AsyncSeekExt, BufReader, SeekFrom},
+            },
+        };
 
         // Wait a bit for the file to be created
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
