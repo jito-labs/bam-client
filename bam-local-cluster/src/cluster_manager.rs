@@ -1,7 +1,9 @@
+use std::path::Path;
+
 use agave_feature_set::FEATURE_NAMES;
 use solana_feature_gate_interface as feature;
-use solana_system_interface::program as system_program;
 use solana_sdk::signature::read_keypair_file;
+use solana_system_interface::program as system_program;
 use {
     crate::config::{CustomValidatorConfig, LocalClusterConfig},
     anyhow::{Context, Result},
@@ -49,6 +51,7 @@ pub struct BamValidator {
 }
 
 impl BamValidator {
+    #[allow(clippy::too_many_arguments)]
     fn start_process(
         ledger_path: &PathBuf,
         log_file_path: &PathBuf,
@@ -76,11 +79,11 @@ impl BamValidator {
             .arg("--ledger")
             .arg(ledger_path)
             .arg("--identity")
-            .arg(&identity_path)
+            .arg(identity_path)
             .arg("--vote-account")
-            .arg(&vote_path)
+            .arg(vote_path)
             .arg("--authorized-voter")
-            .arg(&vote_path)
+            .arg(vote_path)
             .arg("--bind-address")
             .arg("0.0.0.0")
             .arg("--dynamic-port-range")
@@ -95,7 +98,7 @@ impl BamValidator {
             .arg("--rpc-port")
             .arg(rpc_port.to_string())
             .arg("--rpc-faucet-address")
-            .arg(cluster_config.faucet_address.to_string())
+            .arg(&cluster_config.faucet_address)
             .arg("--rpc-pubsub-enable-block-subscription")
             .arg("--rpc-pubsub-enable-vote-subscription")
             .arg("--account-index")
@@ -107,11 +110,11 @@ impl BamValidator {
             .arg("--expected-shred-version")
             .arg(compute_shred_version(&genesis_config.hash(), None).to_string())
             .arg("--bam-url")
-            .arg(cluster_config.bam_url.to_string())
+            .arg(&cluster_config.bam_url)
             .arg("--tip-distribution-program-pubkey")
-            .arg(cluster_config.tip_distribution_program_id.to_string())
+            .arg(&cluster_config.tip_distribution_program_id)
             .arg("--tip-payment-program-pubkey")
-            .arg(cluster_config.tip_payment_program_id.to_string())
+            .arg(&cluster_config.tip_payment_program_id)
             .arg("--merkle-root-upload-authority")
             .arg("11111111111111111111111111111111")
             .arg("--commission-bps")
@@ -183,7 +186,7 @@ impl BamValidator {
         })
     }
 
-    pub fn get_bank_hash(ledger_path: &PathBuf, build_path: &str) -> Result<String, anyhow::Error> {
+    pub fn get_bank_hash(ledger_path: &Path, build_path: &str) -> Result<String, anyhow::Error> {
         let ledger_tool_binary = format!("{}/agave-ledger-tool", build_path);
 
         let mut cmd = std::process::Command::new(ledger_tool_binary);
@@ -297,7 +300,7 @@ impl BamValidator {
         Ok(())
     }
 
-    fn create_snapshot(validator_ledger_path: &PathBuf, build_path: &str) -> anyhow::Result<()> {
+    fn create_snapshot(validator_ledger_path: &Path, build_path: &str) -> anyhow::Result<()> {
         let ledger_tool_binary = format!("{}/agave-ledger-tool", build_path);
 
         let mut cmd = Command::new(ledger_tool_binary);
@@ -329,7 +332,7 @@ pub struct BamLocalCluster {
 
 impl BamLocalCluster {
     pub fn new(config: LocalClusterConfig) -> Result<Self, Box<dyn std::error::Error>> {
-        const BOOTSTRAP_GOSSIP: &'static str = "127.0.0.1:8001";
+        const BOOTSTRAP_GOSSIP: &str = "127.0.0.1:8001";
         const BOOTSTRAP_GOSSIP_PORT: u16 = 8001;
         const BOOTSTRAP_RPC_PORT: u16 = 8899;
 
@@ -397,18 +400,19 @@ impl BamLocalCluster {
 
             let log_file_path = ledger_path.join("validator.log");
 
-            let dynamic_port_range_start = 8_000 + (i * 1000) as u64;
-            let dynamic_port_range_end = 8_000 + ((i + 1) * 1000) as u64;
+            let dynamic_port_range_start =
+                8_000_usize.saturating_add(i.saturating_mul(1000)) as u64;
+            let dynamic_port_range_end = dynamic_port_range_start.saturating_add(1000);
 
             let validator = BamValidator::start_process(
                 &ledger_path,
                 &log_file_path,
-                &format!("validator-{}", i + 1),
+                &format!("validator-{}", i.saturating_add(1)),
                 is_bootstrap.then_some(BOOTSTRAP_GOSSIP_PORT),
                 if is_bootstrap {
                     BOOTSTRAP_RPC_PORT
                 } else {
-                    dynamic_port_range_start as u16 + 100
+                    dynamic_port_range_start.saturating_add(100) as u16
                 },
                 dynamic_port_range_start,
                 dynamic_port_range_end,
@@ -423,7 +427,7 @@ impl BamLocalCluster {
                 &validator_config.node_keypair,
                 &validator_config.vote_keypair,
                 &runtime,
-                &validator_config,
+                validator_config,
             )?;
             validators.push(validator);
 
