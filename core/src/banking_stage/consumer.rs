@@ -889,10 +889,7 @@ impl Consumer {
         let transaction_errors = load_and_execute_transactions_output
             .processing_results
             .iter()
-            .map(|result| match result {
-                Ok(_) => None,
-                Err(error) => Some(error.clone()),
-            })
+            .map(|result| result.flattened_result().err())
             .collect_vec();
 
         if revert_on_error && successful_count != batch.sanitized_transactions().len() {
