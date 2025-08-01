@@ -8,7 +8,9 @@ use crate::UNKNOWN_IP;
 use crossbeam_channel::{RecvTimeoutError, TryRecvError};
 use solana_clock::MAX_PROCESSING_AGE;
 use solana_packet::{PacketFlags, PACKET_DATA_SIZE};
+use solana_perf::sigverify::verify_packet;
 use solana_pubkey::Pubkey;
+use solana_sanitize::SanitizeError;
 use solana_transaction::sanitized::SanitizedTransaction;
 use std::{
     cmp::min,
@@ -110,9 +112,18 @@ impl BamReceiveAndBuffer {
 
         let mut result = Vec::with_capacity(in_packets.size_hint().0);
         for (i, p) in in_packets.enumerate() {
+            let mut solana_packet = proto_packet_to_packet(p);
+            // sigverify packet
+            // we don't use solana_packet here, so we don't need to call set_discard()
+            if !verify_packet(&mut (&mut solana_packet).into(), false) {
+                return Err((
+                    i,
+                    DeserializedPacketError::SanitizeError(SanitizeError::InvalidValue),
+                ));
+            }
+
             result.push(
-                ImmutableDeserializedPacket::new((&proto_packet_to_packet(p)).into())
-                    .map_err(|e| (i, e))?,
+                ImmutableDeserializedPacket::new((&solana_packet).into()).map_err(|e| (i, e))?,
             );
         }
 
@@ -675,7 +686,7 @@ mod tests {
             result.err().unwrap(),
             Reason::DeserializationError(jito_protos::proto::bam_types::DeserializationError {
                 index: 0,
-                reason: DeserializationErrorReason::BincodeError as i32,
+                reason: DeserializationErrorReason::SanitizeError as i32,
             })
         );
     }
@@ -785,5 +796,77 @@ mod tests {
                 reason: DeserializationErrorReason::SanitizeError as i32,
             })
         );
+    }
+
+    #[test]
+    fn test_deserialize_packets_invalid_signature() {
+        // Create a transaction with invalid signature
+        let (_bank_forks, mint_keypair) = test_bank_forks();
+        let transaction = transfer(
+            &mint_keypair,
+            &Pubkey::new_unique(),
+            1,
+            solana_hash::Hash::default(),
+        );
+
+        // Serialize the transaction
+        let mut data = bincode::serialize(&transaction).unwrap();
+        // Corrupt the signature by modifying some bytes
+        if data.len() > 10 {
+            data[5] ^= 0xFF; // Flip bits to corrupt signature
+            data[10] ^= 0xFF;
+        }
+
+        let packets = [Packet { data, meta: None }];
+
+        // This should fail due to invalid signature
+        let result = BamReceiveAndBuffer::deserialize_packets(packets.iter());
+        assert!(result.is_err());
+
+        if let Err((index, error)) = result {
+            assert_eq!(index, 0);
+            assert!(matches!(error, DeserializedPacketError::SanitizeError(_)));
+        }
+    }
+
+    #[test]
+    fn test_deserialize_packets_valid_non_vote_transaction() {
+        // Create a regular non-vote transaction
+        let (_bank_forks, mint_keypair) = test_bank_forks();
+        let transaction = transfer(
+            &mint_keypair,
+            &Pubkey::new_unique(),
+            1,
+            solana_hash::Hash::default(),
+        );
+
+        // Sign the transaction properly
+        let mut tx = transaction;
+        tx.sign(&[&mint_keypair], solana_hash::Hash::default());
+
+        let data = bincode::serialize(&tx).unwrap();
+
+        // Create packet without vote transaction flag (non-vote)
+        let packet = Packet {
+            data: data.clone(),
+            meta: Some(jito_protos::proto::bam_types::Meta {
+                flags: Some(jito_protos::proto::bam_types::PacketFlags {
+                    simple_vote_tx: false, // This is a non-vote transaction
+                    ..Default::default()
+                }),
+                size: data.len() as u64,
+                addr: "127.0.0.1".to_string(),
+                port: 8000,
+                ..Default::default()
+            }),
+        };
+
+        // Valid transactions should succeed with valid signature
+        let result = BamReceiveAndBuffer::deserialize_packets([packet].iter());
+        assert!(result.is_ok());
+
+        if let Ok(packets) = result {
+            assert_eq!(packets.len(), 1);
+        }
     }
 }
