@@ -126,7 +126,7 @@ impl BamPaymentSender {
             return false;
         };
         let batch_txn = Self::create_transfer_transaction(
-            dependencies.cluster_info.keypair().as_ref(),
+            &dependencies.cluster_info.keypair().clone(),
             blockhash,
             payment_pubkey,
             total_payment,

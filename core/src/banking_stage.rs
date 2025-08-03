@@ -756,7 +756,7 @@ impl BankingStage {
         if let Some(bam_dependencies) = bam_dependencies {
             // Spawn BAM workers
             // Create channels for communication between scheduler and workers
-            let num_workers = num_threads;
+            let num_workers = 10;
             let (work_senders, work_receivers): (Vec<Sender<_>>, Vec<Receiver<_>>) =
                 (0..num_workers).map(|_| unbounded()).unzip();
             let (finished_work_sender, finished_work_receiver) = unbounded();
