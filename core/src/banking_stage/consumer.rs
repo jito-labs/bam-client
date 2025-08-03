@@ -511,12 +511,12 @@ impl Consumer {
             return true;
         }
 
-        let keypair = cluster_info.keypair();
-
         let mut last_tip_updated_slot_guard = last_tip_updated_slot.lock().unwrap();
         if bank.slot() == *last_tip_updated_slot_guard {
             return true;
         }
+
+        let keypair = cluster_info.keypair().clone();
 
         let initialize_tip_programs_bundle =
             tip_manager.get_initialize_tip_programs_bundle(bank, &keypair);
