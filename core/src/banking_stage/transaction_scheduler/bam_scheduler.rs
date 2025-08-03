@@ -1,9 +1,10 @@
-use std::vec;
+use std::{time::Instant, vec};
 
 /// A Scheduled implementation that pulls batches off the container, and then
 /// schedules them to workers in a FIFO, account-aware manner. This is facilitated by the
 /// `PrioGraph` data structure, which is a directed graph that tracks the dependencies.
 use ahash::{HashSet, HashSetExt};
+use histogram::Histogram;
 use prio_graph::AccessKind;
 
 use crate::banking_stage::{read_write_account_set::ReadWriteAccountSet, transaction_scheduler::thread_aware_account_locks::{ThreadAwareAccountLocks, ThreadSet}};
@@ -59,6 +60,9 @@ pub struct BamScheduler<Tx: TransactionWithMeta> {
     reusable_consume_work: Vec<ConsumeWork<Tx>>,
     reusable_priority_ids: Vec<Vec<TransactionPriorityId>>,
     reusable_locks: Vec<HashSet<Pubkey>>,
+
+    last_schedule_time: Instant,
+    between_histogram: Histogram,
 }
 
 // A structure to hold information about inflight batches.
@@ -92,6 +96,8 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             reusable_priority_ids: Vec::new(),
             reusable_locks: Vec::new(),
             unblockable_accounts,
+            last_schedule_time: Instant::now(),
+            between_histogram: Histogram::new(),
         }
     }
 
@@ -382,6 +388,16 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             self.slot = None;
         }
 
+        // Report histogram metrics
+        info!(
+            "BamScheduler between scheduling histogram percentiles: 50%: {}, 90%: {}, 99%: {}, 99.9%: {}",
+            self.between_histogram.percentile(50.0).unwrap_or(0),
+            self.between_histogram.percentile(90.0).unwrap_or(0),
+            self.between_histogram.percentile(99.0).unwrap_or(0),
+            self.between_histogram.percentile(99.9).unwrap_or(0),
+        );
+        self.between_histogram.clear();
+
         // Drain container and send back 'retryable'
         if self.slot.is_none() {
             while let Some(next_batch_id) = container.pop() {
@@ -466,6 +482,10 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
         _pre_lock_filter: impl Fn(&Tx) -> bool,
     ) -> Result<SchedulingSummary, SchedulerError>
     {
+        let now = Instant::now();
+        let diff = now.duration_since(self.last_schedule_time);
+        let _ = self.between_histogram.increment(diff.as_micros() as u64);
+
         let Some(slot) = self.slot else {
             warn!("Slot is not set, cannot schedule transactions");
             return Ok(SchedulingSummary {
