@@ -125,8 +125,8 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
     ) {
         let consume_work_sender = &self.consume_work_senders[worker_index];
         let batch_id = work.batch_id;
+        let len = work.ids.len();
         let _ = consume_work_sender.send(work);
-        let len = priority_ids.len();
         self.inflight_batch_info.insert(
             batch_id,
             InflightBatchInfo {
