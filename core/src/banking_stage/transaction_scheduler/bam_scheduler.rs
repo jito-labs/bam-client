@@ -485,6 +485,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
         let now = Instant::now();
         let diff = now.duration_since(self.last_schedule_time);
         let _ = self.between_histogram.increment(diff.as_micros() as u64);
+        self.last_schedule_time = now;
 
         let Some(slot) = self.slot else {
             warn!("Slot is not set, cannot schedule transactions");
