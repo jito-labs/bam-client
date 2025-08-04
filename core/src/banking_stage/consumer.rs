@@ -714,7 +714,7 @@ mod tests {
         solana_rent::Rent,
         solana_rpc::transaction_status_service::TransactionStatusService,
         solana_runtime::{
-            installed_scheduler_pool::BankWithScheduler,
+            bank_forks::BankForks, installed_scheduler_pool::BankWithScheduler,
             prioritization_fee_cache::PrioritizationFeeCache,
         },
         solana_runtime_transaction::runtime_transaction::RuntimeTransaction,
@@ -2238,11 +2238,9 @@ mod tests {
             );
         genesis_config.ticks_per_slot *= 8;
 
-        // workaround for https://github.com/solana-labs/solana/issues/30085
-        // the test can deploy and use spl_programs in the genensis slot without waiting for the next one
-        let (bank, _bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
-
-        let bank = Arc::new(Bank::new_from_parent(bank, &Pubkey::default(), 1));
+        let bank_forks = BankForks::new_rw_arc(Bank::new_for_tests(&genesis_config));
+        let bank = bank_forks.read().unwrap().working_bank();
+        assert_eq!(bank.slot(), 0);
 
         let ledger_path = get_tmp_ledger_path_auto_delete!();
         let blockstore = Arc::new(
