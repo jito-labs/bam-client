@@ -1,6 +1,9 @@
+use solana_runtime::bank_forks::BankForks;
+use std::sync::RwLock;
 /// Dependencies that are needed for the BAM (Jito Scheduler Service) to function.
 /// All-in-one for convenience.
 use std::sync::{atomic::AtomicBool, Arc, Mutex};
+
 use {
     crate::proxy::block_engine_stage::BlockBuilderFeeInfo,
     jito_protos::proto::{
@@ -25,6 +28,7 @@ pub struct BamDependencies {
 
     pub cluster_info: Arc<ClusterInfo>,
     pub block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
+    pub bank_forks: Arc<RwLock<BankForks>>,
     pub bam_node_pubkey: Arc<Mutex<Pubkey>>,
 }
 

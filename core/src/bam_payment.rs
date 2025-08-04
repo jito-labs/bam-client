@@ -6,7 +6,6 @@
 use {
     crate::bam_dependencies::BamDependencies,
     solana_client::rpc_client::RpcClient,
-    solana_ledger::blockstore::{Blockstore, BlockstoreError},
     solana_poh::poh_recorder::PohRecorder,
     solana_pubkey::Pubkey,
     std::{
@@ -18,7 +17,8 @@ use {
 use {
     solana_clock::Slot, solana_commitment_config::CommitmentConfig,
     solana_compute_budget_interface::ComputeBudgetInstruction, solana_keypair::Keypair,
-    solana_signer::Signer, solana_system_interface::instruction::transfer,
+    solana_runtime::bank_forks::BankForks, solana_signer::Signer,
+    solana_system_interface::instruction::transfer,
     solana_transaction::versioned::VersionedTransaction,
 };
 
@@ -54,7 +54,8 @@ impl BamPaymentSender {
         dependencies: BamDependencies,
     ) {
         let mut leader_slots_for_payment = BTreeSet::new();
-        let blockstore = poh_recorder.read().unwrap().get_blockstore();
+        // let blockstore = poh_recorder.read().unwrap().get_blockstore();
+
         const DURATION_BETWEEN_PAYMENTS: std::time::Duration = std::time::Duration::from_secs(30);
         let mut last_payment_time = Instant::now();
 
@@ -74,7 +75,11 @@ impl BamPaymentSender {
 
             // Create batch
             let current_slot = poh_recorder.read().unwrap().get_current_slot();
-            let batch = Self::create_batch(&blockstore, &leader_slots_for_payment, current_slot);
+            let batch = Self::create_batch(
+                &leader_slots_for_payment,
+                current_slot,
+                &dependencies.bank_forks,
+            );
             if batch.is_empty() {
                 continue;
             }
@@ -90,9 +95,9 @@ impl BamPaymentSender {
         }
 
         let final_batch = Self::create_batch(
-            &blockstore,
             &leader_slots_for_payment,
             poh_recorder.read().unwrap().get_current_slot(),
+            &dependencies.bank_forks,
         );
         Self::send_batch(&final_batch, &dependencies);
         warn!(
@@ -152,20 +157,30 @@ impl BamPaymentSender {
     }
 
     fn create_batch(
-        blockstore: &Blockstore,
         leader_slots_for_payment: &BTreeSet<u64>,
         current_slot: u64,
+        bank_forks: &Arc<RwLock<BankForks>>,
     ) -> Vec<(u64, u64)> {
         let mut batch = vec![];
-        for slot in leader_slots_for_payment.iter() {
-            if current_slot.saturating_sub(*slot) < 32 {
+        // for slot in leader_slots_for_payment.iter() {
+        let bank_forks = bank_forks.read().unwrap();
+        let root = bank_forks.root();
+
+        for slot in leader_slots_for_payment.iter().copied() {
+            // too recent
+            if current_slot.saturating_sub(slot) < 32 {
                 continue;
             }
-            let Some(payment_amount) = Self::calculate_payment_amount(blockstore, *slot) else {
+
+            if slot > root {
+                continue;
+            }
+
+            let Some(payment_amount) = Self::calculate_payment_amount(&bank_forks, slot) else {
                 break;
             };
 
-            batch.push((*slot, payment_amount));
+            batch.push((slot, payment_amount));
         }
         batch
     }
@@ -200,29 +215,11 @@ impl BamPaymentSender {
         }
     }
 
-    pub fn calculate_payment_amount(blockstore: &Blockstore, slot: u64) -> Option<u64> {
-        let result = blockstore.get_rooted_block(slot, false);
-        if result.is_err() && !matches!(result, Err(BlockstoreError::SlotNotRooted)) {
-            error!("Failed to get block for slot {}: {:?}", slot, result);
-            return Some(0);
-        }
+    pub fn calculate_payment_amount(bank_forks: &BankForks, slot: u64) -> Option<u64> {
+        let bank = bank_forks.get(slot)?;
 
-        let Ok(block) = result else {
-            return None;
-        };
-
-        const BASE_FEE_LAMPORT_PER_SIGNATURE: u64 = 5_000;
         Some(
-            block
-                .transactions
-                .iter()
-                .map(|tx| {
-                    let fee = tx.meta.fee;
-                    let base_fee = BASE_FEE_LAMPORT_PER_SIGNATURE
-                        .saturating_mul(tx.transaction.signatures.len() as u64);
-                    fee.saturating_sub(base_fee)
-                })
-                .sum::<u64>()
+            bank.priority_fee_total()
                 .saturating_mul(COMMISSION_PERCENTAGE)
                 .saturating_div(100),
         )
