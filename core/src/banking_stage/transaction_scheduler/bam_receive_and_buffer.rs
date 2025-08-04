@@ -1,21 +1,20 @@
 use crate::banking_stage::scheduler_messages::MaxAge;
 use crate::banking_stage::transaction_scheduler::receive_and_buffer::DisconnectedError;
 use crate::UNKNOWN_IP;
-use agave_transaction_view::result;
+use crossbeam_channel::{RecvTimeoutError, TryRecvError};
 use solana_clock::MAX_PROCESSING_AGE;
 use solana_packet::{PacketFlags, PACKET_DATA_SIZE};
 use solana_transaction::sanitized::SanitizedTransaction;
-/// An implementation of the `ReceiveAndBuffer` trait that receives messages from BAM
-/// and buffers from into the the `TransactionStateContainer`. Key thing to note:
-/// this implementation only functions during the `Consume/Hold` phase; otherwise it will send them back
-/// to BAM with a `Retryable` result.
+///! An implementation of the `ReceiveAndBuffer` trait that receives messages from BAM
+///! and buffers from into the the `TransactionStateContainer`. Key thing to note:
+///! this implementation only functions during the `Consume/Hold` phase; otherwise it will send them back
+///! to BAM with a `Retryable` result.
 use std::{
     cmp::min,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, RwLock,
     },
-    thread::sleep,
     time::{Duration, Instant},
 };
 use {
@@ -400,11 +399,9 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
                 loop {
                     let batch = match self.bundle_receiver.recv_deadline(deadline) {
                         Ok(batch) => batch,
-                        Err(TryRecvError::Disconnected) => return Err(DisconnectedError),
-                        Err(TryRecvError::Empty) => {
-                            // Don't run this loop too hot
-                            sleep(Duration::from_millis(5));
-                            break;
+                        Err(RecvTimeoutError::Disconnected) => return Err(DisconnectedError),
+                        Err(RecvTimeoutError::Timeout) => {
+                            return Ok(0);
                         }
                     };
                     self.send_no_leader_slot_txn_batch_result(batch.seq_id);
