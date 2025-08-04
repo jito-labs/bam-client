@@ -795,9 +795,12 @@ impl BankingStage {
             }
 
             // Spawn the BAM scheduler thread
-            let unblockable_accounts = tip_processing_dependencies.as_ref().map(|deps: &TipProcessingDependencies| {
-                ahash::HashSet::from_iter(deps.tip_manager.get_tip_accounts().iter().cloned())
-            }).unwrap_or_default();
+            let unblockable_accounts = tip_processing_dependencies
+                .as_ref()
+                .map(|deps: &TipProcessingDependencies| {
+                    ahash::HashSet::from_iter(deps.tip_manager.get_tip_accounts().iter().cloned())
+                })
+                .unwrap_or_default();
             bank_thread_hdls.push(
                 Builder::new()
                     .name("solBamSched".to_string())

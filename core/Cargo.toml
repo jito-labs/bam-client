@@ -144,6 +144,12 @@ tokio-stream = { workspace = true }
 tonic = { workspace = true }
 trees = { workspace = true }
 
+http_1_1_0 = { package = "http", version = "=1.1.0" }
+h3-quinn = "0.0.10"
+rcgen = "0.14"
+h3-util = { git = "https://github.com/youyuanwu/tonic-h3.git", rev = "f430cfd721ef40c10527fc5a95465fd722a32c48", default-features = false, features = ["quinn"] }
+tonic-h3 = { git = "https://github.com/youyuanwu/tonic-h3.git", rev = "f430cfd721ef40c10527fc5a95465fd722a32c48", default-features = false, features = ["quinn"] }
+
 [target."cfg(unix)".dependencies]
 sysctl = { workspace = true }
 

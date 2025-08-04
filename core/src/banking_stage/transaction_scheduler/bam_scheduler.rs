@@ -2,10 +2,6 @@
 /// schedules them to workers in a FIFO, account-aware manner. This is facilitated by the
 /// `PrioGraph` data structure, which is a directed graph that tracks the dependencies.
 use ahash::{HashSet, HashSetExt};
-use prio_graph::AccessKind;
-
-use crate::banking_stage::{read_write_account_set::ReadWriteAccountSet, transaction_scheduler::thread_aware_account_locks::{ThreadAwareAccountLocks, ThreadSet}};
-
 use {
     super::{
         bam_receive_and_buffer::priority_to_seq_id,
@@ -19,11 +15,15 @@ use {
         bam_dependencies::BamOutboundMessage,
         banking_stage::{
             decision_maker::BufferedPacketsDecision,
+            read_write_account_set::ReadWriteAccountSet,
             scheduler_messages::{
                 ConsumeWork, FinishedConsumeWork, NotCommittedReason, TransactionBatchId,
                 TransactionResult,
             },
-            transaction_scheduler::bam_utils::convert_txn_error_to_proto,
+            transaction_scheduler::{
+                bam_utils::convert_txn_error_to_proto,
+                thread_aware_account_locks::{ThreadAwareAccountLocks, ThreadSet},
+            },
         },
     },
     ahash::HashMap,
@@ -31,6 +31,7 @@ use {
     jito_protos::proto::bam_types::{
         atomic_txn_batch_result, not_committed::Reason, SchedulingError,
     },
+    prio_graph::AccessKind,
     solana_pubkey::Pubkey,
     solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
     solana_sdk::clock::Slot,
@@ -359,14 +360,13 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
     ) {
         // Check if no bank or slot has changed
         let bank_start = decision.bank_start();
-        let new_slot = bank_start
-            .and_then(|bs| {
-                if bs.should_working_bank_still_be_processing_txs() {
-                    Some(bs.working_bank.slot())
-                } else {
-                    None
-                }
-            });
+        let new_slot = bank_start.and_then(|bs| {
+            if bs.should_working_bank_still_be_processing_txs() {
+                Some(bs.working_bank.slot())
+            } else {
+                None
+            }
+        });
         if new_slot == self.slot {
             return;
         }
@@ -389,10 +389,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         }
     }
 
-    fn least_loaded_worker(
-        workers_scheduled_count: &[usize],
-        thread_set: ThreadSet,
-    ) -> usize {
+    fn least_loaded_worker(workers_scheduled_count: &[usize], thread_set: ThreadSet) -> usize {
         thread_set
             .contained_threads_iter()
             .min_by_key(|&worker_index| workers_scheduled_count[worker_index])
@@ -427,15 +424,14 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
         container: &mut S,
         _pre_graph_filter: impl Fn(&[&Tx], &mut [bool]),
         _pre_lock_filter: impl Fn(&Tx) -> bool,
-    ) -> Result<SchedulingSummary, SchedulerError>
-    {
+    ) -> Result<SchedulingSummary, SchedulerError> {
         let Some(slot) = self.slot else {
             warn!("Slot is not set, cannot schedule transactions");
             return Ok(SchedulingSummary {
                 num_scheduled: 0,
                 num_unschedulable: 0,
                 num_filtered_out: 0,
-                filter_time_us: 0
+                filter_time_us: 0,
             });
         };
 
@@ -443,7 +439,8 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
         let mut blocking_locks = ReadWriteAccountSet::default();
         let mut skipped = vec![];
         while let Some(next_batch_id) = container.pop() {
-            let Some((batch_ids, revert_on_error, batch_slot)) = container.get_batch(next_batch_id.id)
+            let Some((batch_ids, revert_on_error, batch_slot)) =
+                container.get_batch(next_batch_id.id)
             else {
                 continue;
             };
@@ -492,18 +489,14 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
 
             // 2. Check thread locks
             let thread_selector = |thead_set: ThreadSet| {
-                Self::least_loaded_worker(
-                    &self.workers_scheduled_count,
-                    thead_set,
-                )
+                Self::least_loaded_worker(&self.workers_scheduled_count, thead_set)
             };
             let Some(worker_index) = self.thread_locks.try_lock_accounts(
                 write_account_locks.iter(),
                 read_account_locks.iter(),
                 thread_set,
                 thread_selector,
-            )
-            else {
+            ) else {
                 Self::add_to_skipped(
                     &mut skipped,
                     &mut blocking_locks,
@@ -519,7 +512,11 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
 
             // If too much scheduled on that thread; we skip as we want some optionality for parallelization down the line
             if self.workers_scheduled_count[worker_index] >= MAX_TXN_PER_BATCH {
-                self.thread_locks.unlock_accounts(write_account_locks.iter(), read_account_locks.iter(), worker_index);
+                self.thread_locks.unlock_accounts(
+                    write_account_locks.iter(),
+                    read_account_locks.iter(),
+                    worker_index,
+                );
                 Self::add_to_skipped(
                     &mut skipped,
                     &mut blocking_locks,
@@ -553,7 +550,13 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                 container,
                 slot,
             );
-            self.send_to_worker(worker_index, priority_ids, work, write_account_locks, read_account_locks);
+            self.send_to_worker(
+                worker_index,
+                priority_ids,
+                work,
+                write_account_locks,
+                read_account_locks,
+            );
             num_scheduled += 1;
         }
 
@@ -565,7 +568,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
             num_scheduled,
             num_unschedulable,
             num_filtered_out: 0,
-            filter_time_us: 0
+            filter_time_us: 0,
         });
     }
 
@@ -660,10 +663,21 @@ mod tests {
                     transaction_state_container::{StateContainer, TransactionStateContainer},
                 },
             },
-        }, ahash::HashSet, crossbeam_channel::unbounded, itertools::Itertools, jito_protos::proto::bam_types::{
-                atomic_txn_batch_result::Result::{Committed, NotCommitted},
-                TransactionCommittedResult,
-            }, solana_ledger::genesis_utils::GenesisConfigInfo, solana_perf::packet::Packet, solana_poh::poh_recorder::BankStart, solana_pubkey::Pubkey, solana_runtime::{bank::Bank, bank_forks::BankForks}, solana_runtime_transaction::runtime_transaction::RuntimeTransaction, solana_sdk::{
+        },
+        ahash::HashSet,
+        crossbeam_channel::unbounded,
+        itertools::Itertools,
+        jito_protos::proto::bam_types::{
+            atomic_txn_batch_result::Result::{Committed, NotCommitted},
+            TransactionCommittedResult,
+        },
+        solana_ledger::genesis_utils::GenesisConfigInfo,
+        solana_perf::packet::Packet,
+        solana_poh::poh_recorder::BankStart,
+        solana_pubkey::Pubkey,
+        solana_runtime::{bank::Bank, bank_forks::BankForks},
+        solana_runtime_transaction::runtime_transaction::RuntimeTransaction,
+        solana_sdk::{
             compute_budget::ComputeBudgetInstruction,
             hash::Hash,
             message::Message,
@@ -671,11 +685,12 @@ mod tests {
             signer::Signer,
             system_instruction::transfer_many,
             transaction::{SanitizedTransaction, Transaction},
-        }, std::{
+        },
+        std::{
             borrow::Borrow,
             sync::{Arc, RwLock},
             time::Instant,
-        }
+        },
     };
 
     struct TestScheduler {
