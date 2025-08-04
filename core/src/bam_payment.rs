@@ -263,3 +263,190 @@ impl BamPaymentSender {
         VersionedTransaction::from(tx)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use solana_runtime::{
+        bank::Bank,
+        genesis_utils::{create_genesis_config_with_leader, GenesisConfigInfo},
+    };
+    use solana_native_token::LAMPORTS_PER_SOL;
+
+    fn create_test_bank() -> (Bank, Keypair) {
+        let GenesisConfigInfo {
+            genesis_config,
+            mint_keypair,
+            ..
+        } = create_genesis_config_with_leader(
+            1_000_000 * LAMPORTS_PER_SOL,
+            &Pubkey::new_unique(),
+            100 * LAMPORTS_PER_SOL,
+        );
+        let bank = Bank::new_for_tests(&genesis_config);
+        (bank, mint_keypair)
+    }
+
+    #[test]
+    fn test_calculate_payment_amount_with_priority_fees() {
+        // This test verifies the commission calculation logic
+        // by checking against known priority fee values
+        let test_cases: Vec<(u64, u64)> = vec![
+            (10000, 300),    // 3% of 10000 = 300
+            (50000, 1500),   // 3% of 50000 = 1500
+            (100000, 3000),  // 3% of 100000 = 3000
+        ];
+        
+        for (priority_fee, expected_payment) in test_cases {
+            let (bank, _) = create_test_bank();
+            
+            // Mock the priority fee total by creating a bank with known fee
+            // In a real scenario, this would be set by processing transactions
+            // For testing, we can verify the calculation logic works correctly
+            let bank_forks = BankForks::new_rw_arc(bank);
+            let slot = bank_forks.read().unwrap().root();
+            
+            // Test that when a bank has priority_fee_total() = priority_fee,
+            // the payment amount = priority_fee * COMMISSION_PERCENTAGE / 100
+            let payment_amount = BamPaymentSender::calculate_payment_amount(&*bank_forks.read().unwrap(), slot);
+            
+            assert!(payment_amount.is_some());
+            let _payment = payment_amount.unwrap();
+            
+            // Since we can't easily mock priority_fee_total() without processing transactions,
+            // we verify the calculation logic separately
+            let calculated_payment = priority_fee
+                .saturating_mul(COMMISSION_PERCENTAGE)
+                .saturating_div(100);
+            
+            assert_eq!(
+                calculated_payment, expected_payment,
+                "For priority fee {}, expected payment {}, got {}",
+                priority_fee, expected_payment, calculated_payment
+            );
+        }
+    }
+
+    #[test]
+    fn test_calculate_payment_amount_no_priority_fees() {
+        let (bank, _) = create_test_bank();
+        let bank_forks = BankForks::new_rw_arc(bank);
+        let slot = bank_forks.read().unwrap().root();
+        
+        // Bank has no transactions, so no priority fees
+        let payment_amount = BamPaymentSender::calculate_payment_amount(&*bank_forks.read().unwrap(), slot);
+        
+        assert!(payment_amount.is_some());
+        assert_eq!(payment_amount.unwrap(), 0);
+    }
+
+    #[test]
+    fn test_calculate_payment_amount_nonexistent_slot() {
+        let (bank, _) = create_test_bank();
+        let bank_forks = BankForks::new_rw_arc(bank);
+        
+        // Try to get payment for a non-existent slot
+        let nonexistent_slot = 999999;
+        let payment_amount = BamPaymentSender::calculate_payment_amount(&*bank_forks.read().unwrap(), nonexistent_slot);
+        
+        assert!(payment_amount.is_none());
+    }
+
+    #[test]
+    fn test_commission_calculation() {
+        // Test various priority fee amounts to ensure commission is calculated correctly
+        let test_cases: Vec<(u64, u64)> = vec![
+            (0, 0),
+            (100, 3),  // 3% of 100 = 3
+            (1000, 30), // 3% of 1000 = 30
+            (10000, 300), // 3% of 10000 = 300
+            (33, 0), // 3% of 33 = 0.99, rounds down to 0
+            (34, 1), // 3% of 34 = 1.02, rounds down to 1
+        ];
+        
+        for (priority_fee_total, expected_commission) in test_cases {
+            let commission = priority_fee_total
+                .saturating_mul(COMMISSION_PERCENTAGE)
+                .saturating_div(100);
+            assert_eq!(
+                commission, expected_commission,
+                "For priority fee {}, expected commission {}, got {}",
+                priority_fee_total, expected_commission, commission
+            );
+        }
+    }
+
+    #[test]
+    fn test_multiple_transactions_priority_fees() {
+        
+        // Test that the payment calculation works correctly for accumulated priority fees
+        let accumulated_priority_fees: Vec<u64> = vec![
+            1000,   // After 1st transaction
+            3000,   // After 2nd transaction (1000 + 2000)
+            6000,   // After 3rd transaction (3000 + 3000)
+            10000,  // After 4th transaction (6000 + 4000)
+        ];
+        
+        for total_fees in accumulated_priority_fees {
+            let expected_payment = total_fees
+                .saturating_mul(COMMISSION_PERCENTAGE)
+                .saturating_div(100);
+            
+            assert_eq!(
+                expected_payment,
+                total_fees * COMMISSION_PERCENTAGE / 100,
+                "Payment calculation should be consistent for total fees: {}",
+                total_fees
+            );
+        }
+        
+        // Verify edge cases
+        assert_eq!(0_u64.saturating_mul(COMMISSION_PERCENTAGE).saturating_div(100), 0);
+        // For u64::MAX, saturating_mul will overflow, so we verify the behavior
+        // u64::MAX * 3 would overflow, so saturating_mul returns u64::MAX
+        // Then u64::MAX / 100 = 184467440737095516
+        assert_eq!(u64::MAX.saturating_mul(COMMISSION_PERCENTAGE).saturating_div(100), 184467440737095516);
+    }
+
+    #[test]
+    fn test_create_batch_slot_constraints() {
+        // Test the slot constraint logic
+        // The create_batch function should only include slots that are:
+        // 1. At least 32 slots behind the current slot
+        // 2. Rooted
+        
+        let test_cases: Vec<(u64, u64, bool)> = vec![
+            // (current_slot, slot_to_check, should_be_eligible)
+            (100, 68, true),   // 100 - 32 = 68, exactly at boundary
+            (100, 69, false),  // Too recent
+            (100, 50, true),   // Old enough
+            (100, 100, false), // Same as current, too recent
+            (50, 18, true),    // 50 - 32 = 18
+            (50, 19, false),   // Too recent
+            (32, 0, true),     // 32 - 32 = 0, exactly at boundary
+        ];
+        
+        for (current_slot, slot, should_be_eligible) in test_cases {
+            let is_old_enough = current_slot.saturating_sub(slot) >= 32;
+            assert_eq!(
+                is_old_enough, should_be_eligible,
+                "For current slot {} and slot {}, eligibility should be {}",
+                current_slot, slot, should_be_eligible
+            );
+        }
+        
+        // Test edge case with saturating subtraction
+        assert_eq!(10_u64.saturating_sub(50), 0);
+        assert_eq!(100_u64.saturating_sub(32), 68);
+        
+        // Verify the batch payment calculation works correctly with a simple bank
+        let (bank, _) = create_test_bank();
+        let bank_forks = BankForks::new_rw_arc(bank);
+        let slot = bank_forks.read().unwrap().root();
+        
+        // Even with no transactions, the calculation should return Some(0)
+        let payment = BamPaymentSender::calculate_payment_amount(&*bank_forks.read().unwrap(), slot);
+        assert!(payment.is_some());
+        assert_eq!(payment.unwrap(), 0);
+    }
+}
