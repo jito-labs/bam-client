@@ -1,3 +1,7 @@
+//! An implementation of the `ReceiveAndBuffer` trait that receives messages from BAM
+//! and buffers from into the the `TransactionStateContainer`. Key thing to note:
+//! this implementation only functions during the `Consume/Hold` phase; otherwise it will send them back
+//! to BAM with a `Retryable` result.
 use crate::banking_stage::scheduler_messages::MaxAge;
 use crate::banking_stage::transaction_scheduler::receive_and_buffer::DisconnectedError;
 use crate::UNKNOWN_IP;
@@ -5,10 +9,6 @@ use crossbeam_channel::{RecvTimeoutError, TryRecvError};
 use solana_clock::MAX_PROCESSING_AGE;
 use solana_packet::{PacketFlags, PACKET_DATA_SIZE};
 use solana_transaction::sanitized::SanitizedTransaction;
-///! An implementation of the `ReceiveAndBuffer` trait that receives messages from BAM
-///! and buffers from into the the `TransactionStateContainer`. Key thing to note:
-///! this implementation only functions during the `Consume/Hold` phase; otherwise it will send them back
-///! to BAM with a `Retryable` result.
 use std::{
     cmp::min,
     sync::{
