@@ -161,11 +161,11 @@ impl BamPaymentSender {
         bank_forks: &Arc<RwLock<BankForks>>,
     ) -> Vec<(u64, u64)> {
         let mut batch = vec![];
-        let bank_forks = bank_forks.read().unwrap();
-        let root = bank_forks.root();
 
         for slot in leader_slots_for_payment.iter().copied() {
             // must be >= 32 slots ahead of tip and rooted to access bank
+            let bank_forks = bank_forks.read().unwrap();
+            let root = bank_forks.root();
             if current_slot.saturating_sub(slot) < 32 || slot > root {
                 continue;
             }
