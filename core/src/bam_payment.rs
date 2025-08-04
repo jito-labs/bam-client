@@ -165,13 +165,8 @@ impl BamPaymentSender {
         let root = bank_forks.root();
 
         for slot in leader_slots_for_payment.iter().copied() {
-            // skip fresh banks
-            if current_slot.saturating_sub(slot) < 32 {
-                continue;
-            }
-
-            // check slot rooted
-            if slot > root {
+            // must be >= 32 slots ahead of tip and rooted to access bank
+            if current_slot.saturating_sub(slot) < 32 || slot > root {
                 continue;
             }
 
