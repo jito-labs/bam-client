@@ -54,7 +54,6 @@ impl BamPaymentSender {
         dependencies: BamDependencies,
     ) {
         let mut leader_slots_for_payment = BTreeSet::new();
-        // let blockstore = poh_recorder.read().unwrap().get_blockstore();
 
         const DURATION_BETWEEN_PAYMENTS: std::time::Duration = std::time::Duration::from_secs(30);
         let mut last_payment_time = Instant::now();
@@ -162,7 +161,6 @@ impl BamPaymentSender {
         bank_forks: &Arc<RwLock<BankForks>>,
     ) -> Vec<(u64, u64)> {
         let mut batch = vec![];
-        // for slot in leader_slots_for_payment.iter() {
         let bank_forks = bank_forks.read().unwrap();
         let root = bank_forks.root();
 
