@@ -7128,14 +7128,6 @@ impl fmt::Debug for Bank {
 
 #[cfg(feature = "dev-context-only-utils")]
 impl Bank {
-    /// Total priority fees (lamports) that this bank collected
-    /// **Only populated once the bank is Executed. Always call
-    /// it after the bank is rooted.**
-    pub fn priority_fee_total(&self) -> u64 {
-        // `collector_fee_details` is the private field in v2.3
-        self.collector_fee_details.read().unwrap().priority_fee
-    }
-
     pub fn wrap_with_bank_forks_for_tests(self) -> (Arc<Self>, Arc<RwLock<BankForks>>) {
         let bank_forks = BankForks::new_rw_arc(self);
         let bank = bank_forks.read().unwrap().root_bank();
@@ -7381,6 +7373,13 @@ impl Bank {
 
     pub fn set_hash_overrides(&self, hash_overrides: HashOverrides) {
         *self.hash_overrides.lock().unwrap() = hash_overrides;
+    }
+
+    /// Total priority fees (lamports) that this bank collected
+    /// **Only populated once the bank is Executed. Always call
+    /// it after the bank is rooted.**
+    pub fn priority_fee_total(&self) -> u64 {
+        self.collector_fee_details.read().unwrap().priority_fee
     }
 }
 

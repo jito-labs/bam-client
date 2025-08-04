@@ -165,11 +165,12 @@ impl BamPaymentSender {
         let root = bank_forks.root();
 
         for slot in leader_slots_for_payment.iter().copied() {
-            // too recent
+            // skip fresh banks
             if current_slot.saturating_sub(slot) < 32 {
                 continue;
             }
 
+            // check slot rooted
             if slot > root {
                 continue;
             }
@@ -214,7 +215,16 @@ impl BamPaymentSender {
     }
 
     pub fn calculate_payment_amount(bank_forks: &BankForks, slot: u64) -> Option<u64> {
-        let bank = bank_forks.get(slot)?;
+        let bank = match bank_forks.get(slot) {
+            Some(bank) => bank,
+            None => {
+                error!(
+                    "Bank not found for slot {} in calculate_payment_amount",
+                    slot
+                );
+                return None;
+            }
+        };
 
         Some(
             bank.priority_fee_total()
