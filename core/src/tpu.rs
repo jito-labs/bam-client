@@ -319,8 +319,7 @@ impl Tpu {
             block_builder_commission: 0,
         }));
 
-        // Will be set to false by BAMManager if BAM cannot be connected to
-        let bam_enabled = Arc::new(AtomicBool::new(true));
+        let bam_enabled = Arc::new(AtomicBool::new(false));
 
         let (bundle_sender, bundle_receiver) = unbounded();
         let block_engine_stage = BlockEngineStage::new(

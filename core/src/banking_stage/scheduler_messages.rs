@@ -1,7 +1,7 @@
 use solana_transaction_error::TransactionError;
 use {
-    solana_clock::{Epoch, Slot},
     jito_protos::proto::bam_types::TransactionCommittedResult,
+    solana_clock::{Epoch, Slot},
     std::fmt::Display,
 };
 
@@ -56,6 +56,7 @@ pub struct FinishedConsumeWork<Tx> {
     pub extra_info: Option<FinishedConsumeWorkExtraInfo>,
 }
 
+#[derive(Debug)]
 pub struct FinishedConsumeWorkExtraInfo {
     pub processed_results: Vec<TransactionResult>,
 }
