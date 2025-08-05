@@ -939,6 +939,7 @@ mod tests {
             bundle_stage::bundle_account_locker::BundleAccountLocker,
         },
         crossbeam_channel::unbounded,
+        solana_account::Account,
         solana_clock::{Slot, MAX_PROCESSING_AGE},
         solana_genesis_config::GenesisConfig,
         solana_keypair::Keypair,
@@ -955,6 +956,7 @@ mod tests {
             transaction_recorder::TransactionRecorder,
         },
         solana_poh_config::PohConfig,
+        solana_program_test::programs::spl_programs,
         solana_pubkey::Pubkey,
         solana_runtime::{
             bank_forks::BankForks, prioritization_fee_cache::PrioritizationFeeCache,
@@ -1003,10 +1005,15 @@ mod tests {
         ConsumeWorker<RuntimeTransaction<SanitizedTransaction>>,
     ) {
         let GenesisConfigInfo {
-            genesis_config,
+            mut genesis_config,
             mint_keypair,
             ..
         } = create_slow_genesis_config(10_000);
+        genesis_config.accounts.extend(
+            spl_programs(&genesis_config.rent)
+                .into_iter()
+                .map(|(a, b)| (a, Account::from(b))),
+        );
         let (bank, bank_forks) = Bank::new_no_wallclock_throttle_for_tests(&genesis_config);
         // Warp to next epoch for MaxAge tests.
         let mut bank = Bank::new_from_parent(
@@ -1054,12 +1061,13 @@ mod tests {
 
         let (consume_sender, consume_receiver) = unbounded();
         let (consumed_sender, consumed_receiver) = unbounded();
-        let worker = ConsumeWorker::new(
+        let worker = ConsumeWorker::new_with_tip_processing_deps(
             0,
             consume_receiver,
             consumer,
             consumed_sender,
             poh_recorder.read().unwrap().new_leader_bank_notifier(),
+            None,
         );
 
         (
@@ -1484,4 +1492,121 @@ mod tests {
         drop(test_frame);
         let _ = worker_thread.join().unwrap();
     }
+
+    // #[test]
+    // fn test_handle_tip_programs() {
+    //     let (test_frame, consume_worker) = setup_test_frame(true);
+    //     let TestFrame {
+    //         mint_keypair,
+    //         genesis_config,
+    //         bank,
+    //         poh_recorder,
+    //         consume_sender,
+    //         consumed_receiver,
+    //         ..
+    //     } = &test_frame;
+
+    //     // let (replay_vote_sender, _) = unbounded();
+    //     // let keypair = Arc::new(leader_keypair);
+    //     // let block_builder_pubkey = Pubkey::new_unique();
+    //     // let bank = bank_forks.read().unwrap().working_bank();
+
+    //     // let tip_manager = get_tip_manager(&genesis_config_info.voting_keypair.pubkey());
+
+    //     // let tip_accounts = tip_manager.get_tip_accounts();
+    //     // let tip_account = tip_accounts.iter().collect::<Vec<_>>()[0];
+    //     // let txns = sanitize_transactions(vec![system_transaction::transfer(
+    //     //     &genesis_config_info.mint_keypair,
+    //     //     tip_account,
+    //     //     1000,
+    //     //     genesis_config_info.genesis_config.hash(),
+    //     // )]);
+
+    //     // let committer = Committer::new(
+    //     //     None,
+    //     //     replay_vote_sender,
+    //     //     Arc::new(PrioritizationFeeCache::new(0u64)),
+    //     // );
+
+    //     // let consume_worker = ConsumeWorker::new_with_tip_processing_deps(
+    //     //     id,
+    //     //     work_receiver,
+    //     //     Consumer::new(
+    //     //         committer.clone(),
+    //     //         transaction_recorder.clone(),
+    //     //         QosService::new(id),
+    //     //         log_messages_bytes_limit,
+    //     //         bundle_account_locker.clone(),
+    //     //     ),
+    //     //     finished_work_sender.clone(),
+    //     //     poh_recorder.read().unwrap().new_leader_bank_notifier(),
+    //     //     tip_processing_dependencies.clone(),
+    //     // );
+
+    //     // let consumer = Consumer::new(
+    //     //     committer,
+    //     //     transaction_recorder,
+    //     //     QosService::new(1),
+    //     //     None,
+    //     //     BundleAccountLocker::default(),
+    //     // );
+
+    //     // let transactions =
+    //     //     std::thread::spawn(move || get_executed_txns(&entry_receiver, Duration::from_secs(5)));
+
+    //     // let _ = consumer.process_and_record_transactions(&bank, &txns, &|_| 0, false);
+
+    //     // let transactions = transactions.join().unwrap();
+
+    //     // assert_eq!(transactions.len(), 5);
+
+    //     // // expect to see initialize tip payment program, tip distribution program,
+    //     // // initialize tip distribution account, change tip receiver + change block builder
+    //     // assert_eq!(
+    //     //     transactions[0],
+    //     //     tip_manager
+    //     //         .initialize_tip_payment_program_tx(&bank, &keypair)
+    //     //         .to_versioned_transaction()
+    //     // );
+    //     // assert_eq!(
+    //     //     transactions[1],
+    //     //     tip_manager
+    //     //         .initialize_tip_distribution_config_tx(&bank, &keypair)
+    //     //         .to_versioned_transaction()
+    //     // );
+    //     // assert_eq!(
+    //     //     transactions[2],
+    //     //     tip_manager
+    //     //         .initialize_tip_distribution_account_tx(&bank, &keypair)
+    //     //         .to_versioned_transaction()
+    //     // );
+    //     // // the first tip receiver + block builder are the initializer (keypair.pubkey()) as set by the
+    //     // // TipPayment program during initialization
+    //     // let bank_start = poh_recorder.read().unwrap().bank_start().unwrap();
+    //     // assert_eq!(
+    //     //     transactions[3],
+    //     //     tip_manager
+    //     //         .build_change_tip_receiver_and_block_builder_tx(
+    //     //             &keypair.pubkey(),
+    //     //             &derive_tip_distribution_account_address(
+    //     //                 &tip_manager.tip_distribution_program_id(),
+    //     //                 &genesis_config_info.validator_pubkey,
+    //     //                 bank_start.working_bank.epoch()
+    //     //             )
+    //     //             .0,
+    //     //             &bank_start.working_bank,
+    //     //             &keypair,
+    //     //             &keypair.pubkey(),
+    //     //             &block_builder_pubkey,
+    //     //             5
+    //     //         )
+    //     //         .to_versioned_transaction()
+    //     // );
+
+    //     poh_recorder
+    //         .write()
+    //         .unwrap()
+    //         .is_exited
+    //         .store(true, Ordering::Relaxed);
+    // }
 }
