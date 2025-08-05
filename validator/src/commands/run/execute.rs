@@ -643,7 +643,7 @@ pub fn execute(
     }));
 
     let bam_url = Arc::new(Mutex::new(if matches.is_present("bam_url") {
-        Some(value_of(matches, "block_engine_url").expect("couldn't parse bam_url"))
+        Some(value_of(matches, "bam_url").expect("couldn't parse bam_url"))
     } else {
         None
     }));
