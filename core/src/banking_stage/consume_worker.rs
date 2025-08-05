@@ -11,7 +11,6 @@ use {
     crate::banking_stage::consumer::TipProcessingDependencies,
     crossbeam_channel::{Receiver, RecvError, SendError, Sender},
     jito_protos::proto::bam_types::TransactionCommittedResult,
-    jito_tip_payment::CONFIG_ACCOUNT_SEED,
     solana_measure::measure_us,
     solana_poh::leader_bank_notifier::LeaderBankNotifier,
     solana_pubkey::Pubkey,
@@ -204,7 +203,6 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         let Some(tip_processing_dependencies) = &self.tip_processing_dependencies else {
             return true;
         };
-        info!("running tip programs");
         let TipProcessingDependencies {
             tip_manager,
             last_tip_updated_slot,
@@ -232,17 +230,12 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         let initialize_tip_programs_bundle =
             tip_manager.get_initialize_tip_programs_bundle(bank, &keypair);
         if let Some(init_bundle) = initialize_tip_programs_bundle {
-            info!("processing init tip programs bundle");
             let result = self.consumer.process_and_record_transactions(
                 bank,
                 &init_bundle.transactions,
                 reservation_cb,
                 true,
             );
-            let tip_config_account = bank.get_account(
-                &Pubkey::find_program_address(&[CONFIG_ACCOUNT_SEED], &jito_tip_payment::id()).0,
-            );
-            info!("tip config account: {:?}", tip_config_account);
 
             if result
                 .execute_and_commit_transactions_output
@@ -279,7 +272,6 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
                 return false;
             }
         }
-        info!("updated tip programs");
 
         *last_tip_updated_slot_guard = bank.slot();
         true
