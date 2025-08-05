@@ -642,6 +642,12 @@ pub fn execute(
         trust_packets: matches.is_present("trust_block_engine_packets"),
     }));
 
+    let bam_url = Arc::new(Mutex::new(if matches.is_present("bam_url") {
+        Some(value_of(matches, "bam_url").expect("couldn't parse bam_url"))
+    } else {
+        None
+    }));
+
     // Defaults are set in cli definition, safe to use unwrap() here
     let expected_heartbeat_interval_ms: u64 =
         value_of(matches, "relayer_expected_heartbeat_interval_ms").unwrap();
@@ -838,6 +844,7 @@ pub fn execute(
         tip_manager_config,
         preallocated_bundle_cost: value_of(matches, "preallocated_bundle_cost")
             .expect("preallocated_bundle_cost set as default"),
+        bam_url,
         ..ValidatorConfig::default()
     };
 
