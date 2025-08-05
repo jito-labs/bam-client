@@ -100,7 +100,6 @@ pub struct Consumer {
     log_messages_bytes_limit: Option<usize>,
     bundle_account_locker: BundleAccountLocker,
 
-    reusable_seen_messages: Cell<AHashSet<solana_hash::Hash>>,
     seq_not_conflict_batch_reusables: Cell<SeqNotConflictBatchReusables>,
 }
 
@@ -131,7 +130,6 @@ impl Consumer {
             qos_service,
             log_messages_bytes_limit,
             bundle_account_locker,
-            reusable_seen_messages: Cell::new(AHashSet::new()),
             seq_not_conflict_batch_reusables: Cell::new(SeqNotConflictBatchReusables::default()),
         }
     }
@@ -223,16 +221,6 @@ impl Consumer {
         reservation_cb: &impl Fn(&Bank) -> u64,
         revert_on_error: bool,
     ) -> ProcessTransactionBatchOutput {
-        // Check for duplicate transactions
-        let mut seen_messages = self.reusable_seen_messages.take();
-        seen_messages.clear();
-        let pre_results = txs.iter().zip(pre_results).map(|(tx, result)| {
-            result?;
-            if revert_on_error && !seen_messages.insert(*tx.message_hash()) {
-                return Err(TransactionError::AlreadyProcessed);
-            }
-            Ok(())
-        });
         let (
             (transaction_qos_cost_results, cost_model_throttled_transactions_count),
             cost_model_us,
@@ -242,7 +230,6 @@ impl Consumer {
             pre_results,
             reservation_cb
         ));
-        self.reusable_seen_messages.set(seen_messages);
 
         // Only lock accounts for those transactions are selected for the block;
         // Once accounts are locked, other threads cannot encode transactions that will modify the
@@ -2118,15 +2105,30 @@ mod tests {
         ));
 
         let transactions_len = transactions.len();
+        info!("transactions_len: {:?}", transactions_len);
         let ProcessTransactionBatchOutput {
             cost_model_throttled_transactions_count: _cost_model_throttled_transactions_count,
             cost_model_us: _cost_model_us,
             execute_and_commit_transactions_output,
         } = execute_transactions_with_dummy_poh_service(bank, transactions, true);
 
-        assert!(execute_and_commit_transactions_output
+        assert_eq!(
+            execute_and_commit_transactions_output
+                .commit_transactions_result
+                .as_ref()
+                .unwrap()
+                .len(),
+            transactions_len,
+        );
+        for commit_transaction_result in execute_and_commit_transactions_output
             .commit_transactions_result
-            .is_err());
+            .unwrap()
+        {
+            assert_eq!(
+                commit_transaction_result,
+                CommitTransactionDetails::NotCommitted
+            );
+        }
         assert_eq!(
             execute_and_commit_transactions_output.transaction_counts,
             LeaderProcessedTransactionCounts {
