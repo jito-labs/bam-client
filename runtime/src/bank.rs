@@ -3234,7 +3234,8 @@ impl Bank {
         let tx_account_lock_limit = self.get_transaction_account_lock_limit();
         let relax_intrabatch_account_locks = self
             .feature_set
-            .is_active(&feature_set::relax_intrabatch_account_locks::id());
+            .is_active(&feature_set::relax_intrabatch_account_locks::id())
+            || batched_locking;
 
         // with simd83 enabled, we must fail transactions that duplicate a prior message hash
         // previously, conflicting account locks would fail such transactions as a side effect
@@ -3258,7 +3259,7 @@ impl Bank {
             txs.iter(),
             tx_results,
             tx_account_lock_limit,
-            relax_intrabatch_account_locks || batched_locking,
+            relax_intrabatch_account_locks,
             is_read_locked_callback,
             is_write_locked_callback,
         )
