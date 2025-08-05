@@ -1296,6 +1296,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "bam-local-cluster"
+version = "3.0.0"
+dependencies = [
+ "agave-feature-set",
+ "anyhow",
+ "axum 0.7.9",
+ "clap 2.33.3",
+ "log",
+ "serde",
+ "serde_json",
+ "solana-account",
+ "solana-commitment-config",
+ "solana-core",
+ "solana-faucet",
+ "solana-feature-gate-interface",
+ "solana-fee-calculator",
+ "solana-genesis-config",
+ "solana-keypair",
+ "solana-ledger",
+ "solana-local-cluster",
+ "solana-logger",
+ "solana-native-token",
+ "solana-program-test",
+ "solana-rent",
+ "solana-rpc",
+ "solana-rpc-client",
+ "solana-runtime",
+ "solana-shred-version",
+ "solana-signer",
+ "solana-stake-program",
+ "solana-streamer",
+ "solana-system-interface",
+ "solana-vote-program",
+ "tokio",
+ "toml 0.8.12",
+]
+
+[[package]]
 name = "base64"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

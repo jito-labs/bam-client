@@ -181,9 +181,11 @@ impl BamManager {
         };
 
         if let Some(tpu) = Self::get_sockaddr(tpu_info.tpu_sock.as_ref()) {
+            info!("Setting TPU: {:?}", tpu);
             let _ = cluster_info.set_tpu(tpu);
         }
         if let Some(tpu_fwd) = Self::get_sockaddr(tpu_info.tpu_fwd_sock.as_ref()) {
+            info!("Setting TPU forward: {:?}", tpu_fwd);
             let _ = cluster_info.set_tpu_forwards(tpu_fwd);
         }
     }
