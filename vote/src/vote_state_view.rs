@@ -128,25 +128,25 @@ impl VoteStateView {
         }
     }
 
-    fn votes_view(&self) -> ListView<VotesFrame> {
+    fn votes_view(&self) -> ListView<'_, VotesFrame> {
         let offset = self.frame.offset(Field::Votes);
         // SAFETY: `frame` was created from `data`.
         ListView::new(self.frame.votes_frame(), &self.data[offset..])
     }
 
-    fn root_slot_view(&self) -> RootSlotView {
+    fn root_slot_view(&self) -> RootSlotView<'_> {
         let offset = self.frame.offset(Field::RootSlot);
         // SAFETY: `frame` was created from `data`.
         RootSlotView::new(self.frame.root_slot_frame(), &self.data[offset..])
     }
 
-    fn authorized_voters_view(&self) -> ListView<AuthorizedVotersListFrame> {
+    fn authorized_voters_view(&self) -> ListView<'_, AuthorizedVotersListFrame> {
         let offset = self.frame.offset(Field::AuthorizedVoters);
         // SAFETY: `frame` was created from `data`.
         ListView::new(self.frame.authorized_voters_frame(), &self.data[offset..])
     }
 
-    fn epoch_credits_view(&self) -> ListView<EpochCreditsListFrame> {
+    fn epoch_credits_view(&self) -> ListView<'_, EpochCreditsListFrame> {
         let offset = self.frame.offset(Field::EpochCredits);
         // SAFETY: `frame` was created from `data`.
         ListView::new(self.frame.epoch_credits_frame(), &self.data[offset..])
