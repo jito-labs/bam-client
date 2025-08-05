@@ -236,7 +236,6 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
                 reservation_cb,
                 true,
             );
-
             if result
                 .execute_and_commit_transactions_output
                 .commit_transactions_result
