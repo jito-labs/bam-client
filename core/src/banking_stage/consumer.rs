@@ -228,7 +228,7 @@ impl Consumer {
         seen_messages.clear();
         let pre_results = txs.iter().zip(pre_results).map(|(tx, result)| {
             result?;
-            if !seen_messages.insert(*tx.message_hash()) {
+            if revert_on_error && !seen_messages.insert(*tx.message_hash()) {
                 return Err(TransactionError::AlreadyProcessed);
             }
             Ok(())
