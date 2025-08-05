@@ -8,6 +8,7 @@ members = [
     "accounts-db/accounts-hash-cache-tool",
     "accounts-db/store-histogram",
     "accounts-db/store-tool",
+    "bam-local-cluster",
     "banking-bench",
     "banking-stage-ingress-types",
     "banks-client",
@@ -557,7 +558,13 @@ solana-tps-client = { path = "tps-client", version = "=2.3.7" }
 solana-tpu-client = { path = "tpu-client", version = "=2.3.7", default-features = false }
 solana-tpu-client-next = { path = "tpu-client-next", version = "=2.3.7" }
 solana-transaction = "2.2.2"
+<<<<<<< HEAD
 solana-transaction-context = { path = "transaction-context", version = "=2.3.7", features = ["bincode"] }
+=======
+solana-transaction-context = { path = "transaction-context", version = "=2.3.4", features = [
+    "bincode",
+] }
+>>>>>>> 7c676cbcb9 (Adds BAM local cluster testing (#149))
 solana-transaction-error = "2.2.1"
 solana-transaction-metrics-tracker = { path = "transaction-metrics-tracker", version = "=2.3.7" }
 solana-transaction-status = { path = "transaction-status", version = "=2.3.7" }
