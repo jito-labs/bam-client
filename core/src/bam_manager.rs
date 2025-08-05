@@ -59,26 +59,15 @@ impl BamManager {
             .build()
             .unwrap();
 
-        let start = std::time::Instant::now();
-        const GRACE_PERIOD_DURATION: std::time::Duration = std::time::Duration::from_secs(10);
-        let mut in_startup_grace_period = true;
-
         let mut current_connection = None;
         let mut cached_builder_config = None;
         let mut payment_sender =
             BamPaymentSender::new(exit.clone(), poh_recorder.clone(), dependencies.clone());
 
         while !exit.load(Ordering::Relaxed) {
-            // Check if we are in the startup grace period
-            if in_startup_grace_period && start.elapsed() > GRACE_PERIOD_DURATION {
-                in_startup_grace_period = false;
-            }
-
-            // Update if bam is enabled and sleep for a while before checking again
-            // While in grace period, we allow BAM to be enabled even if no connection is established
+            // Update if bam is enabled
             dependencies.bam_enabled.store(
-                in_startup_grace_period
-                    || (current_connection.is_some() && cached_builder_config.is_some()),
+                current_connection.is_some() && cached_builder_config.is_some(),
                 Ordering::Relaxed,
             );
 
@@ -192,9 +181,11 @@ impl BamManager {
         };
 
         if let Some(tpu) = Self::get_sockaddr(tpu_info.tpu_sock.as_ref()) {
+            info!("Setting TPU: {:?}", tpu);
             let _ = cluster_info.set_tpu(tpu);
         }
         if let Some(tpu_fwd) = Self::get_sockaddr(tpu_info.tpu_fwd_sock.as_ref()) {
+            info!("Setting TPU forward: {:?}", tpu_fwd);
             let _ = cluster_info.set_tpu_forwards(tpu_fwd);
         }
     }
