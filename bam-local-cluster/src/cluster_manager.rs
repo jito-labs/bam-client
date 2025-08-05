@@ -3,29 +3,27 @@ use {
     agave_feature_set::FEATURE_NAMES,
     anyhow::{Context, Result},
     log::{debug, error, info},
+    solana_account::Account,
+    solana_commitment_config::CommitmentConfig,
     solana_faucet::faucet::{run_faucet, Faucet},
     solana_feature_gate_interface as feature,
+    solana_fee_calculator::FeeRateGovernor,
+    solana_genesis_config::{ClusterType, GenesisConfig},
+    solana_keypair::{read_keypair_file, Keypair},
     solana_ledger::{
         blockstore::create_new_ledger, blockstore_options::LedgerColumnOptions,
         genesis_utils::GenesisConfigInfo,
     },
     solana_local_cluster::integration_tests::DEFAULT_NODE_STAKE,
+    solana_native_token::sol_to_lamports,
     solana_program_test::programs::spl_programs,
+    solana_rent::Rent,
     solana_rpc_client::rpc_client::RpcClient,
     solana_runtime::genesis_utils::{
         activate_feature, create_genesis_config_with_leader_ex, ValidatorVoteKeypairs,
     },
-    solana_sdk::{
-        account::Account,
-        commitment_config::CommitmentConfig,
-        fee_calculator::FeeRateGovernor,
-        genesis_config::{ClusterType, GenesisConfig},
-        native_token::LAMPORTS_PER_SOL,
-        rent::Rent,
-        shred_version::compute_shred_version,
-        signature::{read_keypair_file, Keypair},
-        signer::Signer,
-    },
+    solana_shred_version::compute_shred_version,
+    solana_signer::Signer,
     solana_stake_program::stake_state,
     solana_system_interface::program as system_program,
     solana_vote_program::vote_state,
@@ -454,7 +452,7 @@ impl BamLocalCluster {
         stakes: Vec<u64>,
         cluster_type: ClusterType,
     ) -> GenesisConfigInfo {
-        const VALIDATOR_LAMPORTS: u64 = 100000 * LAMPORTS_PER_SOL;
+        let validator_lamports = sol_to_lamports(100000.0);
 
         assert!(!voting_keypairs.is_empty());
         assert_eq!(voting_keypairs.len(), stakes.len());
@@ -470,7 +468,7 @@ impl BamLocalCluster {
             &voting_keypairs[0].borrow().vote_keypair.pubkey(),
             &voting_keypairs[0].borrow().stake_keypair.pubkey(),
             stakes[0],
-            VALIDATOR_LAMPORTS,
+            validator_lamports,
             FeeRateGovernor::default(),
             Rent::default(),
             cluster_type,
@@ -520,7 +518,7 @@ impl BamLocalCluster {
             let stake_pubkey = validator_voting_keypairs.borrow().stake_keypair.pubkey();
 
             // Create accounts
-            let node_account = Account::new(VALIDATOR_LAMPORTS, 0, &system_program::id());
+            let node_account = Account::new(validator_lamports, 0, &system_program::id());
             let vote_account = vote_state::create_account(&vote_pubkey, &node_pubkey, 0, *stake);
             let stake_account = Account::from(stake_state::create_account(
                 &stake_pubkey,
