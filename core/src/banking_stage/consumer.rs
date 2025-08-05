@@ -11,7 +11,6 @@ use {
     },
     ahash::AHashSet,
     itertools::Itertools,
-    jito_tip_payment::CONFIG_ACCOUNT_SEED,
     solana_accounts_db::contains::Contains,
     solana_clock::MAX_PROCESSING_AGE,
     solana_fee::FeeFeatures,
