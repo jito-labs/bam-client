@@ -11,6 +11,7 @@ use {
     },
     ahash::AHashSet,
     itertools::Itertools,
+    jito_tip_payment::CONFIG_ACCOUNT_SEED,
     solana_accounts_db::contains::Contains,
     solana_clock::MAX_PROCESSING_AGE,
     solana_fee::FeeFeatures,
@@ -403,6 +404,10 @@ impl Consumer {
                     ),
                 }
             ));
+        info!(
+            "load_and_execute_transactions_output: {:?}",
+            load_and_execute_transactions_output
+        );
         execute_and_commit_timings.load_execute_us = load_execute_us;
         let successful_count = load_and_execute_transactions_output
             .processed_counts
@@ -415,8 +420,10 @@ impl Consumer {
                 Err(error) => Some(error.clone()),
             })
             .collect_vec();
+        info!("transaction_errors: {:?}", transaction_errors);
 
         if revert_on_error && successful_count != batch.sanitized_transactions().len() {
+            info!("revert_on_error and successful_count != batch.sanitized_transactions().len()");
             return ExecuteAndCommitTransactionsOutput {
                 transaction_counts: LeaderProcessedTransactionCounts {
                     attempted_processing_count: batch.sanitized_transactions().len() as u64,
@@ -493,6 +500,7 @@ impl Consumer {
                 .into_iter()
                 .zip(batch.sanitized_transactions().iter()),
         );
+        info!("batches: {:?}", batches);
 
         let (record_transactions_summary, record_us) = measure_us!(self
             .transaction_recorder
@@ -512,6 +520,7 @@ impl Consumer {
         };
 
         if let Err(recorder_err) = record_transactions_result {
+            info!("recorder_err: {:?}", recorder_err);
             retryable_transaction_indexes.extend(processing_results.iter().enumerate().filter_map(
                 |(index, processing_result)| processing_result.was_processed().then_some(index),
             ));
@@ -534,6 +543,7 @@ impl Consumer {
 
         let (commit_time_us, commit_transaction_statuses) =
             if processed_counts.processed_transactions_count != 0 {
+                info!("committing transactions");
                 self.committer.commit_transactions(
                     batch,
                     processing_results,
@@ -544,13 +554,26 @@ impl Consumer {
                     &processed_counts,
                 )
             } else {
+                info!("no transactions to commit");
                 (
                     0,
                     vec![CommitTransactionDetails::NotCommitted; processing_results.len()],
                 )
             };
 
+        info!(
+            "commit_transaction_statuses: {:?}",
+            commit_transaction_statuses
+        );
+
         drop(freeze_lock);
+
+        let config_account_pubkey =
+            Pubkey::find_program_address(&[CONFIG_ACCOUNT_SEED], &jito_tip_payment::id()).0;
+        info!("config_account_pubkey: {:?}", config_account_pubkey);
+
+        let tip_config_account = bank.get_account(&config_account_pubkey);
+        info!("tip config account: {:?}", tip_config_account);
 
         debug!(
             "bank: {} process_and_record_locked: {}us record: {}us commit: {}us txs_len: {}",
@@ -704,9 +727,7 @@ mod tests {
         solana_poh_config::PohConfig,
         solana_pubkey::Pubkey,
         solana_rpc::transaction_status_service::TransactionStatusService,
-        solana_runtime::{
-            prioritization_fee_cache::PrioritizationFeeCache,
-        },
+        solana_runtime::prioritization_fee_cache::PrioritizationFeeCache,
         solana_runtime_transaction::runtime_transaction::RuntimeTransaction,
         solana_signer::Signer,
         solana_system_interface::program as system_program,

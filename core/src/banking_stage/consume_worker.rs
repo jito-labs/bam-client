@@ -11,6 +11,7 @@ use {
     crate::banking_stage::consumer::TipProcessingDependencies,
     crossbeam_channel::{Receiver, RecvError, SendError, Sender},
     jito_protos::proto::bam_types::TransactionCommittedResult,
+    jito_tip_payment::CONFIG_ACCOUNT_SEED,
     solana_measure::measure_us,
     solana_poh::leader_bank_notifier::LeaderBankNotifier,
     solana_pubkey::Pubkey,
@@ -203,6 +204,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         let Some(tip_processing_dependencies) = &self.tip_processing_dependencies else {
             return true;
         };
+        info!("running tip programs");
         let TipProcessingDependencies {
             tip_manager,
             last_tip_updated_slot,
@@ -230,12 +232,18 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         let initialize_tip_programs_bundle =
             tip_manager.get_initialize_tip_programs_bundle(bank, &keypair);
         if let Some(init_bundle) = initialize_tip_programs_bundle {
+            info!("processing init tip programs bundle");
             let result = self.consumer.process_and_record_transactions(
                 bank,
                 &init_bundle.transactions,
                 reservation_cb,
                 true,
             );
+            let tip_config_account = bank.get_account(
+                &Pubkey::find_program_address(&[CONFIG_ACCOUNT_SEED], &jito_tip_payment::id()).0,
+            );
+            info!("tip config account: {:?}", tip_config_account);
+
             if result
                 .execute_and_commit_transactions_output
                 .commit_transactions_result
@@ -249,23 +257,29 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         if block_builder_fee_info.block_builder == Pubkey::default() {
             return false;
         }
-        if let Ok(Some(tip_crank_bundle)) =
-            tip_manager.get_tip_programs_crank_bundle(bank, &keypair, &block_builder_fee_info)
-        {
-            let result = self.consumer.process_and_record_transactions(
-                bank,
-                &tip_crank_bundle.transactions,
-                reservation_cb,
-                true,
-            );
-            if result
-                .execute_and_commit_transactions_output
-                .commit_transactions_result
-                .is_err()
-            {
+        match tip_manager.get_tip_programs_crank_bundle(bank, &keypair, &block_builder_fee_info) {
+            Ok(Some(tip_crank_bundle)) => {
+                let result = self.consumer.process_and_record_transactions(
+                    bank,
+                    &tip_crank_bundle.transactions,
+                    reservation_cb,
+                    true,
+                );
+                if result
+                    .execute_and_commit_transactions_output
+                    .commit_transactions_result
+                    .is_err()
+                {
+                    return false;
+                }
+            }
+            Ok(None) => return false,
+            Err(e) => {
+                error!("error getting tip programs crank bundle: {:?}", e);
                 return false;
             }
         }
+        info!("updated tip programs");
 
         *last_tip_updated_slot_guard = bank.slot();
         true
@@ -937,11 +951,16 @@ mod tests {
                 tests::{create_slow_genesis_config, sanitize_transactions, simulate_poh},
             },
             bundle_stage::bundle_account_locker::BundleAccountLocker,
+            proxy::block_engine_stage::BlockBuilderFeeInfo,
+            tip_manager::{TipDistributionAccountConfig, TipManager, TipManagerConfig},
         },
+        anchor_lang::AccountDeserialize,
         crossbeam_channel::unbounded,
-        solana_account::Account,
+        jito_tip_payment::{Config, CONFIG_ACCOUNT_SEED, TIP_ACCOUNT_SEED_0},
+        solana_account::{Account, ReadableAccount},
         solana_clock::{Slot, MAX_PROCESSING_AGE},
         solana_genesis_config::GenesisConfig,
+        solana_gossip::cluster_info::{ClusterInfo, Node},
         solana_keypair::Keypair,
         solana_ledger::{
             blockstore::Blockstore, genesis_utils::GenesisConfigInfo,
@@ -951,6 +970,7 @@ mod tests {
             v0::{self, LoadedAddresses},
             AddressLookupTableAccount, SimpleAddressLoader, VersionedMessage,
         },
+        solana_native_token::sol_to_lamports,
         solana_poh::{
             poh_recorder::{PohRecorder, WorkingBankEntry},
             transaction_recorder::TransactionRecorder,
@@ -958,12 +978,14 @@ mod tests {
         solana_poh_config::PohConfig,
         solana_program_test::programs::spl_programs,
         solana_pubkey::Pubkey,
+        solana_rent::Rent,
         solana_runtime::{
             bank_forks::BankForks, prioritization_fee_cache::PrioritizationFeeCache,
             vote_sender_types::ReplayVoteReceiver,
         },
         solana_runtime_transaction::runtime_transaction::RuntimeTransaction,
         solana_signer::Signer,
+        solana_streamer::socket::SocketAddrSpace,
         solana_svm_transaction::svm_message::SVMMessage,
         solana_system_interface::instruction as system_instruction,
         solana_system_transaction as system_transaction,
@@ -974,7 +996,7 @@ mod tests {
         solana_transaction_error::TransactionError,
         std::{
             collections::HashSet,
-            sync::{atomic::AtomicBool, RwLock},
+            sync::{atomic::AtomicBool, Mutex, RwLock},
             thread::JoinHandle,
         },
         tempfile::TempDir,
@@ -1000,6 +1022,7 @@ mod tests {
 
     fn setup_test_frame(
         relax_intrabatch_account_locks: bool,
+        default_rent: bool,
     ) -> (
         TestFrame,
         ConsumeWorker<RuntimeTransaction<SanitizedTransaction>>,
@@ -1007,8 +1030,14 @@ mod tests {
         let GenesisConfigInfo {
             mut genesis_config,
             mint_keypair,
+            voting_keypair,
             ..
-        } = create_slow_genesis_config(10_000);
+        } = create_slow_genesis_config(sol_to_lamports(1.0));
+        if default_rent {
+            // this is needed when you need to access accountsdb (0 lamports accounts don't get written to accountsdb)
+            // if you don't have this, have fun debugging for a few hours :angry:
+            genesis_config.rent = Rent::default();
+        }
         genesis_config.accounts.extend(
             spl_programs(&genesis_config.rent)
                 .into_iter()
@@ -1059,6 +1088,15 @@ mod tests {
             BundleAccountLocker::default(),
         );
 
+        let cluster_info = {
+            let node = Node::new_localhost_with_pubkey(&mint_keypair.pubkey());
+            Arc::new(ClusterInfo::new(
+                node.info.clone(),
+                Arc::new(mint_keypair.insecure_clone()),
+                SocketAddrSpace::Unspecified,
+            ))
+        };
+
         let (consume_sender, consume_receiver) = unbounded();
         let (consumed_sender, consumed_receiver) = unbounded();
         let worker = ConsumeWorker::new_with_tip_processing_deps(
@@ -1067,7 +1105,23 @@ mod tests {
             consumer,
             consumed_sender,
             poh_recorder.read().unwrap().new_leader_bank_notifier(),
-            None,
+            Some(TipProcessingDependencies {
+                tip_manager: TipManager::new(TipManagerConfig {
+                    tip_payment_program_id: jito_tip_payment::id(),
+                    tip_distribution_program_id: jito_tip_distribution::id(),
+                    tip_distribution_account_config: TipDistributionAccountConfig {
+                        merkle_root_upload_authority: mint_keypair.pubkey(),
+                        vote_account: voting_keypair.pubkey(),
+                        commission_bps: 0,
+                    },
+                }),
+                last_tip_updated_slot: Arc::new(Mutex::new(0)),
+                block_builder_fee_info: Arc::new(Mutex::new(BlockBuilderFeeInfo {
+                    block_builder: mint_keypair.pubkey(),
+                    block_builder_commission: 0,
+                })),
+                cluster_info,
+            }),
         );
 
         (
@@ -1090,7 +1144,7 @@ mod tests {
 
     #[test]
     fn test_worker_consume_no_bank() {
-        let (test_frame, worker) = setup_test_frame(true);
+        let (test_frame, worker) = setup_test_frame(true, false);
         let TestFrame {
             mint_keypair,
             genesis_config,
@@ -1137,7 +1191,7 @@ mod tests {
 
     #[test]
     fn test_worker_consume_simple() {
-        let (test_frame, worker) = setup_test_frame(true);
+        let (test_frame, worker) = setup_test_frame(true, false);
         let TestFrame {
             mint_keypair,
             genesis_config,
@@ -1190,7 +1244,7 @@ mod tests {
     #[test_case(false; "old")]
     #[test_case(true; "simd83")]
     fn test_worker_consume_self_conflicting(relax_intrabatch_account_locks: bool) {
-        let (test_frame, worker) = setup_test_frame(relax_intrabatch_account_locks);
+        let (test_frame, worker) = setup_test_frame(relax_intrabatch_account_locks, false);
         let TestFrame {
             mint_keypair,
             genesis_config,
@@ -1254,7 +1308,7 @@ mod tests {
 
     #[test]
     fn test_worker_consume_multiple_messages() {
-        let (test_frame, worker) = setup_test_frame(true);
+        let (test_frame, worker) = setup_test_frame(true, false);
         let TestFrame {
             mint_keypair,
             genesis_config,
@@ -1335,7 +1389,7 @@ mod tests {
 
     #[test]
     fn test_worker_ttl() {
-        let (test_frame, worker) = setup_test_frame(true);
+        let (test_frame, worker) = setup_test_frame(true, false);
         let TestFrame {
             mint_keypair,
             genesis_config,
@@ -1493,120 +1547,68 @@ mod tests {
         let _ = worker_thread.join().unwrap();
     }
 
-    // #[test]
-    // fn test_handle_tip_programs() {
-    //     let (test_frame, consume_worker) = setup_test_frame(true);
-    //     let TestFrame {
-    //         mint_keypair,
-    //         genesis_config,
-    //         bank,
-    //         poh_recorder,
-    //         consume_sender,
-    //         consumed_receiver,
-    //         ..
-    //     } = &test_frame;
+    #[test]
+    fn test_handle_tip_programs() {
+        solana_logger::setup_with_default("info");
+        let (mut test_frame, worker) = setup_test_frame(true, true);
+        let worker_thread = std::thread::spawn(move || worker.run(|_| 0));
+        let TestFrame {
+            mint_keypair,
+            consume_sender,
+            consumed_receiver,
+            poh_recorder,
+            bank,
+            ..
+        } = &mut test_frame;
 
-    //     // let (replay_vote_sender, _) = unbounded();
-    //     // let keypair = Arc::new(leader_keypair);
-    //     // let block_builder_pubkey = Pubkey::new_unique();
-    //     // let bank = bank_forks.read().unwrap().working_bank();
+        poh_recorder
+            .write()
+            .unwrap()
+            .set_bank_for_test(bank.clone());
+        assert!(bank.slot() > 0);
+        assert!(bank.epoch() > 0);
 
-    //     // let tip_manager = get_tip_manager(&genesis_config_info.voting_keypair.pubkey());
+        let tx = system_transaction::transfer(
+            &mint_keypair,
+            &Pubkey::find_program_address(&[TIP_ACCOUNT_SEED_0], &jito_tip_payment::id()).0,
+            1,
+            bank.last_blockhash(),
+        );
 
-    //     // let tip_accounts = tip_manager.get_tip_accounts();
-    //     // let tip_account = tip_accounts.iter().collect::<Vec<_>>()[0];
-    //     // let txns = sanitize_transactions(vec![system_transaction::transfer(
-    //     //     &genesis_config_info.mint_keypair,
-    //     //     tip_account,
-    //     //     1000,
-    //     //     genesis_config_info.genesis_config.hash(),
-    //     // )]);
+        let runtime_tx = RuntimeTransaction::from_transaction_for_tests(tx);
 
-    //     // let committer = Committer::new(
-    //     //     None,
-    //     //     replay_vote_sender,
-    //     //     Arc::new(PrioritizationFeeCache::new(0u64)),
-    //     // );
+        consume_sender
+            .send(ConsumeWork {
+                batch_id: TransactionBatchId::new(1),
+                ids: vec![0],
+                transactions: vec![runtime_tx.clone()],
+                max_ages: vec![MaxAge::MAX],
+                revert_on_error: false,
+                respond_with_extra_info: true,
+                schedulable_slot: None,
+            })
+            .unwrap();
 
-    //     // let consume_worker = ConsumeWorker::new_with_tip_processing_deps(
-    //     //     id,
-    //     //     work_receiver,
-    //     //     Consumer::new(
-    //     //         committer.clone(),
-    //     //         transaction_recorder.clone(),
-    //     //         QosService::new(id),
-    //     //         log_messages_bytes_limit,
-    //     //         bundle_account_locker.clone(),
-    //     //     ),
-    //     //     finished_work_sender.clone(),
-    //     //     poh_recorder.read().unwrap().new_leader_bank_notifier(),
-    //     //     tip_processing_dependencies.clone(),
-    //     // );
+        let consumed = consumed_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(consumed.retryable_indexes.len(), 0);
+        assert_eq!(consumed.work.transactions.len(), 1);
+        assert_eq!(
+            consumed.work.transactions[0].signature(),
+            runtime_tx.signature()
+        );
 
-    //     // let consumer = Consumer::new(
-    //     //     committer,
-    //     //     transaction_recorder,
-    //     //     QosService::new(1),
-    //     //     None,
-    //     //     BundleAccountLocker::default(),
-    //     // );
+        let tip_config_account = bank
+            .get_account(
+                &Pubkey::find_program_address(&[CONFIG_ACCOUNT_SEED], &jito_tip_payment::id()).0,
+            )
+            .unwrap();
 
-    //     // let transactions =
-    //     //     std::thread::spawn(move || get_executed_txns(&entry_receiver, Duration::from_secs(5)));
+        let config = Config::try_deserialize(&mut tip_config_account.data()).unwrap();
+        assert_eq!(config.block_builder, mint_keypair.pubkey());
 
-    //     // let _ = consumer.process_and_record_transactions(&bank, &txns, &|_| 0, false);
-
-    //     // let transactions = transactions.join().unwrap();
-
-    //     // assert_eq!(transactions.len(), 5);
-
-    //     // // expect to see initialize tip payment program, tip distribution program,
-    //     // // initialize tip distribution account, change tip receiver + change block builder
-    //     // assert_eq!(
-    //     //     transactions[0],
-    //     //     tip_manager
-    //     //         .initialize_tip_payment_program_tx(&bank, &keypair)
-    //     //         .to_versioned_transaction()
-    //     // );
-    //     // assert_eq!(
-    //     //     transactions[1],
-    //     //     tip_manager
-    //     //         .initialize_tip_distribution_config_tx(&bank, &keypair)
-    //     //         .to_versioned_transaction()
-    //     // );
-    //     // assert_eq!(
-    //     //     transactions[2],
-    //     //     tip_manager
-    //     //         .initialize_tip_distribution_account_tx(&bank, &keypair)
-    //     //         .to_versioned_transaction()
-    //     // );
-    //     // // the first tip receiver + block builder are the initializer (keypair.pubkey()) as set by the
-    //     // // TipPayment program during initialization
-    //     // let bank_start = poh_recorder.read().unwrap().bank_start().unwrap();
-    //     // assert_eq!(
-    //     //     transactions[3],
-    //     //     tip_manager
-    //     //         .build_change_tip_receiver_and_block_builder_tx(
-    //     //             &keypair.pubkey(),
-    //     //             &derive_tip_distribution_account_address(
-    //     //                 &tip_manager.tip_distribution_program_id(),
-    //     //                 &genesis_config_info.validator_pubkey,
-    //     //                 bank_start.working_bank.epoch()
-    //     //             )
-    //     //             .0,
-    //     //             &bank_start.working_bank,
-    //     //             &keypair,
-    //     //             &keypair.pubkey(),
-    //     //             &block_builder_pubkey,
-    //     //             5
-    //     //         )
-    //     //         .to_versioned_transaction()
-    //     // );
-
-    //     poh_recorder
-    //         .write()
-    //         .unwrap()
-    //         .is_exited
-    //         .store(true, Ordering::Relaxed);
-    // }
+        drop(test_frame);
+        let _ = worker_thread.join().unwrap();
+    }
 }

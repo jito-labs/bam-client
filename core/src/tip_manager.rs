@@ -211,6 +211,11 @@ impl TipManager {
         bank: &Bank,
         keypair: &Keypair,
     ) -> RuntimeTransaction<SanitizedTransaction> {
+        info!(
+            "initializing tip payment program id: {} config account: {}",
+            self.tip_payment_program_info.program_id,
+            self.tip_payment_program_info.config_pda_bump.0
+        );
         let init_ix = Instruction {
             program_id: self.tip_payment_program_info.program_id,
             data: jito_tip_payment::instruction::Initialize {
