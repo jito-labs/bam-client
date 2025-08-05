@@ -642,8 +642,8 @@ pub fn execute(
         trust_packets: matches.is_present("trust_block_engine_packets"),
     }));
 
-    let bam_url = Arc::new(Mutex::new(if matches.is_present("block_engine_url") {
-        value_of(matches, "block_engine_url")
+    let bam_url = Arc::new(Mutex::new(if matches.is_present("bam_url") {
+        Some(value_of(matches, "block_engine_url").expect("couldn't parse bam_url"))
     } else {
         None
     }));
