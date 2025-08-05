@@ -1560,7 +1560,7 @@ mod tests {
         assert!(bank.epoch() > 0);
 
         let tx = system_transaction::transfer(
-            &mint_keypair,
+            mint_keypair,
             &Pubkey::find_program_address(&[TIP_ACCOUNT_SEED_0], &jito_tip_payment::id()).0,
             1,
             bank.last_blockhash(),
