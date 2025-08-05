@@ -1,13 +1,14 @@
+//! An implementation of the `ReceiveAndBuffer` trait that receives messages from BAM
+//! and buffers from into the the `TransactionStateContainer`. Key thing to note:
+//! this implementation only functions during the `Consume/Hold` phase; otherwise it will send them back
+//! to BAM with a `Retryable` result.
 use crate::banking_stage::scheduler_messages::MaxAge;
 use crate::banking_stage::transaction_scheduler::receive_and_buffer::DisconnectedError;
 use crate::UNKNOWN_IP;
+use crossbeam_channel::{RecvTimeoutError, TryRecvError};
 use solana_clock::MAX_PROCESSING_AGE;
 use solana_packet::{PacketFlags, PACKET_DATA_SIZE};
 use solana_transaction::sanitized::SanitizedTransaction;
-/// An implementation of the `ReceiveAndBuffer` trait that receives messages from BAM
-/// and buffers from into the the `TransactionStateContainer`. Key thing to note:
-/// this implementation only functions during the `Consume/Hold` phase; otherwise it will send them back
-/// to BAM with a `Retryable` result.
 use std::{
     cmp::min,
     sync::{
@@ -345,58 +346,68 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
         _: &mut super::scheduler_metrics::SchedulerCountMetrics,
         decision: &BufferedPacketsDecision,
     ) -> Result<usize, DisconnectedError> {
-        if !self.bam_enabled.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(5));
-            return Ok(0);
-        }
-
         let mut result = 0;
-        const MAX_BUNDLES_PER_RECV: usize = 24;
-        match decision {
-            BufferedPacketsDecision::Consume(_) | BufferedPacketsDecision::Hold => {
-                while result < MAX_BUNDLES_PER_RECV {
-                    let Ok(batch) = self.bundle_receiver.try_recv() else {
-                        break;
-                    };
-                    let ParsedBatch {
-                        txns_max_age,
-                        cost,
-                        priority,
-                        revert_on_error,
-                    } = match Self::parse_batch(&batch, &self.bank_forks) {
-                        Ok(parsed) => parsed,
-                        Err(reason) => {
-                            self.send_bundle_not_committed_result(batch.seq_id, reason);
-                            continue;
-                        }
-                    };
-                    if container
-                        .insert_new_batch(
-                            txns_max_age,
-                            priority,
-                            cost,
-                            revert_on_error,
-                            batch.max_schedule_slot,
-                        )
-                        .is_none()
-                    {
-                        self.send_container_full_txn_batch_result(batch.seq_id);
-                        continue;
-                    };
+        let is_bam_enabled = self.bam_enabled.load(Ordering::Relaxed);
 
-                    result += 1;
+        match decision {
+            BufferedPacketsDecision::Consume(_) | BufferedPacketsDecision::Hold => loop {
+                let batch = match self.bundle_receiver.try_recv() {
+                    Ok(batch) => batch,
+                    Err(TryRecvError::Disconnected) => return Err(DisconnectedError),
+                    Err(TryRecvError::Empty) => {
+                        // If the channel is empty, work here is done.
+                        return Ok(result);
+                    }
+                };
+
+                // If BAM is not enabled, drain the channel
+                if !is_bam_enabled {
+                    continue;
                 }
-            }
+
+                let ParsedBatch {
+                    txns_max_age,
+                    cost,
+                    priority,
+                    revert_on_error,
+                } = match Self::parse_batch(&batch, &self.bank_forks) {
+                    Ok(parsed) => parsed,
+                    Err(reason) => {
+                        self.send_bundle_not_committed_result(batch.seq_id, reason);
+                        continue;
+                    }
+                };
+                if container
+                    .insert_new_batch(
+                        txns_max_age,
+                        priority,
+                        cost,
+                        revert_on_error,
+                        batch.max_schedule_slot,
+                    )
+                    .is_none()
+                {
+                    self.send_container_full_txn_batch_result(batch.seq_id);
+                    continue;
+                };
+
+                result = result.saturating_add(1);
+            },
             BufferedPacketsDecision::ForwardAndHold | BufferedPacketsDecision::Forward => {
                 // Send back any batches that were received while in Forward/Hold state
                 let deadline = Instant::now() + Duration::from_millis(100);
-                while let Ok(batch) = self.bundle_receiver.recv_deadline(deadline) {
+                loop {
+                    let batch = match self.bundle_receiver.recv_deadline(deadline) {
+                        Ok(batch) => batch,
+                        Err(RecvTimeoutError::Disconnected) => return Err(DisconnectedError),
+                        Err(RecvTimeoutError::Timeout) => {
+                            return Ok(0);
+                        }
+                    };
                     self.send_no_leader_slot_txn_batch_result(batch.seq_id);
                 }
             }
         }
-
-        Ok(result)
     }
 }
 
