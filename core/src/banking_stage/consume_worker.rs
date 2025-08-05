@@ -265,11 +265,11 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
                     return false;
                 }
             }
-            Ok(None) => return false,
             Err(e) => {
                 error!("error getting tip programs crank bundle: {:?}", e);
-                return false;
+                // ignore this error for now so tips can get processed
             }
+            _ => {}
         }
 
         *last_tip_updated_slot_guard = bank.slot();
