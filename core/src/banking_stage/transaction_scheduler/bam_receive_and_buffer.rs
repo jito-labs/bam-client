@@ -442,6 +442,7 @@ pub fn priority_to_seq_id(priority: u64) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use solana_signer::Signer;
     use solana_system_transaction::transfer;
     use {
         super::*,
@@ -751,6 +752,37 @@ mod tests {
             Reason::DeserializationError(jito_protos::proto::bam_types::DeserializationError {
                 index: 0,
                 reason: DeserializationErrorReason::InconsistentBundle as i32,
+            })
+        );
+    }
+
+    #[test]
+    fn test_parse_bundle_blacklisted_account() {
+        let keypair = Keypair::new();
+        let blacklisted_accounts = HashSet::from([keypair.pubkey()]);
+
+        let (bank_forks, mint_keypair) = test_bank_forks();
+        let batch = AtomicTxnBatch {
+            seq_id: 1,
+            packets: vec![Packet {
+                data: bincode::serialize(&transfer(
+                    &mint_keypair,
+                    &keypair.pubkey(),
+                    100,
+                    bank_forks.read().unwrap().root_bank().last_blockhash(),
+                ))
+                .unwrap(),
+                meta: None,
+            }],
+            max_schedule_slot: 0,
+        };
+        let result = BamReceiveAndBuffer::parse_batch(&batch, &bank_forks, &blacklisted_accounts);
+        assert!(result.is_err());
+        assert_eq!(
+            result.err().unwrap(),
+            Reason::TransactionError(jito_protos::proto::bam_types::TransactionError {
+                index: 0,
+                reason: DeserializationErrorReason::SanitizeError as i32,
             })
         );
     }
