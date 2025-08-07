@@ -3,7 +3,7 @@
 
 use {
     crate::bam_dependencies::v0_to_versioned_proto,
-    futures::{channel::mpsc, SinkExt, StreamExt},
+    h3_util::quinn::H3QuinnConnector,
     jito_protos::proto::{
         bam_api::{
             bam_node_api_client::BamNodeApiClient, start_scheduler_message_v0::Msg,
@@ -16,12 +16,19 @@ use {
     solana_gossip::cluster_info::ClusterInfo,
     solana_keypair::Keypair,
     solana_signer::Signer,
-    std::sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
-        Arc, Mutex,
+    std::{
+        io,
+        io::ErrorKind,
+        str::FromStr,
+        sync::{
+            atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
+            Arc, Mutex,
+        },
     },
     thiserror::Error,
-    tokio::time::{interval, timeout},
+    tokio::{sync::mpsc, time::interval},
+    tokio_stream::wrappers::ReceiverStream,
+    tonic_h3::H3Channel,
 };
 
 pub struct BamConnection {
@@ -40,16 +47,44 @@ impl BamConnection {
         batch_sender: crossbeam_channel::Sender<AtomicTxnBatch>,
         outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessageV0>,
     ) -> Result<Self, TryInitError> {
-        let backend_endpoint = tonic::transport::Endpoint::from_shared(url.clone())?;
-        let connection_timeout = std::time::Duration::from_secs(5);
+        let uri = http_1_1_0::uri::Uri::from_str(&url).map_err(|e| {
+            io::Error::new(
+                ErrorKind::Other,
+                format!("failed to resolve block engine IP {e}"),
+            )
+        })?;
 
-        let channel = timeout(connection_timeout, backend_endpoint.connect()).await??;
+        let mut tls_config = rustls::ClientConfig::builder_with_provider(
+            rustls::crypto::ring::default_provider().into(),
+        )
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .dangerous() // Do not verify server certs
+        .with_custom_certificate_verifier(Arc::new(danger::NoCertificateVerification::new(
+            rustls::crypto::ring::default_provider(),
+        )))
+        .with_no_client_auth();
 
-        let mut validator_client = BamNodeApiClient::new(channel);
+        tls_config.enable_early_data = true;
+        tls_config.alpn_protocols = vec![b"h3".to_vec()];
+        let mut client_endpoint = quinn::Endpoint::client("[::]:0".parse().unwrap())?;
+        let client_config = quinn::ClientConfig::new(Arc::new(
+            quinn::crypto::rustls::QuicClientConfig::try_from(tls_config).unwrap(),
+        ));
+        client_endpoint.set_default_client_config(client_config);
+
+        let connector = h3_util::quinn::H3QuinnConnector::new(
+            uri.clone(),
+            "localhost".to_owned(),
+            client_endpoint.clone(),
+        );
+
+        let mut validator_client =
+            BamNodeApiClient::new(H3Channel::new(connector.clone(), uri.clone()));
+        let config_refresh_client = BamNodeApiClient::new(H3Channel::new(connector, uri.clone()));
 
         let (outbound_sender, outbound_receiver_internal) = mpsc::channel(100_000);
-        let outbound_stream =
-            tonic::Request::new(outbound_receiver_internal.map(|req: StartSchedulerMessage| req));
+        let outbound_stream = tonic::Request::new(ReceiverStream::new(outbound_receiver_internal));
         let inbound_stream = validator_client
             .start_scheduler_stream(outbound_stream)
             .await
@@ -69,6 +104,7 @@ impl BamConnection {
             inbound_stream,
             outbound_sender,
             validator_client,
+            config_refresh_client,
             config.clone(),
             batch_sender,
             cluster_info,
@@ -90,8 +126,9 @@ impl BamConnection {
     async fn connection_task(
         exit: Arc<AtomicBool>,
         mut inbound_stream: tonic::Streaming<StartSchedulerResponse>,
-        mut outbound_sender: mpsc::Sender<StartSchedulerMessage>,
-        mut validator_client: BamNodeApiClient<tonic::transport::channel::Channel>,
+        outbound_sender: mpsc::Sender<StartSchedulerMessage>,
+        mut validator_client: BamNodeApiClient<H3Channel<H3QuinnConnector>>,
+        config_refresh_client: BamNodeApiClient<H3Channel<H3QuinnConnector>>,
         config: Arc<Mutex<Option<ConfigResponse>>>,
         batch_sender: crossbeam_channel::Sender<AtomicTxnBatch>,
         cluster_info: Arc<ClusterInfo>,
@@ -135,7 +172,7 @@ impl BamConnection {
         let builder_config_task = tokio::spawn(Self::refresh_config_task(
             exit.clone(),
             config.clone(),
-            validator_client.clone(),
+            config_refresh_client,
             metrics.clone(),
         ));
         while !exit.load(Relaxed) {
@@ -216,7 +253,7 @@ impl BamConnection {
     async fn refresh_config_task(
         exit: Arc<AtomicBool>,
         config: Arc<Mutex<Option<ConfigResponse>>>,
-        mut validator_client: BamNodeApiClient<tonic::transport::channel::Channel>,
+        mut validator_client: BamNodeApiClient<H3Channel<H3QuinnConnector>>,
         metrics: Arc<BamConnectionMetrics>,
     ) {
         let mut interval = interval(std::time::Duration::from_secs(1));
@@ -260,7 +297,7 @@ impl BamConnection {
     }
 
     async fn prepare_auth_proof(
-        validator_client: &mut BamNodeApiClient<tonic::transport::channel::Channel>,
+        validator_client: &mut BamNodeApiClient<H3Channel<H3QuinnConnector>>,
         cluster_info: Arc<ClusterInfo>,
     ) -> Option<AuthProof> {
         let request = tonic::Request::new(AuthChallengeRequest {});
@@ -359,9 +396,76 @@ pub enum TryInitError {
     #[error("In leader slot")]
     MidLeaderSlotError,
     #[error("Invalid URI")]
+    UriError(#[from] http_1_1_0::Error),
+    #[error("Invalid URI")]
     EndpointConnectError(#[from] tonic::transport::Error),
+    #[error("Connect Error")]
+    H3EndpointConnectError(#[from] std::io::Error),
     #[error("Connection timeout")]
     ConnectionTimeout(#[from] tokio::time::error::Elapsed),
     #[error("Stream start error")]
     StreamStartError(#[from] tonic::Status),
+}
+// copied from https://github.com/rustls/rustls/blob/f98484bdbd57a57bafdd459db594e21c531f1b4a/examples/src/bin/tlsclient-mio.rs#L331
+mod danger {
+    use rustls::{
+        client::danger::HandshakeSignatureValid,
+        crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider},
+        pki_types::{CertificateDer, ServerName, UnixTime},
+        DigitallySignedStruct,
+    };
+
+    #[derive(Debug)]
+    pub struct NoCertificateVerification(CryptoProvider);
+
+    impl NoCertificateVerification {
+        pub fn new(provider: CryptoProvider) -> Self {
+            Self(provider)
+        }
+    }
+
+    impl rustls::client::danger::ServerCertVerifier for NoCertificateVerification {
+        fn verify_server_cert(
+            &self,
+            _end_entity: &CertificateDer<'_>,
+            _intermediates: &[CertificateDer<'_>],
+            _server_name: &ServerName<'_>,
+            _ocsp: &[u8],
+            _now: UnixTime,
+        ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            verify_tls12_signature(
+                message,
+                cert,
+                dss,
+                &self.0.signature_verification_algorithms,
+            )
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            verify_tls13_signature(
+                message,
+                cert,
+                dss,
+                &self.0.signature_verification_algorithms,
+            )
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+            self.0.signature_verification_algorithms.supported_schemes()
+        }
+    }
 }

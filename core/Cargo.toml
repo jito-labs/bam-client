@@ -61,7 +61,10 @@ dashmap = { workspace = true, features = ["rayon", "raw-api"] }
 derive_more = { workspace = true }
 etcd-client = { workspace = true, features = ["tls"] }
 futures = { workspace = true }
+h3-quinn = "0.0.10"
+h3-util = { git = "https://github.com/youyuanwu/tonic-h3.git", rev = "f430cfd721ef40c10527fc5a95465fd722a32c48", default-features = false, features = ["quinn"] }
 histogram = { workspace = true }
+http_1_1_0 = { package = "http", version = "=1.1.0" }
 itertools = { workspace = true }
 jito-protos = { workspace = true }
 jito-tip-distribution = { workspace = true }
@@ -79,6 +82,7 @@ quinn = { workspace = true }
 rand = { workspace = true }
 rand_chacha = { workspace = true }
 rayon = { workspace = true }
+rcgen = "0.14"
 rolling-file = { workspace = true }
 rustls = { workspace = true }
 serde = { workspace = true }
@@ -182,8 +186,10 @@ sys-info = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
+tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 tonic = { workspace = true }
+tonic-h3 = { git = "https://github.com/youyuanwu/tonic-h3.git", rev = "f430cfd721ef40c10527fc5a95465fd722a32c48", default-features = false, features = ["quinn"] }
 trees = { workspace = true }
 
 [target.'cfg(not(any(target_env = "msvc", target_os = "freebsd")))'.dependencies]
