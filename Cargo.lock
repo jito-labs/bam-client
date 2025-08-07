@@ -7336,7 +7336,7 @@ dependencies = [
  "blake3",
  "solana-define-syscall",
  "solana-hash",
- "solana-sanitize",
+ "solana-sanitize 2.2.1",
 ]
 
 [[package]]
@@ -7352,7 +7352,7 @@ dependencies = [
  "solana-frozen-abi",
  "solana-frozen-abi-macro",
  "solana-hash",
- "solana-sanitize",
+ "solana-sanitize 3.0.0",
  "solana-sha256-hasher",
  "solana-signature",
  "solana-time-utils",
@@ -8186,7 +8186,7 @@ dependencies = [
  "solana-runtime",
  "solana-runtime-plugin",
  "solana-runtime-transaction",
- "solana-sanitize",
+ "solana-sanitize 3.0.0",
  "solana-sdk",
  "solana-sdk-ids",
  "solana-send-transaction-service",
@@ -8870,7 +8870,7 @@ dependencies = [
  "solana-rayon-threadlimit",
  "solana-rpc-client",
  "solana-runtime",
- "solana-sanitize",
+ "solana-sanitize 3.0.0",
  "solana-serde-varint",
  "solana-sha256-hasher",
  "solana-short-vec",
@@ -8918,7 +8918,7 @@ dependencies = [
  "solana-atomic-u64",
  "solana-frozen-abi",
  "solana-frozen-abi-macro",
- "solana-sanitize",
+ "solana-sanitize 2.2.1",
  "wasm-bindgen",
 ]
 
@@ -8965,7 +8965,7 @@ dependencies = [
  "solana-instruction",
  "solana-program-error",
  "solana-pubkey",
- "solana-sanitize",
+ "solana-sanitize 2.2.1",
  "solana-sdk-ids",
  "solana-serialize-utils",
  "solana-sysvar-id",
@@ -8980,7 +8980,7 @@ dependencies = [
  "sha3",
  "solana-define-syscall",
  "solana-hash",
- "solana-sanitize",
+ "solana-sanitize 2.2.1",
 ]
 
 [[package]]
@@ -9375,7 +9375,7 @@ dependencies = [
  "solana-hash",
  "solana-instruction",
  "solana-pubkey",
- "solana-sanitize",
+ "solana-sanitize 2.2.1",
  "solana-sdk-ids",
  "solana-short-vec",
  "solana-system-interface",
@@ -9501,7 +9501,7 @@ dependencies = [
  "solana-hash",
  "solana-packet",
  "solana-pubkey",
- "solana-sanitize",
+ "solana-sanitize 2.2.1",
  "solana-sha256-hasher",
  "solana-signature",
  "solana-signer",
@@ -9735,7 +9735,7 @@ dependencies = [
  "solana-program-pack",
  "solana-pubkey",
  "solana-rent",
- "solana-sanitize",
+ "solana-sanitize 2.2.1",
  "solana-sdk-ids",
  "solana-sdk-macro",
  "solana-secp256k1-recover",
@@ -9944,7 +9944,7 @@ dependencies = [
  "solana-define-syscall",
  "solana-frozen-abi",
  "solana-frozen-abi-macro",
- "solana-sanitize",
+ "solana-sanitize 2.2.1",
  "solana-sha256-hasher",
  "wasm-bindgen",
 ]
@@ -10586,6 +10586,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61f1bc1357b8188d9c4a3af3fc55276e56987265eb7ad073ae6f8180ee54cecf"
 
 [[package]]
+name = "solana-sanitize"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "927e833259588ac8f860861db0f6e2668c3cc46d917798ade116858960acfe8a"
+
+[[package]]
 name = "solana-sbpf"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10651,7 +10657,7 @@ dependencies = [
  "solana-rent-debits",
  "solana-reserved-account-keys",
  "solana-reward-info",
- "solana-sanitize",
+ "solana-sanitize 2.2.1",
  "solana-sdk-ids",
  "solana-sdk-macro",
  "solana-secp256k1-program",
@@ -10830,7 +10836,7 @@ checksum = "817a284b63197d2b27afdba829c5ab34231da4a9b4e763466a003c40ca4f535e"
 dependencies = [
  "solana-instruction",
  "solana-pubkey",
- "solana-sanitize",
+ "solana-sanitize 2.2.1",
 ]
 
 [[package]]
@@ -10880,7 +10886,7 @@ dependencies = [
  "serde_derive",
  "solana-frozen-abi",
  "solana-frozen-abi-macro",
- "solana-sanitize",
+ "solana-sanitize 2.2.1",
 ]
 
 [[package]]
@@ -11390,7 +11396,7 @@ dependencies = [
  "solana-program-memory",
  "solana-pubkey",
  "solana-rent",
- "solana-sanitize",
+ "solana-sanitize 2.2.1",
  "solana-sdk-ids",
  "solana-sdk-macro",
  "solana-slot-hashes",
@@ -11670,7 +11676,7 @@ dependencies = [
  "solana-message",
  "solana-precompiles",
  "solana-pubkey",
- "solana-sanitize",
+ "solana-sanitize 2.2.1",
  "solana-sdk-ids",
  "solana-short-vec",
  "solana-signature",
@@ -11765,7 +11771,7 @@ dependencies = [
  "solana-frozen-abi",
  "solana-frozen-abi-macro",
  "solana-instruction",
- "solana-sanitize",
+ "solana-sanitize 2.2.1",
 ]
 
 [[package]]
@@ -12010,7 +12016,7 @@ dependencies = [
  "serde_derive",
  "solana-frozen-abi",
  "solana-frozen-abi-macro",
- "solana-sanitize",
+ "solana-sanitize 3.0.0",
  "solana-serde-varint",
 ]
 
