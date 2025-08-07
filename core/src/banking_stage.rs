@@ -527,7 +527,7 @@ impl BankingStage {
                 let receive_and_buffer = SanitizedTransactionReceiveAndBuffer::new(
                     PacketDeserializer::new(non_vote_receiver),
                     bank_forks.clone(),
-                    blacklisted_accounts,
+                    blacklisted_accounts.clone(),
                 );
                 Self::spawn_scheduler_and_workers(
                     &mut bank_thread_hdls,
@@ -544,13 +544,14 @@ impl BankingStage {
                     block_cost_limit_reservation_cb.clone(),
                     tip_processing_dependencies.clone(),
                     bam_dependencies,
+                    blacklisted_accounts,
                 );
             }
             TransactionStructure::View => {
                 let receive_and_buffer = TransactionViewReceiveAndBuffer {
                     receiver: non_vote_receiver,
                     bank_forks: bank_forks.clone(),
-                    blacklisted_accounts,
+                    blacklisted_accounts: blacklisted_accounts.clone(),
                 };
                 Self::spawn_scheduler_and_workers(
                     &mut bank_thread_hdls,
@@ -567,6 +568,7 @@ impl BankingStage {
                     block_cost_limit_reservation_cb.clone(),
                     tip_processing_dependencies.clone(),
                     bam_dependencies,
+                    blacklisted_accounts,
                 );
             }
         }
@@ -590,6 +592,7 @@ impl BankingStage {
         block_cost_limit_reservation_cb: impl Fn(&Bank) -> u64 + Clone + Send + 'static,
         tip_processing_dependencies: Option<TipProcessingDependencies>,
         bam_dependencies: Option<BamDependencies>,
+        blacklisted_accounts: HashSet<Pubkey>,
     ) {
         // Create channels for communication between scheduler and workers
         let num_workers = (num_threads).saturating_sub(NUM_VOTE_PROCESSING_THREADS);
@@ -787,6 +790,7 @@ impl BankingStage {
                             bam_dependencies.batch_receiver.clone(),
                             bam_dependencies.outbound_sender.clone(),
                             bank_forks.clone(),
+                            blacklisted_accounts,
                         );
 
                         let scheduler_controller = SchedulerController::new(
