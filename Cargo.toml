@@ -429,7 +429,7 @@ solana-cost-model = { path = "cost-model", version = "=3.0.0" }
 solana-cpi = "2.2.1"
 solana-curve25519 = { path = "curves/curve25519", version = "=3.0.0" }
 solana-define-syscall = "2.3.0"
-solana-derivation-path = "2.2.1"
+solana-derivation-path = "3.0.0"
 solana-download-utils = { path = "download-utils", version = "=3.0.0" }
 solana-ed25519-program = "2.2.3"
 solana-entry = { path = "entry", version = "=3.0.0" }
