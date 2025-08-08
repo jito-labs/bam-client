@@ -267,11 +267,13 @@ impl BamPaymentSender {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use solana_native_token::LAMPORTS_PER_SOL;
-    use solana_runtime::{
-        bank::Bank,
-        genesis_utils::{create_genesis_config_with_leader, GenesisConfigInfo},
+    use {
+        super::*,
+        solana_native_token::LAMPORTS_PER_SOL,
+        solana_runtime::{
+            bank::Bank,
+            genesis_utils::{create_genesis_config_with_leader, GenesisConfigInfo},
+        },
     };
 
     fn create_test_bank() -> (Bank, Keypair) {
