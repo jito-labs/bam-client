@@ -1,12 +1,19 @@
 use {
     super::{
+        committer::CommitTransactionDetails,
         consumer::{Consumer, ExecuteAndCommitTransactionsOutput, ProcessTransactionBatchOutput},
         leader_slot_timing_metrics::LeaderExecuteAndCommitTimings,
-        scheduler_messages::{ConsumeWork, FinishedConsumeWork},
+        scheduler_messages::{
+            ConsumeWork, FinishedConsumeWork, FinishedConsumeWorkExtraInfo, NotCommittedReason,
+            TransactionResult,
+        },
     },
+    crate::banking_stage::consumer::TipProcessingDependencies,
     crossbeam_channel::{Receiver, RecvError, SendError, Sender},
+    jito_protos::proto::bam_types::TransactionCommittedResult,
     solana_measure::measure_us,
     solana_poh::leader_bank_notifier::LeaderBankNotifier,
+    solana_pubkey::Pubkey,
     solana_runtime::bank::Bank,
     solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
     solana_svm::transaction_error_metrics::TransactionErrorMetrics,
@@ -36,6 +43,8 @@ pub(crate) struct ConsumeWorker<Tx> {
 
     leader_bank_notifier: Arc<LeaderBankNotifier>,
     metrics: Arc<ConsumeWorkerMetrics>,
+
+    tip_processing_dependencies: Option<TipProcessingDependencies>,
 }
 
 impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
@@ -52,6 +61,25 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
             consumed_sender,
             leader_bank_notifier,
             metrics: Arc::new(ConsumeWorkerMetrics::new(id)),
+            tip_processing_dependencies: None,
+        }
+    }
+
+    pub fn new_with_tip_processing_deps(
+        id: u32,
+        consume_receiver: Receiver<ConsumeWork<Tx>>,
+        consumer: Consumer,
+        consumed_sender: Sender<FinishedConsumeWork<Tx>>,
+        leader_bank_notifier: Arc<LeaderBankNotifier>,
+        tip_processing_dependencies: Option<TipProcessingDependencies>,
+    ) -> Self {
+        Self {
+            consume_receiver,
+            consumer,
+            consumed_sender,
+            leader_bank_notifier,
+            metrics: Arc::new(ConsumeWorkerMetrics::new(id)),
+            tip_processing_dependencies,
         }
     }
 
@@ -59,6 +87,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         self.metrics.clone()
     }
 
+    #[allow(clippy::result_large_err)]
     pub fn run(self, reservation_cb: impl Fn(&Bank) -> u64) -> Result<(), ConsumeWorkerError<Tx>> {
         loop {
             let work = self.consume_receiver.recv()?;
@@ -66,6 +95,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         }
     }
 
+    #[allow(clippy::result_large_err)]
     fn consume_loop(
         &self,
         work: ConsumeWork<Tx>,
@@ -104,6 +134,13 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
                     return self.retry_drain(work);
                 }
             }
+
+            if let Some(schedulable_slot) = work.schedulable_slot {
+                if bank.slot() != schedulable_slot {
+                    return self.retry(work);
+                }
+            }
+
             self.consume(&bank, work, reservation_cb)?;
         }
 
@@ -111,29 +148,181 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
     }
 
     /// Consume a single batch.
+    #[allow(clippy::result_large_err)]
     fn consume(
         &self,
         bank: &Arc<Bank>,
         work: ConsumeWork<Tx>,
         reservation_cb: &impl Fn(&Bank) -> u64,
     ) -> Result<(), ConsumeWorkerError<Tx>> {
+        // Update tip account receivers if needed
+        if !self.run_tip_programs_if_needed(bank, &work.transactions, &reservation_cb) {
+            error!(
+                "Error running tip programs for transactions: {:?}",
+                work.transactions
+            );
+            datapoint_error!(
+                "consume-worker-error",
+                ("error", "tip_programs_error", String),
+            );
+        }
+
         let output = self.consumer.process_and_record_aged_transactions(
             bank,
             &work.transactions,
             &work.max_ages,
             reservation_cb,
+            work.revert_on_error,
         );
 
         self.metrics.update_for_consume(&output);
         self.metrics.has_data.store(true, Ordering::Relaxed);
+
+        let extra_info = if work.respond_with_extra_info {
+            Some(Self::generate_extra_info(&output, &work, bank))
+        } else {
+            None
+        };
 
         self.consumed_sender.send(FinishedConsumeWork {
             work,
             retryable_indexes: output
                 .execute_and_commit_transactions_output
                 .retryable_transaction_indexes,
+            extra_info,
         })?;
         Ok(())
+    }
+
+    fn run_tip_programs_if_needed(
+        &self,
+        bank: &Arc<Bank>,
+        txs: &[impl TransactionWithMeta],
+        reservation_cb: &impl Fn(&Bank) -> u64,
+    ) -> bool {
+        let Some(tip_processing_dependencies) = &self.tip_processing_dependencies else {
+            return true;
+        };
+        let TipProcessingDependencies {
+            tip_manager,
+            last_tip_updated_slot,
+            block_builder_fee_info,
+            cluster_info,
+        } = tip_processing_dependencies;
+
+        // Return true if no tip accounts touched
+        let tip_accounts = tip_manager.get_tip_accounts();
+        if !txs.iter().any(|tx| {
+            tx.account_keys()
+                .iter()
+                .any(|key| tip_accounts.contains(key))
+        }) {
+            return true;
+        }
+
+        let keypair = cluster_info.keypair();
+
+        let mut last_tip_updated_slot_guard = last_tip_updated_slot.lock().unwrap();
+        if bank.slot() == *last_tip_updated_slot_guard {
+            return true;
+        }
+
+        let initialize_tip_programs_bundle =
+            tip_manager.get_initialize_tip_programs_bundle(bank, &keypair);
+        if let Some(init_bundle) = initialize_tip_programs_bundle {
+            let result = self.consumer.process_and_record_transactions(
+                bank,
+                &init_bundle.transactions,
+                reservation_cb,
+                true,
+            );
+            if result
+                .execute_and_commit_transactions_output
+                .commit_transactions_result
+                .is_err()
+            {
+                return false;
+            }
+        }
+
+        let block_builder_fee_info = (*block_builder_fee_info.lock().unwrap()).clone();
+        if block_builder_fee_info.block_builder == Pubkey::default() {
+            return false;
+        }
+        match tip_manager.get_tip_programs_crank_bundle(bank, &keypair, &block_builder_fee_info) {
+            Ok(Some(tip_crank_bundle)) => {
+                let result = self.consumer.process_and_record_transactions(
+                    bank,
+                    &tip_crank_bundle.transactions,
+                    reservation_cb,
+                    true,
+                );
+                if result
+                    .execute_and_commit_transactions_output
+                    .commit_transactions_result
+                    .is_err()
+                {
+                    return false;
+                }
+            }
+            Err(e) => {
+                error!("error getting tip programs crank bundle: {:?}", e);
+                // ignore this error for now so tips can get processed
+            }
+            _ => {}
+        }
+
+        *last_tip_updated_slot_guard = bank.slot();
+        true
+    }
+
+    fn generate_extra_info(
+        output: &ProcessTransactionBatchOutput,
+        work: &ConsumeWork<Tx>,
+        bank: &Arc<Bank>,
+    ) -> FinishedConsumeWorkExtraInfo {
+        let Ok(commit_transactions_result) = output
+            .execute_and_commit_transactions_output
+            .commit_transactions_result
+            .as_ref()
+        else {
+            return FinishedConsumeWorkExtraInfo {
+                processed_results: vec![
+                    TransactionResult::NotCommitted(
+                        NotCommittedReason::PohTimeout,
+                    );
+                    work.transactions.len()
+                ],
+            };
+        };
+
+        let errors = &output
+            .execute_and_commit_transactions_output
+            .transaction_errors;
+        let mut processed_results = vec![];
+        for (i, commit_info) in commit_transactions_result.iter().enumerate() {
+            if let CommitTransactionDetails::Committed {
+                compute_units,
+                loaded_accounts_data_size,
+            } = commit_info
+            {
+                processed_results.push(TransactionResult::Committed(TransactionCommittedResult {
+                    cus_consumed: *compute_units as u32,
+                    feepayer_balance_lamports: bank.get_balance(work.transactions[i].fee_payer()),
+                    loaded_accounts_data_size: *loaded_accounts_data_size,
+                }));
+            } else {
+                let not_committed_reason = errors
+                    .get(i)
+                    .cloned()
+                    .flatten()
+                    .map(NotCommittedReason::Error)
+                    .unwrap_or(NotCommittedReason::BatchRevert);
+                processed_results.push(TransactionResult::NotCommitted(not_committed_reason));
+            }
+        }
+
+        FinishedConsumeWorkExtraInfo { processed_results }
     }
 
     /// Try to get a bank for consuming.
@@ -149,6 +338,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
     }
 
     /// Retry current batch and all outstanding batches.
+    #[allow(clippy::result_large_err)]
     fn retry_drain(&self, work: ConsumeWork<Tx>) -> Result<(), ConsumeWorkerError<Tx>> {
         for work in try_drain_iter(work, &self.consume_receiver) {
             self.retry(work)?;
@@ -157,6 +347,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
     }
 
     /// Send transactions back to scheduler as retryable.
+    #[allow(clippy::result_large_err)]
     fn retry(&self, work: ConsumeWork<Tx>) -> Result<(), ConsumeWorkerError<Tx>> {
         let retryable_indexes: Vec<_> = (0..work.transactions.len()).collect();
         let num_retryable = retryable_indexes.len();
@@ -169,9 +360,22 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
             .retryable_expired_bank_count
             .fetch_add(num_retryable, Ordering::Relaxed);
         self.metrics.has_data.store(true, Ordering::Relaxed);
+        let extra_info = if work.respond_with_extra_info {
+            Some(FinishedConsumeWorkExtraInfo {
+                processed_results: vec![
+                    TransactionResult::NotCommitted(
+                        NotCommittedReason::PohTimeout,
+                    );
+                    num_retryable
+                ],
+            })
+        } else {
+            None
+        };
         self.consumed_sender.send(FinishedConsumeWork {
             work,
             retryable_indexes,
+            extra_info,
         })?;
         Ok(())
     }
@@ -738,10 +942,16 @@ mod tests {
                 tests::{create_slow_genesis_config, sanitize_transactions, simulate_poh},
             },
             bundle_stage::bundle_account_locker::BundleAccountLocker,
+            proxy::block_engine_stage::BlockBuilderFeeInfo,
+            tip_manager::{TipDistributionAccountConfig, TipManager, TipManagerConfig},
         },
+        anchor_lang::AccountDeserialize,
         crossbeam_channel::unbounded,
+        jito_tip_payment::{Config, CONFIG_ACCOUNT_SEED, TIP_ACCOUNT_SEED_0},
+        solana_account::{Account, ReadableAccount},
         solana_clock::{Slot, MAX_PROCESSING_AGE},
         solana_genesis_config::GenesisConfig,
+        solana_gossip::cluster_info::{ClusterInfo, Node},
         solana_keypair::Keypair,
         solana_ledger::{
             blockstore::Blockstore, genesis_utils::GenesisConfigInfo,
@@ -751,18 +961,22 @@ mod tests {
             v0::{self, LoadedAddresses},
             AddressLookupTableAccount, SimpleAddressLoader, VersionedMessage,
         },
+        solana_native_token::sol_to_lamports,
         solana_poh::{
             poh_recorder::{PohRecorder, WorkingBankEntry},
             transaction_recorder::TransactionRecorder,
         },
         solana_poh_config::PohConfig,
+        solana_program_test::programs::spl_programs,
         solana_pubkey::Pubkey,
+        solana_rent::Rent,
         solana_runtime::{
             bank_forks::BankForks, prioritization_fee_cache::PrioritizationFeeCache,
             vote_sender_types::ReplayVoteReceiver,
         },
         solana_runtime_transaction::runtime_transaction::RuntimeTransaction,
         solana_signer::Signer,
+        solana_streamer::socket::SocketAddrSpace,
         solana_svm_transaction::svm_message::SVMMessage,
         solana_system_interface::instruction as system_instruction,
         solana_system_transaction as system_transaction,
@@ -773,7 +987,7 @@ mod tests {
         solana_transaction_error::TransactionError,
         std::{
             collections::HashSet,
-            sync::{atomic::AtomicBool, RwLock},
+            sync::{atomic::AtomicBool, Mutex, RwLock},
             thread::JoinHandle,
         },
         tempfile::TempDir,
@@ -799,15 +1013,27 @@ mod tests {
 
     fn setup_test_frame(
         relax_intrabatch_account_locks: bool,
+        default_rent: bool,
     ) -> (
         TestFrame,
         ConsumeWorker<RuntimeTransaction<SanitizedTransaction>>,
     ) {
         let GenesisConfigInfo {
-            genesis_config,
+            mut genesis_config,
             mint_keypair,
+            voting_keypair,
             ..
-        } = create_slow_genesis_config(10_000);
+        } = create_slow_genesis_config(sol_to_lamports(1.0));
+        if default_rent {
+            // this is needed when you need to access accountsdb (0 lamports accounts don't get written to accountsdb)
+            // if you don't have this, have fun debugging for a few hours :angry:
+            genesis_config.rent = Rent::default();
+        }
+        genesis_config.accounts.extend(
+            spl_programs(&genesis_config.rent)
+                .into_iter()
+                .map(|(a, b)| (a, Account::from(b))),
+        );
         let (bank, bank_forks) = Bank::new_no_wallclock_throttle_for_tests(&genesis_config);
         // Warp to next epoch for MaxAge tests.
         let mut bank = Bank::new_from_parent(
@@ -853,14 +1079,40 @@ mod tests {
             BundleAccountLocker::default(),
         );
 
+        let cluster_info = {
+            let node = Node::new_localhost_with_pubkey(&mint_keypair.pubkey());
+            Arc::new(ClusterInfo::new(
+                node.info.clone(),
+                Arc::new(mint_keypair.insecure_clone()),
+                SocketAddrSpace::Unspecified,
+            ))
+        };
+
         let (consume_sender, consume_receiver) = unbounded();
         let (consumed_sender, consumed_receiver) = unbounded();
-        let worker = ConsumeWorker::new(
+        let worker = ConsumeWorker::new_with_tip_processing_deps(
             0,
             consume_receiver,
             consumer,
             consumed_sender,
             poh_recorder.read().unwrap().new_leader_bank_notifier(),
+            Some(TipProcessingDependencies {
+                tip_manager: TipManager::new(TipManagerConfig {
+                    tip_payment_program_id: jito_tip_payment::id(),
+                    tip_distribution_program_id: jito_tip_distribution::id(),
+                    tip_distribution_account_config: TipDistributionAccountConfig {
+                        merkle_root_upload_authority: mint_keypair.pubkey(),
+                        vote_account: voting_keypair.pubkey(),
+                        commission_bps: 0,
+                    },
+                }),
+                last_tip_updated_slot: Arc::new(Mutex::new(0)),
+                block_builder_fee_info: Arc::new(Mutex::new(BlockBuilderFeeInfo {
+                    block_builder: mint_keypair.pubkey(),
+                    block_builder_commission: 0,
+                })),
+                cluster_info,
+            }),
         );
 
         (
@@ -883,7 +1135,7 @@ mod tests {
 
     #[test]
     fn test_worker_consume_no_bank() {
-        let (test_frame, worker) = setup_test_frame(true);
+        let (test_frame, worker) = setup_test_frame(true, false);
         let TestFrame {
             mint_keypair,
             genesis_config,
@@ -913,6 +1165,9 @@ mod tests {
             ids: vec![id],
             transactions,
             max_ages: vec![max_age],
+            revert_on_error: false,
+            respond_with_extra_info: false,
+            schedulable_slot: None,
         };
         consume_sender.send(work).unwrap();
         let consumed = consumed_receiver.recv().unwrap();
@@ -927,7 +1182,7 @@ mod tests {
 
     #[test]
     fn test_worker_consume_simple() {
-        let (test_frame, worker) = setup_test_frame(true);
+        let (test_frame, worker) = setup_test_frame(true, false);
         let TestFrame {
             mint_keypair,
             genesis_config,
@@ -962,6 +1217,9 @@ mod tests {
             ids: vec![id],
             transactions,
             max_ages: vec![max_age],
+            revert_on_error: false,
+            respond_with_extra_info: false,
+            schedulable_slot: None,
         };
         consume_sender.send(work).unwrap();
         let consumed = consumed_receiver.recv().unwrap();
@@ -977,7 +1235,7 @@ mod tests {
     #[test_case(false; "old")]
     #[test_case(true; "simd83")]
     fn test_worker_consume_self_conflicting(relax_intrabatch_account_locks: bool) {
-        let (test_frame, worker) = setup_test_frame(relax_intrabatch_account_locks);
+        let (test_frame, worker) = setup_test_frame(relax_intrabatch_account_locks, false);
         let TestFrame {
             mint_keypair,
             genesis_config,
@@ -1014,6 +1272,9 @@ mod tests {
                 ids: vec![id1, id2],
                 transactions: txs,
                 max_ages: vec![max_age, max_age],
+                revert_on_error: false,
+                respond_with_extra_info: false,
+                schedulable_slot: None,
             })
             .unwrap();
 
@@ -1038,7 +1299,7 @@ mod tests {
 
     #[test]
     fn test_worker_consume_multiple_messages() {
-        let (test_frame, worker) = setup_test_frame(true);
+        let (test_frame, worker) = setup_test_frame(true, false);
         let TestFrame {
             mint_keypair,
             genesis_config,
@@ -1084,6 +1345,9 @@ mod tests {
                 ids: vec![id1],
                 transactions: txs1,
                 max_ages: vec![max_age],
+                revert_on_error: false,
+                respond_with_extra_info: false,
+                schedulable_slot: None,
             })
             .unwrap();
 
@@ -1093,6 +1357,9 @@ mod tests {
                 ids: vec![id2],
                 transactions: txs2,
                 max_ages: vec![max_age],
+                revert_on_error: false,
+                respond_with_extra_info: false,
+                schedulable_slot: None,
             })
             .unwrap();
         let consumed = consumed_receiver.recv().unwrap();
@@ -1113,7 +1380,7 @@ mod tests {
 
     #[test]
     fn test_worker_ttl() {
-        let (test_frame, worker) = setup_test_frame(true);
+        let (test_frame, worker) = setup_test_frame(true, false);
         let TestFrame {
             mint_keypair,
             genesis_config,
@@ -1231,6 +1498,9 @@ mod tests {
                         alt_invalidation_slot: bank.slot() + 1,
                     },
                 ],
+                revert_on_error: false,
+                respond_with_extra_info: false,
+                schedulable_slot: None,
             })
             .unwrap();
 
@@ -1263,6 +1533,71 @@ mod tests {
                 Err(TransactionError::AlreadyProcessed)
             ]
         );
+
+        drop(test_frame);
+        let _ = worker_thread.join().unwrap();
+    }
+
+    #[test]
+    fn test_handle_tip_programs() {
+        solana_logger::setup_with_default("info");
+        let (mut test_frame, worker) = setup_test_frame(true, true);
+        let worker_thread = std::thread::spawn(move || worker.run(|_| 0));
+        let TestFrame {
+            mint_keypair,
+            consume_sender,
+            consumed_receiver,
+            poh_recorder,
+            bank,
+            ..
+        } = &mut test_frame;
+
+        poh_recorder
+            .write()
+            .unwrap()
+            .set_bank_for_test(bank.clone());
+        assert!(bank.slot() > 0);
+        assert!(bank.epoch() > 0);
+
+        let tx = system_transaction::transfer(
+            mint_keypair,
+            &Pubkey::find_program_address(&[TIP_ACCOUNT_SEED_0], &jito_tip_payment::id()).0,
+            1,
+            bank.last_blockhash(),
+        );
+
+        let runtime_tx = RuntimeTransaction::from_transaction_for_tests(tx);
+
+        consume_sender
+            .send(ConsumeWork {
+                batch_id: TransactionBatchId::new(1),
+                ids: vec![0],
+                transactions: vec![runtime_tx.clone()],
+                max_ages: vec![MaxAge::MAX],
+                revert_on_error: false,
+                respond_with_extra_info: true,
+                schedulable_slot: None,
+            })
+            .unwrap();
+
+        let consumed = consumed_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(consumed.retryable_indexes.len(), 0);
+        assert_eq!(consumed.work.transactions.len(), 1);
+        assert_eq!(
+            consumed.work.transactions[0].signature(),
+            runtime_tx.signature()
+        );
+
+        let tip_config_account = bank
+            .get_account(
+                &Pubkey::find_program_address(&[CONFIG_ACCOUNT_SEED], &jito_tip_payment::id()).0,
+            )
+            .unwrap();
+
+        let config = Config::try_deserialize(&mut tip_config_account.data()).unwrap();
+        assert_eq!(config.block_builder, mint_keypair.pubkey());
 
         drop(test_frame);
         let _ = worker_thread.join().unwrap();

@@ -1627,6 +1627,12 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
                 May get stuck if the leader used is different from others.",
             ),
     ).arg(
+        Arg::with_name("bam_url")
+            .long("bam-url")
+            .help("URL of BAM Node; leave empty to disable BAM.")
+            .takes_value(true)
+    )
+        .arg(
         Arg::with_name("block_engine_url")
             .long("block-engine-url")
             .help("Block engine url.  Set to empty string to disable block engine connection.")
