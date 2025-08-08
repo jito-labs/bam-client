@@ -221,10 +221,11 @@ impl BamManager {
             return false;
         };
 
-        if bam_info.commission_bps != COMMISSION_PERCENTAGE.saturating_mul(100) {
+        const COMMISSION_BPS: u64 = COMMISSION_PERCENTAGE.saturating_mul(100);
+        if bam_info.commission_bps != COMMISSION_BPS {
             error!(
                 "BAM commission bps mismatch: expected {}, got {}",
-                COMMISSION_PERCENTAGE, bam_info.commission_bps
+                COMMISSION_BPS, bam_info.commission_bps
             );
             return false;
         }
