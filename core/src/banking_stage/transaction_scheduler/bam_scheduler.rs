@@ -619,7 +619,7 @@ mod tests {
         crossbeam_channel::unbounded,
         itertools::Itertools,
         jito_protos::proto::{
-            bam_api::{start_scheduler_message_v0::Msg, StartSchedulerMessageV0},
+            bam_api::{scheduler_message_v0::Msg, SchedulerMessageV0},
             bam_types::{
                 atomic_txn_batch_result::Result::{Committed, NotCommitted},
                 TransactionCommittedResult,

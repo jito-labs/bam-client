@@ -5,7 +5,7 @@ use {
     crate::proxy::block_engine_stage::BlockBuilderFeeInfo,
     jito_protos::proto::{
         bam_api::{
-            start_scheduler_message::VersionedMsg, StartSchedulerMessage, StartSchedulerMessageV0,
+            scheduler_message::VersionedMsg, SchedulerMessage, SchedulerMessageV0,
         },
         bam_types,
     },
@@ -34,8 +34,8 @@ pub struct BamDependencies {
     pub bam_node_pubkey: Arc<Mutex<Pubkey>>,
 }
 
-pub fn v0_to_versioned_proto(v0: StartSchedulerMessageV0) -> StartSchedulerMessage {
-    StartSchedulerMessage {
+pub fn v0_to_versioned_proto(v0: SchedulerMessageV0) -> SchedulerMessage {
+    SchedulerMessage {
         versioned_msg: Some(VersionedMsg::V0(v0)),
     }
 }
