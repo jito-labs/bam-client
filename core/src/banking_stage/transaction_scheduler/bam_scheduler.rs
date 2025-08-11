@@ -1066,4 +1066,85 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn test_prio_graph_clears_on_slot_boundary() {
+        let TestScheduler {
+            mut scheduler,
+            consume_work_receivers: _,
+            finished_consume_work_sender: _,
+            response_receiver: _,
+        } = create_test_scheduler(4);
+
+        let keypair_a = Keypair::new();
+        let keypair_b = Keypair::new();
+
+        // Create container with some transactions
+        let mut container = create_container(vec![
+            (
+                &keypair_a,
+                vec![Pubkey::new_unique()],
+                1000,
+                seq_id_to_priority(0),
+            ),
+            (
+                &keypair_b,
+                vec![Pubkey::new_unique()],
+                2000,
+                seq_id_to_priority(1),
+            ),
+        ]);
+
+        let (bank_forks, _) = test_bank_forks();
+        let bank = bank_forks.read().unwrap().working_bank();
+        
+        // Set initial slot with bank start
+        let decision = BufferedPacketsDecision::Consume(BankStart {
+            working_bank: bank.clone(),
+            bank_creation_time: Arc::new(Instant::now()),
+        });
+        
+        scheduler.receive_completed(&mut container, &decision).unwrap();
+        assert_eq!(scheduler.slot, Some(bank.slot()));
+        
+        // Pull transactions into prio_graph
+        scheduler.pull_into_prio_graph(&mut container);
+        assert!(!scheduler.prio_graph.is_empty(), "Prio graph should have transactions");
+        
+        // Simulate slot boundary change by changing to no bank (None)
+        let decision_no_bank = BufferedPacketsDecision::Forward;
+        scheduler.receive_completed(&mut container, &decision_no_bank).unwrap();
+        
+        // Verify prio_graph was cleared
+        assert!(scheduler.prio_graph.is_empty(), "Prio graph should be cleared after slot boundary");
+        assert_eq!(scheduler.slot, None);
+        
+        // Test with slot change to a new slot
+        let new_bank = Bank::new_from_parent(bank, &Pubkey::default(), 2);
+        let decision_new_slot = BufferedPacketsDecision::Consume(BankStart {
+            working_bank: Arc::new(new_bank),
+            bank_creation_time: Arc::new(Instant::now()),
+        });
+        
+        // Add some transactions back to container and prio_graph
+        let mut container = create_container(vec![
+            (
+                &keypair_a,
+                vec![Pubkey::new_unique()],
+                1000,
+                seq_id_to_priority(2),
+            ),
+        ]);
+        
+        scheduler.receive_completed(&mut container, &decision_new_slot).unwrap();
+        scheduler.pull_into_prio_graph(&mut container);
+        assert!(!scheduler.prio_graph.is_empty(), "Prio graph should have new transactions");
+        
+        // Change slot again to trigger clear
+        let decision_no_bank_again = BufferedPacketsDecision::Forward;
+        scheduler.receive_completed(&mut container, &decision_no_bank_again).unwrap();
+        
+        // Verify prio_graph was cleared again
+        assert!(scheduler.prio_graph.is_empty(), "Prio graph should be cleared on second slot boundary change");
+    }
 }
