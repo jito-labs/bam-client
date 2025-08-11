@@ -248,8 +248,7 @@ impl BamReceiveAndBuffer {
         // Checks are taken from receive_and_buffer.rs:
         // SanitizedTransactionReceiveAndBuffer::buffer_packets
         for (index, parsed_packet) in parsed_packets.drain(..).enumerate() {
-            // Check 1: Ensure the transaction is valid
-            // BAM protocol check: Reject vote transactions
+            // Check 0: Reject vote transactions
             if parsed_packet.is_simple_vote() {
                 return Err(Reason::DeserializationError(
                     jito_protos::proto::bam_types::DeserializationError {
@@ -259,7 +258,7 @@ impl BamReceiveAndBuffer {
                 ));
             }
 
-            // Check 1
+            // Check 1: Ensure the transaction is valid
             let Some((tx, deactivation_slot)) = parsed_packet.build_sanitized_transaction(
                 vote_only,
                 root_bank.as_ref(),
@@ -904,11 +903,13 @@ mod tests {
         let vote_data = bincode::serialize(&vote_tx).unwrap();
 
         // Create a packet with the vote transaction and mark it as simple_vote_tx
-        let mut meta = jito_protos::proto::bam_types::Meta::default();
-        meta.flags = Some(jito_protos::proto::bam_types::PacketFlags {
-            simple_vote_tx: true,
+        let meta = jito_protos::proto::bam_types::Meta {
+            flags: Some(jito_protos::proto::bam_types::PacketFlags {
+                simple_vote_tx: true,
+                ..Default::default()
+            }),
             ..Default::default()
-        });
+        };
 
         let batch = AtomicTxnBatch {
             seq_id: 1,
