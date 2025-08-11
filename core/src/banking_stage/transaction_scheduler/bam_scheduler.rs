@@ -599,7 +599,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
 
 #[cfg(test)]
 mod tests {
-    use crate::banking_stage::transaction_scheduler::scheduler::PreLockFilterAction;
+    use crate::{bam_dependencies::BamOutboundMessage, banking_stage::transaction_scheduler::scheduler::PreLockFilterAction};
     use {
         crate::banking_stage::{
             decision_maker::BufferedPacketsDecision,
@@ -617,7 +617,6 @@ mod tests {
         crossbeam_channel::unbounded,
         itertools::Itertools,
         jito_protos::proto::{
-            bam_api::{scheduler_message_v0::Msg, SchedulerMessageV0},
             bam_types::{
                 atomic_txn_batch_result::Result::{Committed, NotCommitted},
                 TransactionCommittedResult,
@@ -650,7 +649,7 @@ mod tests {
         finished_consume_work_sender: crossbeam_channel::Sender<
             FinishedConsumeWork<RuntimeTransaction<SanitizedTransaction>>,
         >,
-        response_receiver: crossbeam_channel::Receiver<SchedulerMessageV0>,
+        response_receiver: crossbeam_channel::Receiver<BamOutboundMessage>,
     }
 
     fn create_test_scheduler(num_threads: usize) -> TestScheduler {
@@ -879,9 +878,7 @@ mod tests {
 
         // Check the response for the first transaction (committed)
         let response = response_receiver.try_recv().unwrap();
-        assert!(response.msg.is_some(), "Response should contain a message");
-        let msg = response.msg.unwrap();
-        let Msg::BatchesResult(bundle_result) = msg else {
+        let BamOutboundMessage::AtomicTxnBatchResult(bundle_result) = response else {
             panic!("Expected AtomicTxnBatchResult message");
         };
         assert_eq!(bundle_result.seq_id, 0);
@@ -905,9 +902,7 @@ mod tests {
 
         // Check the response for the second transaction (not committed)
         let response = response_receiver.try_recv().unwrap();
-        assert!(response.msg.is_some(), "Response should contain a message");
-        let msg = response.msg.unwrap();
-        let Msg::BatchesResult(bundle_result) = msg else {
+        let BamOutboundMessage::AtomicTxnBatchResult(bundle_result) = response else {
             panic!("Expected AtomicTxnBatchResult message");
         };
         assert_eq!(bundle_result.seq_id, 3);
@@ -986,9 +981,7 @@ mod tests {
 
         // Check the response for the next transaction
         let response = response_receiver.try_recv().unwrap();
-        assert!(response.msg.is_some(), "Response should contain a message");
-        let msg = response.msg.unwrap();
-        let Msg::BatchesResult(bundle_result) = msg else {
+        let BamOutboundMessage::AtomicTxnBatchResult(bundle_result) = response else {
             panic!("Expected AtomicTxnBatchResult message");
         };
         assert_eq!(bundle_result.seq_id, 1);
@@ -1028,9 +1021,7 @@ mod tests {
 
         // Receive the NotCommitted Result
         let response = response_receiver.try_recv().unwrap();
-        assert!(response.msg.is_some(), "Response should contain a message");
-        let msg = response.msg.unwrap();
-        let Msg::BatchesResult(bundle_result) = msg else {
+        let BamOutboundMessage::AtomicTxnBatchResult(bundle_result) = response else {
             panic!("Expected AtomicTxnBatchResult message");
         };
         assert_eq!(bundle_result.seq_id, 2);
