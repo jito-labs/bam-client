@@ -7,19 +7,22 @@ use {
     jito_protos::proto::{
         bam_api::{
             bam_node_api_client::BamNodeApiClient, scheduler_message_v0::Msg,
-            scheduler_response::VersionedMsg, scheduler_response_v0::Resp,
-            AuthChallengeRequest, ConfigRequest, ConfigResponse, SchedulerMessage,
-            SchedulerMessageV0, SchedulerResponse, SchedulerResponseV0,
+            scheduler_response::VersionedMsg, scheduler_response_v0::Resp, AuthChallengeRequest,
+            ConfigRequest, ConfigResponse, SchedulerMessage, SchedulerMessageV0, SchedulerResponse,
+            SchedulerResponseV0,
         },
         bam_types::{AtomicTxnBatch, AuthProof, ValidatorHeartBeat},
     },
     solana_gossip::cluster_info::ClusterInfo,
     solana_keypair::Keypair,
     solana_signer::Signer,
-    std::{sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
-        Arc, Mutex,
-    }, time::SystemTime},
+    std::{
+        sync::{
+            atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
+            Arc, Mutex,
+        },
+        time::SystemTime,
+    },
     thiserror::Error,
     tokio::time::{interval, timeout},
 };
