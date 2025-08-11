@@ -156,11 +156,11 @@ impl BamManager {
     fn generate_leader_state(bank: &Bank) -> LeaderState {
         let max_block_cu = bank.read_cost_tracker().unwrap().block_cost_limit();
         let consumed_block_cu = bank.read_cost_tracker().unwrap().block_cost();
-        let slot_cu_budget = max_block_cu.saturating_sub(consumed_block_cu) as u32;
+        let slot_cu_budget_remaining = max_block_cu.saturating_sub(consumed_block_cu) as u32;
         LeaderState {
             slot: bank.slot(),
             tick: (bank.tick_height() % bank.ticks_per_slot()) as u32,
-            slot_cu_budget,
+            slot_cu_budget_remaining,
         }
     }
 
