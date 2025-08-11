@@ -436,7 +436,9 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             // Should not happen, but just in case:
             NotCommittedReason::BatchRevert => {
                 jito_protos::proto::bam_types::not_committed::Reason::GenericInvalid(
-                    jito_protos::proto::bam_types::GenericInvalid {},
+                    jito_protos::proto::bam_types::GenericInvalid {
+                        message: "Batch revert logical error".to_string(),
+                    },
                 )
             }
             NotCommittedReason::Error(err) => {
