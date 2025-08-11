@@ -8,6 +8,7 @@ members = [
     "accounts-db/accounts-hash-cache-tool",
     "accounts-db/store-histogram",
     "accounts-db/store-tool",
+    "bam-local-cluster",
     "banking-bench",
     "banking-stage-ingress-types",
     "banks-client",
@@ -294,8 +295,12 @@ jemallocator = { package = "tikv-jemallocator", version = "0.6.0", features = [
     "unprefixed_malloc_on_supported_platforms",
 ] }
 jito-protos = { path = "jito-protos", version = "=2.3.4" }
-jito-tip-distribution = { path = "jito-programs/mev-programs/programs/tip-distribution", features = ["no-entrypoint"] }
-jito-tip-payment = { path = "jito-programs/mev-programs/programs/tip-payment", features = ["no-entrypoint"] }
+jito-tip-distribution = { path = "jito-programs/mev-programs/programs/tip-distribution", features = [
+    "no-entrypoint",
+] }
+jito-tip-payment = { path = "jito-programs/mev-programs/programs/tip-payment", features = [
+    "no-entrypoint",
+] }
 js-sys = "0.3.77"
 json5 = "0.4.1"
 jsonrpc-core = "18.0.0"
@@ -557,7 +562,9 @@ solana-tps-client = { path = "tps-client", version = "=2.3.4" }
 solana-tpu-client = { path = "tpu-client", version = "=2.3.4", default-features = false }
 solana-tpu-client-next = { path = "tpu-client-next", version = "=2.3.4" }
 solana-transaction = "2.2.2"
-solana-transaction-context = { path = "transaction-context", version = "=2.3.4", features = ["bincode"] }
+solana-transaction-context = { path = "transaction-context", version = "=2.3.4", features = [
+    "bincode",
+] }
 solana-transaction-error = "2.2.1"
 solana-transaction-metrics-tracker = { path = "transaction-metrics-tracker", version = "=2.3.4" }
 solana-transaction-status = { path = "transaction-status", version = "=2.3.4" }
