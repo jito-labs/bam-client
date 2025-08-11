@@ -222,7 +222,7 @@ impl BamConnection {
                     }
                     if !waiting_results.is_empty() {
                         let outbound = SchedulerMessageV0 {
-                            msg: Some(Msg::AtomicTxnBatchesResults(jito_protos::proto::bam_types::BatchesResults {
+                            msg: Some(Msg::AtomicTxnBatchesResults(jito_protos::proto::bam_types::AtomicTxnBatchResults {
                                 results: std::mem::take(&mut waiting_results),
                             })),
                         };
