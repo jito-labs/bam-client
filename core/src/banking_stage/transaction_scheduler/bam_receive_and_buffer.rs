@@ -260,7 +260,6 @@ impl BamReceiveAndBuffer {
                 ));
             }
 
-
             // Check 1: Ensure the transaction is valid
             let Some((tx, deactivation_slot)) = parsed_packet.build_sanitized_transaction(
                 vote_only,
@@ -814,7 +813,7 @@ mod tests {
         );
     }
 
-
+  
     #[test]
     fn test_deserialize_packets_invalid_signature() {
         // Create a transaction with invalid signature
