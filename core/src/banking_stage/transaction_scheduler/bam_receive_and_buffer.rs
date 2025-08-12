@@ -12,7 +12,6 @@ use solana_packet::{PacketFlags, PACKET_DATA_SIZE};
 use solana_perf::sigverify::verify_packet;
 use solana_pubkey::Pubkey;
 use solana_sanitize::SanitizeError;
-
 use solana_transaction::sanitized::SanitizedTransaction;
 use std::{
     cmp::min,
@@ -250,6 +249,17 @@ impl BamReceiveAndBuffer {
         // Checks are taken from receive_and_buffer.rs:
         // SanitizedTransactionReceiveAndBuffer::buffer_packets
         for (index, parsed_packet) in parsed_packets.drain(..).enumerate() {
+
+            // Check 0: Reject vote transactions
+            if parsed_packet.is_simple_vote() {
+                return Err(Reason::DeserializationError(
+                    jito_protos::proto::bam_types::DeserializationError {
+                        index: index as u32,
+                        reason: DeserializationErrorReason::VoteTransactionFailure as i32,
+                    },
+                ));
+            }
+
             // Check 1: Ensure the transaction is valid
             let Some((tx, deactivation_slot)) = parsed_packet.build_sanitized_transaction(
                 vote_only,
@@ -469,9 +479,12 @@ mod tests {
         crossbeam_channel::{unbounded, Receiver},
         solana_keypair::Keypair,
         solana_ledger::genesis_utils::GenesisConfigInfo,
+        solana_message::Message,
         solana_pubkey::Pubkey,
         solana_runtime::bank::Bank,
         solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
+        solana_transaction::versioned::VersionedTransaction,
+        solana_transaction::Transaction,
         test_case::test_case,
     };
 
@@ -800,7 +813,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn test_deserialize_packets_invalid_signature() {
         // Create a transaction with invalid signature
@@ -873,4 +885,62 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn test_parse_bundle_rejects_vote_transactions() {
+        let (bank_forks, _mint_keypair) = test_bank_forks();
+
+        // Create a proper vote transaction
+        let vote_keypair = Keypair::new();
+        let node_keypair = Keypair::new();
+        let authorized_voter = Keypair::new();
+        let recent_blockhash = bank_forks.read().unwrap().root_bank().last_blockhash();
+
+        // Create a vote transaction
+        let vote_tx = Transaction::new(
+            &[&node_keypair, &authorized_voter],
+            Message::new(
+                &[solana_vote_program::vote_instruction::vote(
+                    &vote_keypair.pubkey(),
+                    &authorized_voter.pubkey(),
+                    solana_vote_program::vote_state::Vote::new(vec![1], recent_blockhash),
+                )],
+                Some(&node_keypair.pubkey()),
+            ),
+            recent_blockhash,
+        );
+
+        // Serialize the transaction
+        let vote_data = bincode::serialize(&VersionedTransaction::from(vote_tx)).unwrap();
+
+        // Create a packet with the vote transaction
+        let meta = jito_protos::proto::bam_types::Meta {
+            flags: Some(jito_protos::proto::bam_types::PacketFlags {
+                simple_vote_tx: true, // this triggers parsed_packet.is_simple_vote()
+                ..Default::default()
+            }),
+            size: vote_data.len() as u64,
+            ..Default::default()
+        };
+
+        let batch = AtomicTxnBatch {
+            seq_id: 1,
+            packets: vec![Packet {
+                data: vote_data,
+                meta: Some(meta),
+            }],
+            max_schedule_slot: 0,
+        };
+
+        // Test that parse_batch rejects vote transactions
+        let result = BamReceiveAndBuffer::parse_batch(&batch, &bank_forks, &HashSet::default());
+        assert!(result.is_err());
+        assert_eq!(
+            result.err().unwrap(),
+            Reason::DeserializationError(jito_protos::proto::bam_types::DeserializationError {
+                index: 0,
+                reason: DeserializationErrorReason::VoteTransactionFailure as i32,
+            })
+        );
+    }
 }
