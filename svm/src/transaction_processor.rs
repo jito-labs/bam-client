@@ -1,7 +1,5 @@
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::{field_qualifiers, qualifiers};
-use crate::transaction_processing_result::TransactionProcessingResultExtensions;
-
 use {
     crate::{
         account_loader::{
@@ -18,7 +16,10 @@ use {
         transaction_balances::{BalanceCollectionRoutines, BalanceCollector},
         transaction_error_metrics::TransactionErrorMetrics,
         transaction_execution_result::{ExecutedTransaction, TransactionExecutionDetails},
-        transaction_processing_result::{ProcessedTransaction, TransactionProcessingResult},
+        transaction_processing_result::{
+            ProcessedTransaction, TransactionProcessingResult,
+            TransactionProcessingResultExtensions,
+        },
     },
     log::debug,
     percentage::Percentage,
@@ -332,7 +333,9 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
     }
 
     /// Main entrypoint to the SVM.
-    pub fn load_and_execute_sanitized_transactions_with_revert_on_error<CB: TransactionProcessingCallback>(
+    pub fn load_and_execute_sanitized_transactions_with_revert_on_error<
+        CB: TransactionProcessingCallback,
+    >(
         &self,
         callbacks: &CB,
         sanitized_txs: &[impl SVMTransaction],
