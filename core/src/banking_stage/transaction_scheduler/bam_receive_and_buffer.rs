@@ -911,12 +911,14 @@ mod tests {
         let vote_data = bincode::serialize(&VersionedTransaction::from(vote_tx)).unwrap();
 
         // Create a packet with the vote transaction
-        let mut meta = jito_protos::proto::bam_types::Meta::default();
-        meta.size = vote_data.len() as u64;
-        meta.flags = Some(jito_protos::proto::bam_types::PacketFlags {
-            simple_vote_tx: true, // this triggers parsed_packet.is_simple_vote()
-            ..Default::default()
-        });
+        let mut meta = jito_protos::proto::bam_types::Meta {
+            flags: Some(jito_protos::proto::bam_types::PacketFlags {
+                simple_vote_tx: true, // this triggers parsed_packet.is_simple_vote()
+                ..Default::default()
+            }),
+            size: vote_data_len() as u64,
+            ..default::Default()
+        };
 
         let batch = AtomicTxnBatch {
             seq_id: 1,
