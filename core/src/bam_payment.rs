@@ -264,20 +264,21 @@ impl BamPaymentSender {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use solana_runtime::{
-        bank::Bank,
-        bank_forks::BankForks,
-        genesis_utils::create_genesis_config,
+    use {
+        super::*,
+        solana_runtime::{bank::Bank, bank_forks::BankForks, genesis_utils::create_genesis_config},
+        solana_signer::Signer,
+        solana_system_interface::instruction::transfer as system_transfer,
+        solana_transaction::Transaction,
     };
-    use solana_signer::Signer;
-    use solana_system_interface::instruction::transfer as system_transfer;
-    use solana_transaction::Transaction;
 
     #[test]
     fn calculate_payment_amount_uses_rooted_bank_priority_fee_total() {
         let mut genesis = create_genesis_config(10_000_000_000);
-        genesis.genesis_config.fee_rate_governor.lamports_per_signature = 5_000; // Need to override the sneaky-deaky test default
+        genesis
+            .genesis_config
+            .fee_rate_governor
+            .lamports_per_signature = 5_000; // Need to override the sneaky-deaky test default
         let parent = std::sync::Arc::new(solana_runtime::bank::Bank::new_for_tests(
             &genesis.genesis_config,
         ));
