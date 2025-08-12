@@ -23,7 +23,11 @@ use {
         time::SystemTime,
     },
     thiserror::Error,
-    tokio::{sync::mpsc, time::{interval, timeout}}, tokio_stream::wrappers::ReceiverStream,
+    tokio::{
+        sync::mpsc,
+        time::{interval, timeout},
+    },
+    tokio_stream::wrappers::ReceiverStream,
 };
 
 pub struct BamConnection {
@@ -50,8 +54,7 @@ impl BamConnection {
         let mut validator_client = BamNodeApiClient::new(channel);
 
         let (outbound_sender, outbound_receiver_internal) = mpsc::channel(100_000);
-        let outbound_stream =
-            tonic::Request::new(ReceiverStream::new(outbound_receiver_internal));
+        let outbound_stream = tonic::Request::new(ReceiverStream::new(outbound_receiver_internal));
         let inbound_stream = validator_client
             .init_scheduler_stream(outbound_stream)
             .await
@@ -92,7 +95,7 @@ impl BamConnection {
     async fn connection_task(
         exit: Arc<AtomicBool>,
         mut inbound_stream: tonic::Streaming<SchedulerResponse>,
-        outbound_sender: mpsc::Sender<SchedulerMessage>,
+        mut outbound_sender: mpsc::Sender<SchedulerMessage>,
         mut validator_client: BamNodeApiClient<tonic::transport::channel::Channel>,
         config: Arc<Mutex<Option<ConfigResponse>>>,
         batch_sender: crossbeam_channel::Sender<AtomicTxnBatch>,

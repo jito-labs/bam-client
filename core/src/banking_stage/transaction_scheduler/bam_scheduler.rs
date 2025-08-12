@@ -5,6 +5,7 @@
 use crate::banking_stage::transaction_scheduler::scheduler::PreLockFilterAction;
 use crate::banking_stage::transaction_scheduler::scheduler_common::SchedulingCommon;
 use crate::banking_stage::transaction_scheduler::transaction_state::TransactionState;
+use histogram::Histogram;
 use solana_clock::Slot;
 use std::time::Instant;
 use crate::bam_dependencies::BamOutboundMessage;
@@ -63,6 +64,8 @@ pub struct BamScheduler<Tx: TransactionWithMeta> {
     next_batch_id: u64,
     inflight_batch_info: HashMap<TransactionBatchId, InflightBatchInfo>,
     prio_graph: SchedulerPrioGraph,
+    insertion_to_prio_graph_time: HashMap<u32, Instant>,
+    time_in_priograph_us: Histogram,
     slot: Option<Slot>,
 
     // Reusable objects to avoid allocations
@@ -94,6 +97,8 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             next_batch_id: 0,
             inflight_batch_info: HashMap::default(),
             prio_graph: PrioGraph::new(passthrough_priority),
+            insertion_to_prio_graph_time: HashMap::default(),
+            time_in_priograph_us: Histogram::new(),
             slot: None,
             reusable_consume_work: Vec::new(),
             reusable_priority_ids: Vec::new(),
@@ -126,7 +131,8 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             let txns = batch_ids
                 .iter()
                 .filter_map(|txn_id| container.get_transaction(*txn_id));
-
+            self.insertion_to_prio_graph_time
+                .insert(priority_to_seq_id(next_batch_id.priority), Instant::now());
             self.prio_graph.insert_transaction(
                 next_batch_id,
                 Self::get_transactions_account_access(txns.into_iter()),
@@ -198,10 +204,17 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         container: &mut impl StateContainer<Tx>,
         current_slot: Slot,
     ) {
+        let now = Instant::now();
         let mut current_batch_ids = self.get_or_create_priority_ids();
         while let Some(next_batch_id) = self.prio_graph.pop() {
             let Some((_, revert_on_error, slot)) = container.get_batch(next_batch_id.id) else {
                 continue;
+            };
+
+            if let Some(insertion_time) = self.insertion_to_prio_graph_time
+                .remove(&priority_to_seq_id(next_batch_id.priority))
+            {
+                let _ = self.time_in_priograph_us.increment(now.duration_since(insertion_time).as_micros() as u64);
             };
 
             // These should be cleared out earlier; but if not, we remove them here
@@ -490,13 +503,30 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 self.prio_graph.unblock(priority_id);
             }
         }
+        let now = Instant::now();
         while let Some((next_batch_id, _)) = self.prio_graph.pop_and_unblock() {
+            if let Some(insertion_time) = self.insertion_to_prio_graph_time
+                .remove(&priority_to_seq_id(next_batch_id.priority))
+            {
+                let _ = self.time_in_priograph_us.increment(now.duration_since(insertion_time).as_micros() as u64);
+            };
+
             let seq_id = priority_to_seq_id(next_batch_id.priority);
             self.send_no_leader_slot_bundle_result(seq_id);
             container.remove_by_id(next_batch_id.id);
         }
 
-        self.prio_graph.clear();
+        self.insertion_to_prio_graph_time.clear();
+
+        datapoint_info!(
+            "bam_scheduler_bank_boundary-metrics",
+            ("time_in_priograph_us_p50", self.time_in_priograph_us.percentile(50.0).unwrap_or_default(), i64),
+            ("time_in_priograph_us_p75", self.time_in_priograph_us.percentile(75.0).unwrap_or_default(), i64),
+            ("time_in_priograph_us_p90", self.time_in_priograph_us.percentile(90.0).unwrap_or_default(), i64),
+            ("time_in_priograph_us_p99", self.time_in_priograph_us.percentile(99.0).unwrap_or_default(), i64),
+            ("time_in_priograph_us_max", self.time_in_priograph_us.maximum().unwrap_or_default(), i64),
+        );
+        self.time_in_priograph_us.clear();
     }
 }
 
