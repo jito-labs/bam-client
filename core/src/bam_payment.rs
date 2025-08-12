@@ -6,7 +6,6 @@
 use {
     crate::bam_dependencies::BamDependencies,
     solana_client::rpc_client::RpcClient,
-    solana_ledger::blockstore::{Blockstore, BlockstoreError},
     solana_poh::poh_recorder::PohRecorder,
     solana_pubkey::Pubkey,
     std::{
@@ -18,7 +17,8 @@ use {
 use {
     solana_clock::Slot, solana_commitment_config::CommitmentConfig,
     solana_compute_budget_interface::ComputeBudgetInstruction, solana_keypair::Keypair,
-    solana_signer::Signer, solana_system_interface::instruction::transfer,
+    solana_runtime::bank_forks::BankForks, solana_signer::Signer,
+    solana_system_interface::instruction::transfer,
     solana_transaction::versioned::VersionedTransaction,
 };
 
@@ -54,7 +54,7 @@ impl BamPaymentSender {
         dependencies: BamDependencies,
     ) {
         let mut leader_slots_for_payment = BTreeSet::new();
-        let blockstore = poh_recorder.read().unwrap().get_blockstore();
+
         const DURATION_BETWEEN_PAYMENTS: std::time::Duration = std::time::Duration::from_secs(30);
         let mut last_payment_time = Instant::now();
 
@@ -74,7 +74,11 @@ impl BamPaymentSender {
 
             // Create batch
             let current_slot = poh_recorder.read().unwrap().get_current_slot();
-            let batch = Self::create_batch(&blockstore, &leader_slots_for_payment, current_slot);
+            let batch = Self::create_batch(
+                &leader_slots_for_payment,
+                current_slot,
+                &dependencies.bank_forks,
+            );
             if batch.is_empty() {
                 continue;
             }
@@ -90,9 +94,9 @@ impl BamPaymentSender {
         }
 
         let final_batch = Self::create_batch(
-            &blockstore,
             &leader_slots_for_payment,
             poh_recorder.read().unwrap().get_current_slot(),
+            &dependencies.bank_forks,
         );
         Self::send_batch(&final_batch, &dependencies);
         warn!(
@@ -152,20 +156,26 @@ impl BamPaymentSender {
     }
 
     fn create_batch(
-        blockstore: &Blockstore,
         leader_slots_for_payment: &BTreeSet<u64>,
         current_slot: u64,
+        bank_forks: &Arc<RwLock<BankForks>>,
     ) -> Vec<(u64, u64)> {
         let mut batch = vec![];
-        for slot in leader_slots_for_payment.iter() {
-            if current_slot.saturating_sub(*slot) < 32 {
+
+        for slot in leader_slots_for_payment.iter().copied() {
+            let bank_forks = bank_forks.read().unwrap();
+            let root = bank_forks.root();
+
+            // must be >= 32 slots older than tip and rooted to access bank
+            if current_slot.saturating_sub(slot) < 32 || slot > root {
                 continue;
             }
-            let Some(payment_amount) = Self::calculate_payment_amount(blockstore, *slot) else {
+
+            let Some(payment_amount) = Self::calculate_payment_amount(&bank_forks, slot) else {
                 break;
             };
 
-            batch.push((*slot, payment_amount));
+            batch.push((slot, payment_amount));
         }
         batch
     }
@@ -200,29 +210,17 @@ impl BamPaymentSender {
         }
     }
 
-    pub fn calculate_payment_amount(blockstore: &Blockstore, slot: u64) -> Option<u64> {
-        let result = blockstore.get_rooted_block(slot, false);
-        if result.is_err() && !matches!(result, Err(BlockstoreError::SlotNotRooted)) {
-            error!("Failed to get block for slot {}: {:?}", slot, result);
-            return Some(0);
-        }
-
-        let Ok(block) = result else {
+    pub fn calculate_payment_amount(bank_forks: &BankForks, slot: u64) -> Option<u64> {
+        let Some(bank) = bank_forks.get(slot) else {
+            error!(
+                "Bank not found for slot {} in calculate_payment_amount",
+                slot
+            );
             return None;
         };
 
-        const BASE_FEE_LAMPORT_PER_SIGNATURE: u64 = 5_000;
         Some(
-            block
-                .transactions
-                .iter()
-                .map(|tx| {
-                    let fee = tx.meta.fee;
-                    let base_fee = BASE_FEE_LAMPORT_PER_SIGNATURE
-                        .saturating_mul(tx.transaction.signatures.len() as u64);
-                    fee.saturating_sub(base_fee)
-                })
-                .sum::<u64>()
+            bank.priority_fee_total()
                 .saturating_mul(COMMISSION_PERCENTAGE)
                 .saturating_div(100),
         )
@@ -261,5 +259,68 @@ impl BamPaymentSender {
             blockhash,
         );
         VersionedTransaction::from(tx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use {
+        super::*,
+        solana_runtime::{bank::Bank, bank_forks::BankForks, genesis_utils::create_genesis_config},
+        solana_signer::Signer,
+        solana_system_interface::instruction::transfer as system_transfer,
+        solana_transaction::Transaction,
+    };
+
+    #[test]
+    fn calculate_payment_amount_uses_rooted_bank_priority_fee_total() {
+        let mut genesis = create_genesis_config(10_000_000_000);
+        genesis
+            .genesis_config
+            .fee_rate_governor
+            .lamports_per_signature = 5_000; // Need to override the sneaky-deaky test default
+        let parent = std::sync::Arc::new(solana_runtime::bank::Bank::new_for_tests(
+            &genesis.genesis_config,
+        ));
+        let slot = 100u64;
+        let bank = solana_runtime::bank::Bank::new_from_parent(
+            parent,
+            &solana_pubkey::Pubkey::new_unique(),
+            slot,
+        );
+        let bank_forks = BankForks::new_rw_arc(bank);
+        let bank_ref = bank_forks.read().unwrap().get(slot).unwrap().clone();
+
+        // Build a few txs with explicit CU limit + price
+        let payer = genesis.mint_keypair;
+        let mut txs = Vec::new();
+        for _ in 0..3 {
+            let bh = bank_ref.last_blockhash();
+            let cu_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(300_000);
+            let cu_price_ix = ComputeBudgetInstruction::set_compute_unit_price(20_000); // 0.02 lamports/CU
+            let transfer_ix = system_transfer(&payer.pubkey(), &payer.pubkey(), 1); // trivial nonzero ix
+            let tx = Transaction::new_signed_with_payer(
+                &[cu_limit_ix, cu_price_ix, transfer_ix],
+                Some(&payer.pubkey()),
+                &[&payer],
+                bh,
+            );
+            let _results = bank_ref.process_transaction(&tx);
+            txs.push(tx);
+        }
+
+        // Priority fees should be > 0 now
+        assert!(bank_ref.priority_fee_total() > 0);
+    }
+
+    #[test]
+    fn calculate_payment_amount_none_for_missing_bank() {
+        let genesis = create_genesis_config(1_000_000).genesis_config;
+        let parent = std::sync::Arc::new(Bank::new_for_tests(&genesis));
+        let slot: u64 = 42;
+        let bank = Bank::new_from_parent(parent, &solana_pubkey::Pubkey::default(), slot);
+        let bank_forks = BankForks::new_rw_arc(bank);
+        let forks_read = bank_forks.read().unwrap();
+        assert!(BamPaymentSender::calculate_payment_amount(&forks_read, slot + 1).is_none());
     }
 }
