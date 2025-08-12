@@ -911,12 +911,12 @@ mod tests {
         let vote_data = bincode::serialize(&VersionedTransaction::from(vote_tx)).unwrap();
 
         // Create a packet with the vote transaction
-        let mut meta = jito_protos::proto::bam_types::Meta {
+        let meta = jito_protos::proto::bam_types::Meta {
             flags: Some(jito_protos::proto::bam_types::PacketFlags {
                 simple_vote_tx: true, // this triggers parsed_packet.is_simple_vote()
                 ..Default::default()
             }),
-            size: vote_data_len() as u64,
+            size: vote_data.len() as u64,
             ..Default::default()
         };
 
