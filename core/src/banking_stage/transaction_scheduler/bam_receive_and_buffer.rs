@@ -11,6 +11,7 @@ use solana_packet::{PacketFlags, PACKET_DATA_SIZE};
 use solana_perf::sigverify::verify_packet;
 use solana_pubkey::Pubkey;
 use solana_sanitize::SanitizeError;
+
 use solana_transaction::sanitized::SanitizedTransaction;
 use std::{
     cmp::min,
@@ -248,6 +249,7 @@ impl BamReceiveAndBuffer {
         // Checks are taken from receive_and_buffer.rs:
         // SanitizedTransactionReceiveAndBuffer::buffer_packets
         for (index, parsed_packet) in parsed_packets.drain(..).enumerate() {
+
             // Check 0: Reject vote transactions
             if parsed_packet.is_simple_vote() {
                 return Err(Reason::DeserializationError(
@@ -257,6 +259,7 @@ impl BamReceiveAndBuffer {
                     },
                 ));
             }
+
 
             // Check 1: Ensure the transaction is valid
             let Some((tx, deactivation_slot)) = parsed_packet.build_sanitized_transaction(
@@ -811,6 +814,7 @@ mod tests {
         );
     }
 
+
     #[test]
     fn test_deserialize_packets_invalid_signature() {
         // Create a transaction with invalid signature
@@ -940,4 +944,5 @@ mod tests {
             })
         );
     }
+
 }
