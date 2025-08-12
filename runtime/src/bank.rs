@@ -7006,6 +7006,13 @@ impl Bank {
     pub fn clear_epoch_rewards_cache(&self) {
         self.epoch_rewards_calculation_cache.lock().unwrap().clear();
     }
+
+    /// Total priority fees (lamports) that this bank collected
+    /// **Only populated once the bank is Executed. Always call
+    /// it after the bank is rooted.**
+    pub fn priority_fee_total(&self) -> u64 {
+        self.collector_fee_details.read().unwrap().priority_fee
+    }
 }
 
 impl InvokeContextCallback for Bank {
