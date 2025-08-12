@@ -6470,6 +6470,7 @@ dependencies = [
  "thiserror 2.0.12",
  "tikv-jemallocator",
  "tokio",
+ "tokio-stream",
  "tokio-util 0.7.15",
  "tonic",
  "tonic-build",
