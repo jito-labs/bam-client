@@ -475,14 +475,14 @@ mod tests {
             },
         },
         crossbeam_channel::{unbounded, Receiver},
-        solana_hash::Hash,
         solana_keypair::Keypair,
         solana_ledger::genesis_utils::GenesisConfigInfo,
+        solana_message::Message,
         solana_pubkey::Pubkey,
         solana_runtime::bank::Bank,
         solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
+        solana_transaction::versioned::VersionedTransaction,
         solana_transaction::Transaction,
-        solana_vote_program::{vote_instruction, vote_state::Vote},
         test_case::test_case,
     };
 
@@ -887,29 +887,36 @@ mod tests {
     fn test_parse_bundle_rejects_vote_transactions() {
         let (bank_forks, _mint_keypair) = test_bank_forks();
 
-        // Create vote keypairs
-        let node_keypair = Keypair::new();
+        // Create a proper vote transaction
         let vote_keypair = Keypair::new();
+        let node_keypair = Keypair::new();
+        let authorized_voter = Keypair::new();
+        let recent_blockhash = bank_forks.read().unwrap().root_bank().last_blockhash();
 
-        // Create a simple vote transaction using vote instruction
-        let vote = Vote::new(
-            vec![1, 2, 3],   // slots
-            Hash::default(), // bank hash
+        // Create a vote transaction
+        let vote_tx = Transaction::new(
+            &[&node_keypair, &authorized_voter],
+            Message::new(
+                &[solana_vote_program::vote_instruction::vote(
+                    &vote_keypair.pubkey(),
+                    &authorized_voter.pubkey(),
+                    solana_vote_program::vote_state::Vote::new(vec![1], recent_blockhash),
+                )],
+                Some(&node_keypair.pubkey()),
+            ),
+            recent_blockhash,
         );
-        let vote_ix = vote_instruction::vote(&vote_keypair.pubkey(), &node_keypair.pubkey(), vote);
-        let vote_tx = Transaction::new_with_payer(&[vote_ix], Some(&node_keypair.pubkey()));
 
-        // Serialize the vote transaction
-        let vote_data = bincode::serialize(&vote_tx).unwrap();
+        // Serialize the transaction
+        let vote_data = bincode::serialize(&VersionedTransaction::from(vote_tx)).unwrap();
 
-        // Create a packet with the vote transaction and mark it as simple_vote_tx
-        let meta = jito_protos::proto::bam_types::Meta {
-            flags: Some(jito_protos::proto::bam_types::PacketFlags {
-                simple_vote_tx: true,
-                ..Default::default()
-            }),
+        // Create a packet with the vote transaction
+        let mut meta = jito_protos::proto::bam_types::Meta::default();
+        meta.size = vote_data.len() as u64;
+        meta.flags = Some(jito_protos::proto::bam_types::PacketFlags {
+            simple_vote_tx: true, // this triggers parsed_packet.is_simple_vote()
             ..Default::default()
-        };
+        });
 
         let batch = AtomicTxnBatch {
             seq_id: 1,
