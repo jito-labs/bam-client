@@ -139,7 +139,7 @@ impl Consumer {
         check_results_iter: impl Iterator<Item = &'a Result<(), TransactionError>>,
         error_counters: TransactionErrorMetrics,
     ) -> ProcessTransactionBatchOutput {
-        return ProcessTransactionBatchOutput {
+        ProcessTransactionBatchOutput {
             cost_model_throttled_transactions_count: 0,
             cost_model_us: 0,
             execute_and_commit_transactions_output: ExecuteAndCommitTransactionsOutput {
@@ -162,7 +162,7 @@ impl Consumer {
                     })
                     .collect(),
             },
-        };
+        }
     }
 
     pub fn process_and_record_transactions(
