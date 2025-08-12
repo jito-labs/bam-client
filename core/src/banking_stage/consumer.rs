@@ -134,6 +134,37 @@ impl Consumer {
         }
     }
 
+    fn early_bailout_revert_on_error<'a>(
+        txn_count: usize,
+        check_results_iter: impl Iterator<Item = &'a Result<(), TransactionError>>,
+        error_counters: TransactionErrorMetrics,
+    ) -> ProcessTransactionBatchOutput {
+        return ProcessTransactionBatchOutput {
+            cost_model_throttled_transactions_count: 0,
+            cost_model_us: 0,
+            execute_and_commit_transactions_output: ExecuteAndCommitTransactionsOutput {
+                transaction_counts: LeaderProcessedTransactionCounts {
+                    attempted_processing_count: txn_count as u64,
+                    ..Default::default()
+                },
+                retryable_transaction_indexes: vec![],
+                commit_transactions_result: Ok((0..txn_count)
+                    .map(|_| CommitTransactionDetails::NotCommitted)
+                    .collect()),
+                execute_and_commit_timings: LeaderExecuteAndCommitTimings::default(),
+                error_counters,
+                min_prioritization_fees: 0,
+                max_prioritization_fees: 0,
+                transaction_errors: check_results_iter
+                    .map(|res| match res {
+                        Ok(_) => None,
+                        Err(err) => Some(err.clone()),
+                    })
+                    .collect(),
+            },
+        };
+    }
+
     pub fn process_and_record_transactions(
         &self,
         bank: &Arc<Bank>,
@@ -152,6 +183,13 @@ impl Consumer {
                 Err(err) => Err(err),
             })
             .collect();
+        if revert_on_error && check_results.iter().any(|res| res.is_err()) {
+            return Self::early_bailout_revert_on_error(
+                txs.len(),
+                check_results.iter(),
+                error_counters,
+            );
+        }
 
         let mut output = self.process_and_record_transactions_with_pre_results(
             bank,
