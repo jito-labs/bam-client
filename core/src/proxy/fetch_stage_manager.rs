@@ -63,12 +63,14 @@ impl FetchStageState {
     }
 
     fn should_disconnect_to_relayer(&self, pending_disconnect_ts: &std::time::Instant) -> bool {
-        self.fetch_connected && self.pending_disconnect && pending_disconnect_ts.elapsed() > DISCONNECT_DELAY
+        self.fetch_connected
+            && self.pending_disconnect
+            && pending_disconnect_ts.elapsed() > DISCONNECT_DELAY
     }
 }
 
 /// Manages switching between the validator's tpu ports and that of the proxy's.
-/// Switch-overs are triggered by late and missed heartbeats.    
+/// Switch-overs are triggered by late and missed heartbeats.
 pub struct FetchStageManager {
     t_hdl: JoinHandle<()>,
 }
@@ -224,7 +226,6 @@ impl FetchStageManager {
             }
         }).unwrap()
     }
-
 
     fn set_tpu_addresses(
         cluster_info: &Arc<ClusterInfo>,
