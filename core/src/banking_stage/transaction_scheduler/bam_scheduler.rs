@@ -51,8 +51,8 @@ fn passthrough_priority(
     *id
 }
 
-const MAX_SCHEDULED_PER_WORKER: usize = 5;
-const MAX_TXN_PER_BATCH: usize = 16;
+const MAX_SCHEDULED_PER_WORKER: usize = 1;
+const MAX_TXN_PER_BATCH: usize = 1;
 
 pub struct BamScheduler<Tx: TransactionWithMeta> {
     workers_scheduled_count: Vec<usize>,
