@@ -7032,6 +7032,13 @@ impl Bank {
     pub fn set_accounts_lt_hash_for_snapshot_minimizer(&self, accounts_lt_hash: AccountsLtHash) {
         *self.accounts_lt_hash.lock().unwrap() = accounts_lt_hash;
     }
+
+    /// Total priority fees (lamports) that this bank collected
+    /// **Only populated once the bank is Executed. Always call
+    /// it after the bank is rooted.**
+    pub fn priority_fee_total(&self) -> u64 {
+        self.collector_fee_details.read().unwrap().priority_fee
+    }
 }
 
 impl InvokeContextCallback for Bank {
