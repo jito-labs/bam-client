@@ -1,15 +1,20 @@
+//! An implementation of the `ReceiveAndBuffer` trait that receives messages from BAM
+//! and buffers from into the the `TransactionStateContainer`. Key thing to note:
+//! this implementation only functions during the `Consume/Hold` phase; otherwise it will send them back
+//! to BAM with a `Retryable` result.
 use crate::banking_stage::scheduler_messages::MaxAge;
 use crate::banking_stage::transaction_scheduler::receive_and_buffer::DisconnectedError;
 use crate::UNKNOWN_IP;
+use crossbeam_channel::{RecvTimeoutError, TryRecvError};
 use solana_clock::MAX_PROCESSING_AGE;
 use solana_packet::{PacketFlags, PACKET_DATA_SIZE};
+use solana_perf::sigverify::verify_packet;
+use solana_pubkey::Pubkey;
+use solana_sanitize::SanitizeError;
 use solana_transaction::sanitized::SanitizedTransaction;
-/// An implementation of the `ReceiveAndBuffer` trait that receives messages from BAM
-/// and buffers from into the the `TransactionStateContainer`. Key thing to note:
-/// this implementation only functions during the `Consume/Hold` phase; otherwise it will send them back
-/// to BAM with a `Retryable` result.
 use std::{
     cmp::min,
+    collections::HashSet,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, RwLock,
@@ -52,6 +57,7 @@ pub struct BamReceiveAndBuffer {
     bundle_receiver: crossbeam_channel::Receiver<AtomicTxnBatch>,
     response_sender: Sender<StartSchedulerMessageV0>,
     bank_forks: Arc<RwLock<BankForks>>,
+    blacklisted_accounts: HashSet<Pubkey>,
 }
 
 impl BamReceiveAndBuffer {
@@ -60,12 +66,14 @@ impl BamReceiveAndBuffer {
         bundle_receiver: crossbeam_channel::Receiver<AtomicTxnBatch>,
         response_sender: Sender<StartSchedulerMessageV0>,
         bank_forks: Arc<RwLock<BankForks>>,
+        blacklisted_accounts: HashSet<Pubkey>,
     ) -> Self {
         Self {
             bam_enabled,
             bundle_receiver,
             response_sender,
             bank_forks,
+            blacklisted_accounts,
         }
     }
 
@@ -104,9 +112,18 @@ impl BamReceiveAndBuffer {
 
         let mut result = Vec::with_capacity(in_packets.size_hint().0);
         for (i, p) in in_packets.enumerate() {
+            let mut solana_packet = proto_packet_to_packet(p);
+            // sigverify packet
+            // we don't use solana_packet here, so we don't need to call set_discard()
+            if !verify_packet(&mut (&mut solana_packet).into(), false) {
+                return Err((
+                    i,
+                    DeserializedPacketError::SanitizeError(SanitizeError::InvalidValue),
+                ));
+            }
+
             result.push(
-                ImmutableDeserializedPacket::new((&proto_packet_to_packet(p)).into())
-                    .map_err(|e| (i, e))?,
+                ImmutableDeserializedPacket::new((&solana_packet).into()).map_err(|e| (i, e))?,
             );
         }
 
@@ -165,6 +182,7 @@ impl BamReceiveAndBuffer {
     fn parse_batch(
         batch: &AtomicTxnBatch,
         bank_forks: &Arc<RwLock<BankForks>>,
+        blacklisted_accounts: &HashSet<Pubkey>,
     ) -> Result<ParsedBatch, Reason> {
         if batch.packets.is_empty() {
             return Err(Reason::DeserializationError(
@@ -230,7 +248,7 @@ impl BamReceiveAndBuffer {
         // Checks are taken from receive_and_buffer.rs:
         // SanitizedTransactionReceiveAndBuffer::buffer_packets
         for (index, parsed_packet) in parsed_packets.drain(..).enumerate() {
-            // Check 1
+            // Check 1: Ensure the transaction is valid
             let Some((tx, deactivation_slot)) = parsed_packet.build_sanitized_transaction(
                 vote_only,
                 root_bank.as_ref(),
@@ -244,7 +262,7 @@ impl BamReceiveAndBuffer {
                 ));
             };
 
-            // Check 2
+            // Check 2: Ensure no duplicates and valid number of account locks
             if let Err(err) =
                 validate_account_locks(tx.message().account_keys(), transaction_account_lock_limit)
             {
@@ -257,7 +275,7 @@ impl BamReceiveAndBuffer {
                 ));
             }
 
-            // Check 3
+            // Check 3: Ensure the compute budget limits are valid
             let fee_budget_limits = match tx
                 .compute_budget_instruction_details()
                 .sanitize_and_convert_to_compute_budget_limits(&working_bank.feature_set)
@@ -274,7 +292,7 @@ impl BamReceiveAndBuffer {
                 }
             };
 
-            // Check 4
+            // Check 4: Ensure valid blockhash and blockhash is not too old
             let lock_results: [_; 1] = core::array::from_fn(|_| Ok(()));
             let check_results = working_bank.check_transactions(
                 std::slice::from_ref(&tx),
@@ -292,7 +310,7 @@ impl BamReceiveAndBuffer {
                 ));
             }
 
-            // Check 5
+            // Check 5: Ensure the fee payer has enough to pay for the transaction fee
             if let Err(err) = Consumer::check_fee_payer_unlocked(
                 &working_bank,
                 &tx,
@@ -303,6 +321,21 @@ impl BamReceiveAndBuffer {
                     jito_protos::proto::bam_types::TransactionError {
                         index: index as u32,
                         reason: reason as i32,
+                    },
+                ));
+            }
+
+            // Check 6: Ensure none of the accounts touch blacklisted accounts
+            if tx
+                .message()
+                .account_keys()
+                .iter()
+                .any(|key| blacklisted_accounts.contains(key))
+            {
+                return Err(Reason::TransactionError(
+                    jito_protos::proto::bam_types::TransactionError {
+                        index: index as u32,
+                        reason: DeserializationErrorReason::SanitizeError as i32,
                     },
                 ));
             }
@@ -345,58 +378,68 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
         _: &mut super::scheduler_metrics::SchedulerCountMetrics,
         decision: &BufferedPacketsDecision,
     ) -> Result<usize, DisconnectedError> {
-        if !self.bam_enabled.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(5));
-            return Ok(0);
-        }
-
         let mut result = 0;
-        const MAX_BUNDLES_PER_RECV: usize = 24;
-        match decision {
-            BufferedPacketsDecision::Consume(_) | BufferedPacketsDecision::Hold => {
-                while result < MAX_BUNDLES_PER_RECV {
-                    let Ok(batch) = self.bundle_receiver.try_recv() else {
-                        break;
-                    };
-                    let ParsedBatch {
-                        txns_max_age,
-                        cost,
-                        priority,
-                        revert_on_error,
-                    } = match Self::parse_batch(&batch, &self.bank_forks) {
-                        Ok(parsed) => parsed,
-                        Err(reason) => {
-                            self.send_bundle_not_committed_result(batch.seq_id, reason);
-                            continue;
-                        }
-                    };
-                    if container
-                        .insert_new_batch(
-                            txns_max_age,
-                            priority,
-                            cost,
-                            revert_on_error,
-                            batch.max_schedule_slot,
-                        )
-                        .is_none()
-                    {
-                        self.send_container_full_txn_batch_result(batch.seq_id);
-                        continue;
-                    };
+        let is_bam_enabled = self.bam_enabled.load(Ordering::Relaxed);
 
-                    result += 1;
+        match decision {
+            BufferedPacketsDecision::Consume(_) | BufferedPacketsDecision::Hold => loop {
+                let batch = match self.bundle_receiver.try_recv() {
+                    Ok(batch) => batch,
+                    Err(TryRecvError::Disconnected) => return Err(DisconnectedError),
+                    Err(TryRecvError::Empty) => {
+                        // If the channel is empty, work here is done.
+                        return Ok(result);
+                    }
+                };
+
+                // If BAM is not enabled, drain the channel
+                if !is_bam_enabled {
+                    continue;
                 }
-            }
+
+                let ParsedBatch {
+                    txns_max_age,
+                    cost,
+                    priority,
+                    revert_on_error,
+                } = match Self::parse_batch(&batch, &self.bank_forks, &self.blacklisted_accounts) {
+                    Ok(parsed) => parsed,
+                    Err(reason) => {
+                        self.send_bundle_not_committed_result(batch.seq_id, reason);
+                        continue;
+                    }
+                };
+                if container
+                    .insert_new_batch(
+                        txns_max_age,
+                        priority,
+                        cost,
+                        revert_on_error,
+                        batch.max_schedule_slot,
+                    )
+                    .is_none()
+                {
+                    self.send_container_full_txn_batch_result(batch.seq_id);
+                    continue;
+                };
+
+                result = result.saturating_add(1);
+            },
             BufferedPacketsDecision::ForwardAndHold | BufferedPacketsDecision::Forward => {
                 // Send back any batches that were received while in Forward/Hold state
                 let deadline = Instant::now() + Duration::from_millis(100);
-                while let Ok(batch) = self.bundle_receiver.recv_deadline(deadline) {
+                loop {
+                    let batch = match self.bundle_receiver.recv_deadline(deadline) {
+                        Ok(batch) => batch,
+                        Err(RecvTimeoutError::Disconnected) => return Err(DisconnectedError),
+                        Err(RecvTimeoutError::Timeout) => {
+                            return Ok(0);
+                        }
+                    };
                     self.send_no_leader_slot_txn_batch_result(batch.seq_id);
                 }
             }
         }
-
-        Ok(result)
     }
 }
 
@@ -410,6 +453,7 @@ pub fn priority_to_seq_id(priority: u64) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use solana_signer::Signer;
     use solana_system_transaction::transfer;
     use {
         super::*,
@@ -455,6 +499,7 @@ mod tests {
     fn setup_bam_receive_and_buffer(
         receiver: crossbeam_channel::Receiver<AtomicTxnBatch>,
         bank_forks: Arc<RwLock<BankForks>>,
+        blacklisted_accounts: HashSet<Pubkey>,
     ) -> (
         BamReceiveAndBuffer,
         TransactionStateContainer<RuntimeTransaction<SanitizedTransaction>>,
@@ -467,6 +512,7 @@ mod tests {
             receiver,
             response_sender,
             bank_forks,
+            blacklisted_accounts,
         );
         let container = TransactionStateContainer::with_capacity(100);
         (receive_and_buffer, container, response_receiver)
@@ -505,13 +551,14 @@ mod tests {
         setup_receive_and_buffer: impl FnOnce(
             Receiver<AtomicTxnBatch>,
             Arc<RwLock<BankForks>>,
+            HashSet<Pubkey>,
         )
             -> (R, R::Container, Receiver<StartSchedulerMessageV0>),
     ) {
         let (sender, receiver) = unbounded();
         let (bank_forks, mint_keypair) = test_bank_forks();
         let (mut receive_and_buffer, mut container, _response_sender) =
-            setup_receive_and_buffer(receiver, bank_forks.clone());
+            setup_receive_and_buffer(receiver, bank_forks.clone(), HashSet::new());
         let mut timing_metrics = SchedulerTimingMetrics::default();
         let mut count_metrics = SchedulerCountMetrics::default();
 
@@ -547,7 +594,7 @@ mod tests {
         let (bank_forks, _mint_keypair) = test_bank_forks();
         let (sender, receiver) = unbounded();
         let (mut receive_and_buffer, mut container, response_receiver) =
-            setup_bam_receive_and_buffer(receiver, bank_forks.clone());
+            setup_bam_receive_and_buffer(receiver, bank_forks.clone(), HashSet::new());
 
         // Create an invalid packet with no data
         let bundle = AtomicTxnBatch {
@@ -597,7 +644,7 @@ mod tests {
             }],
             max_schedule_slot: 0,
         };
-        let result = BamReceiveAndBuffer::parse_batch(&bundle, &bank_forks);
+        let result = BamReceiveAndBuffer::parse_batch(&bundle, &bank_forks, &HashSet::new());
         assert!(result.is_ok());
         let parsed_bundle = result.unwrap();
         assert_eq!(parsed_bundle.txns_max_age.len(), 1);
@@ -611,7 +658,7 @@ mod tests {
             packets: vec![],
             max_schedule_slot: 0,
         };
-        let result = BamReceiveAndBuffer::parse_batch(&batch, &bank_forks);
+        let result = BamReceiveAndBuffer::parse_batch(&batch, &bank_forks, &HashSet::new());
         assert!(result.is_err());
         assert_eq!(
             result.err().unwrap(),
@@ -633,13 +680,13 @@ mod tests {
             }],
             max_schedule_slot: 0,
         };
-        let result = BamReceiveAndBuffer::parse_batch(&batch, &bank_forks);
+        let result = BamReceiveAndBuffer::parse_batch(&batch, &bank_forks, &HashSet::new());
         assert!(result.is_err());
         assert_eq!(
             result.err().unwrap(),
             Reason::DeserializationError(jito_protos::proto::bam_types::DeserializationError {
                 index: 0,
-                reason: DeserializationErrorReason::BincodeError as i32,
+                reason: DeserializationErrorReason::SanitizeError as i32,
             })
         );
     }
@@ -662,7 +709,7 @@ mod tests {
             }],
             max_schedule_slot: 0,
         };
-        let result = BamReceiveAndBuffer::parse_batch(&batch, &bank_forks);
+        let result = BamReceiveAndBuffer::parse_batch(&batch, &bank_forks, &HashSet::new());
         assert!(result.is_err());
         assert_eq!(
             result.err().unwrap(),
@@ -709,7 +756,7 @@ mod tests {
             ],
             max_schedule_slot: 0,
         };
-        let result = BamReceiveAndBuffer::parse_batch(&bundle, &bank_forks);
+        let result = BamReceiveAndBuffer::parse_batch(&bundle, &bank_forks, &HashSet::new());
         assert!(result.is_err());
         assert_eq!(
             result.err().unwrap(),
@@ -718,5 +765,108 @@ mod tests {
                 reason: DeserializationErrorReason::InconsistentBundle as i32,
             })
         );
+    }
+
+    #[test]
+    fn test_parse_bundle_blacklisted_account() {
+        let keypair = Keypair::new();
+        let blacklisted_accounts = HashSet::from([keypair.pubkey()]);
+
+        let (bank_forks, mint_keypair) = test_bank_forks();
+        let batch = AtomicTxnBatch {
+            seq_id: 1,
+            packets: vec![Packet {
+                data: bincode::serialize(&transfer(
+                    &mint_keypair,
+                    &keypair.pubkey(),
+                    100,
+                    bank_forks.read().unwrap().root_bank().last_blockhash(),
+                ))
+                .unwrap(),
+                meta: None,
+            }],
+            max_schedule_slot: 0,
+        };
+        let result = BamReceiveAndBuffer::parse_batch(&batch, &bank_forks, &blacklisted_accounts);
+        assert!(result.is_err());
+        assert_eq!(
+            result.err().unwrap(),
+            Reason::TransactionError(jito_protos::proto::bam_types::TransactionError {
+                index: 0,
+                reason: DeserializationErrorReason::SanitizeError as i32,
+            })
+        );
+    }
+
+    #[test]
+    fn test_deserialize_packets_invalid_signature() {
+        // Create a transaction with invalid signature
+        let (_bank_forks, mint_keypair) = test_bank_forks();
+        let transaction = transfer(
+            &mint_keypair,
+            &Pubkey::new_unique(),
+            1,
+            solana_hash::Hash::default(),
+        );
+
+        // Serialize the transaction
+        let mut data = bincode::serialize(&transaction).unwrap();
+        // Corrupt the signature by modifying some bytes
+        if data.len() > 10 {
+            data[5] ^= 0xFF; // Flip bits to corrupt signature
+            data[10] ^= 0xFF;
+        }
+
+        let packets = [Packet { data, meta: None }];
+
+        // This should fail due to invalid signature
+        let result = BamReceiveAndBuffer::deserialize_packets(packets.iter());
+        assert!(result.is_err());
+
+        if let Err((index, error)) = result {
+            assert_eq!(index, 0);
+            assert!(matches!(error, DeserializedPacketError::SanitizeError(_)));
+        }
+    }
+
+    #[test]
+    fn test_deserialize_packets_valid_non_vote_transaction() {
+        // Create a regular non-vote transaction
+        let (_bank_forks, mint_keypair) = test_bank_forks();
+        let transaction = transfer(
+            &mint_keypair,
+            &Pubkey::new_unique(),
+            1,
+            solana_hash::Hash::default(),
+        );
+
+        // Sign the transaction properly
+        let mut tx = transaction;
+        tx.sign(&[&mint_keypair], solana_hash::Hash::default());
+
+        let data = bincode::serialize(&tx).unwrap();
+
+        // Create packet without vote transaction flag (non-vote)
+        let packet = Packet {
+            data: data.clone(),
+            meta: Some(jito_protos::proto::bam_types::Meta {
+                flags: Some(jito_protos::proto::bam_types::PacketFlags {
+                    simple_vote_tx: false, // This is a non-vote transaction
+                    ..Default::default()
+                }),
+                size: data.len() as u64,
+                addr: "127.0.0.1".to_string(),
+                port: 8000,
+                ..Default::default()
+            }),
+        };
+
+        // Valid transactions should succeed with valid signature
+        let result = BamReceiveAndBuffer::deserialize_packets([packet].iter());
+        assert!(result.is_ok());
+
+        if let Ok(packets) = result {
+            assert_eq!(packets.len(), 1);
+        }
     }
 }
