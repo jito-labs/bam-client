@@ -3554,6 +3554,25 @@ impl Bank {
         error_counters: &mut TransactionErrorMetrics,
         processing_config: TransactionProcessingConfig,
     ) -> LoadAndExecuteTransactionsOutput {
+        self.load_and_execute_transactions_with_revert_on_error(
+            batch,
+            max_age,
+            timings,
+            error_counters,
+            processing_config,
+            false, // revert_on_error
+        )
+    }
+
+    pub fn load_and_execute_transactions_with_revert_on_error(
+        &self,
+        batch: &TransactionBatch<impl TransactionWithMeta>,
+        max_age: usize,
+        timings: &mut ExecuteTimings,
+        error_counters: &mut TransactionErrorMetrics,
+        processing_config: TransactionProcessingConfig,
+        revert_on_error: bool,
+    ) -> LoadAndExecuteTransactionsOutput {
         let sanitized_txs = batch.sanitized_transactions();
 
         let (check_results, check_us) = measure_us!(self.check_transactions(
@@ -3578,12 +3597,13 @@ impl Bank {
 
         let sanitized_output = self
             .transaction_processor
-            .load_and_execute_sanitized_transactions(
+            .load_and_execute_sanitized_transactions_with_revert_on_error(
                 self,
                 sanitized_txs,
                 check_results,
                 &processing_environment,
                 &processing_config,
+                revert_on_error,
             );
 
         // Accumulate the errors returned by the batch processor.

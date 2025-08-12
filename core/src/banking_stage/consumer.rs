@@ -375,7 +375,7 @@ impl Consumer {
         }
 
         let (load_and_execute_transactions_output, load_execute_us) = measure_us!(bank
-            .load_and_execute_transactions(
+            .load_and_execute_transactions_with_revert_on_error(
                 batch,
                 MAX_PROCESSING_AGE,
                 &mut execute_and_commit_timings.execute_timings,
@@ -388,7 +388,8 @@ impl Consumer {
                     recording_config: ExecutionRecordingConfig::new_single_setting(
                         transaction_status_sender_enabled
                     ),
-                }
+                },
+                revert_on_error,
             ));
         execute_and_commit_timings.load_execute_us = load_execute_us;
         let successful_count = load_and_execute_transactions_output
