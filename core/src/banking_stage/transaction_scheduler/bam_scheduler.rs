@@ -498,7 +498,8 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             self.send_no_leader_slot_bundle_result(seq_id);
             container.remove_by_id(next_batch_id.id);
         }
-        // self.prio_graph.clear();
+
+        self.prio_graph.clear();
     }
 }
 
@@ -1066,6 +1067,7 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "node must exist")]
     fn test_prio_graph_clears_on_slot_boundary() {
         let TestScheduler {
             mut scheduler,
@@ -1114,54 +1116,40 @@ mod tests {
             "Prio graph should have transactions"
         );
 
+        // Store transaction IDs that are currently in the prio_graph
+        let mut stored_txn_ids = Vec::new();
+        while let Some(txn_id) = scheduler.prio_graph.pop() {
+            stored_txn_ids.push(txn_id);
+            // Unblock to allow the next transaction to be popped
+            scheduler.prio_graph.unblock(&txn_id);
+        }
+
+        // Re-insert the transactions back into prio_graph for testing
+        for txn_id in &stored_txn_ids {
+            // Get transaction from container to re-insert
+            if let Some((batch_ids, _, _)) = container.get_batch(txn_id.id) {
+                let txns = batch_ids
+                    .iter()
+                    .filter_map(|id| container.get_transaction(*id));
+                scheduler.prio_graph.insert_transaction(
+                    *txn_id,
+                    BamScheduler::<RuntimeTransaction<SanitizedTransaction>>::get_transactions_account_access(txns.into_iter()),
+                );
+            }
+        }
+
         // Simulate slot boundary change by changing to no bank (None)
         let decision_no_bank = BufferedPacketsDecision::Forward;
         scheduler
             .receive_completed(&mut container, &decision_no_bank)
             .unwrap();
 
-        // !! this assertion should fail, but it still passes
-        // Verify prio_graph was cleared
-        assert!(
-            scheduler.prio_graph.is_empty(),
-            "Prio graph should be cleared after slot boundary"
-        );
         assert_eq!(scheduler.slot, None);
 
-        // Test with slot change to a new slot
-        let new_bank = Bank::new_from_parent(bank, &Pubkey::default(), 2);
-        let decision_new_slot = BufferedPacketsDecision::Consume(BankStart {
-            working_bank: Arc::new(new_bank),
-            bank_creation_time: Arc::new(Instant::now()),
-        });
-
-        // Add some transactions back to container and prio_graph
-        let mut container = create_container(vec![(
-            &keypair_a,
-            vec![Pubkey::new_unique()],
-            1000,
-            seq_id_to_priority(2),
-        )]);
-
-        scheduler
-            .receive_completed(&mut container, &decision_new_slot)
-            .unwrap();
-        scheduler.pull_into_prio_graph(&mut container);
-        assert!(
-            !scheduler.prio_graph.is_empty(),
-            "Prio graph should have new transactions"
-        );
-
-        // Change slot again to trigger clear
-        let decision_no_bank_again = BufferedPacketsDecision::Forward;
-        scheduler
-            .receive_completed(&mut container, &decision_no_bank_again)
-            .unwrap();
-
-        // Verify prio_graph was cleared again
-        assert!(
-            scheduler.prio_graph.is_empty(),
-            "Prio graph should be cleared on second slot boundary change"
-        );
+        // This should panic because the prio_graph has been cleared
+        // and the transaction ID no longer exists in the graph
+        if let Some(first_id) = stored_txn_ids.first() {
+            scheduler.prio_graph.unblock(first_id);
+        }
     }
 }
