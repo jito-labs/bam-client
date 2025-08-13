@@ -7,7 +7,6 @@ use crate::banking_stage::{read_write_account_set::ReadWriteAccountSet, transact
 use crate::banking_stage::transaction_scheduler::scheduler_common::SchedulingCommon;
 use crate::banking_stage::transaction_scheduler::transaction_state::TransactionState;
 use ahash::HashSet;
-use histogram::Histogram;
 use solana_clock::Slot;
 use std::time::Instant;
 use crate::bam_dependencies::BamOutboundMessage;
@@ -38,21 +37,6 @@ use {
     solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
     solana_svm_transaction::svm_message::SVMMessage,
 };
-
-type SchedulerPrioGraph = PrioGraph<
-    TransactionPriorityId,
-    Pubkey,
-    TransactionPriorityId,
-    fn(&TransactionPriorityId, &GraphNode<TransactionPriorityId>) -> TransactionPriorityId,
->;
-
-#[inline(always)]
-fn passthrough_priority(
-    id: &TransactionPriorityId,
-    _graph_node: &GraphNode<TransactionPriorityId>,
-) -> TransactionPriorityId {
-    *id
-}
 
 const MAX_TXN_PER_BATCH: usize = 1;
 
