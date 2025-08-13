@@ -32,7 +32,7 @@ use {
     jito_protos::proto::{
         bam_types::{atomic_txn_batch_result, not_committed::Reason, SchedulingError},
     },
-    prio_graph::{AccessKind, GraphNode, PrioGraph},
+    prio_graph::AccessKind,
     solana_pubkey::Pubkey,
     solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
     solana_svm_transaction::svm_message::SVMMessage,
