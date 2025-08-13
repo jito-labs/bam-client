@@ -259,6 +259,18 @@ impl BamConnection {
         &self.url
     }
 
+    pub const AUTH_LABEL: &[u8] = b"X_OFF_CHAIN_JITO_BAM_V1";
+    pub const SEP: u8 = 0x00;
+
+    /// Bytes that must be signed/verified
+    pub fn labeled_bytes(challenge: &[u8]) -> Vec<u8> {
+        let mut v = Vec::with_capacity(Self::AUTH_LABEL.len() + 1 + challenge.len());
+        v.extend_from_slice(Self::AUTH_LABEL);
+        v.push(Self::SEP);
+        v.extend_from_slice(challenge);
+        v
+    }
+
     async fn prepare_auth_proof(
         validator_client: &mut BamNodeApiClient<tonic::transport::channel::Channel>,
         cluster_info: Arc<ClusterInfo>,
@@ -272,8 +284,9 @@ impl BamConnection {
         let resp = resp.into_inner();
         let challenge_to_sign = resp.challenge_to_sign;
         let challenge_bytes = challenge_to_sign.as_bytes();
+        let to_sign = Self::labeled_bytes(challenge_bytes);
 
-        let signature = Self::sign_message(cluster_info.keypair().as_ref(), challenge_bytes)?;
+        let signature = Self::sign_message(cluster_info.keypair().as_ref(), &to_sign)?;
 
         Some(AuthProof {
             challenge_to_sign,
