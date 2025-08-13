@@ -851,8 +851,6 @@ mod tests {
                     ..Default::default()
                 }),
                 size: data.len() as u64,
-                addr: "127.0.0.1".to_string(),
-                port: 8000,
                 ..Default::default()
             }),
         };
