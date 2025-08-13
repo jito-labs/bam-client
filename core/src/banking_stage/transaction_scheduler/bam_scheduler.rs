@@ -68,9 +68,6 @@ pub struct BamScheduler<Tx: TransactionWithMeta> {
 
     next_batch_id: u64,
     inflight_batch_info: HashMap<TransactionBatchId, InflightBatchInfo>,
-    prio_graph: SchedulerPrioGraph,
-    insertion_to_prio_graph_time: HashMap<u32, Instant>,
-    time_in_priograph_us: Histogram,
     slot: Option<Slot>,
 
     // Reusable objects to avoid allocations
@@ -104,9 +101,6 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             response_sender,
             next_batch_id: 0,
             inflight_batch_info: HashMap::default(),
-            prio_graph: PrioGraph::new(passthrough_priority),
-            insertion_to_prio_graph_time: HashMap::default(),
-            time_in_priograph_us: Histogram::new(),
             slot: None,
             reusable_consume_work: Vec::new(),
             reusable_priority_ids: Vec::new(),
