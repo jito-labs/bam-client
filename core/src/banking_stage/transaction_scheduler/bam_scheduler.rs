@@ -381,38 +381,6 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 container.remove_by_id(next_batch_id.id);
             }
         }
-
-        // Unblock all transactions blocked by inflight batches
-        // and then drain the prio-graph
-        for (_, inflight_info) in self.inflight_batch_info.iter() {
-            for priority_id in &inflight_info.priority_ids {
-                self.prio_graph.unblock(priority_id);
-            }
-        }
-        let now = Instant::now();
-        while let Some((next_batch_id, _)) = self.prio_graph.pop_and_unblock() {
-            if let Some(insertion_time) = self.insertion_to_prio_graph_time
-                .remove(&priority_to_seq_id(next_batch_id.priority))
-            {
-                let _ = self.time_in_priograph_us.increment(now.duration_since(insertion_time).as_micros() as u64);
-            };
-
-            let seq_id = priority_to_seq_id(next_batch_id.priority);
-            self.send_no_leader_slot_bundle_result(seq_id);
-            container.remove_by_id(next_batch_id.id);
-        }
-
-        self.insertion_to_prio_graph_time.clear();
-
-        datapoint_info!(
-            "bam_scheduler_bank_boundary-metrics",
-            ("time_in_priograph_us_p50", self.time_in_priograph_us.percentile(50.0).unwrap_or_default(), i64),
-            ("time_in_priograph_us_p75", self.time_in_priograph_us.percentile(75.0).unwrap_or_default(), i64),
-            ("time_in_priograph_us_p90", self.time_in_priograph_us.percentile(90.0).unwrap_or_default(), i64),
-            ("time_in_priograph_us_p99", self.time_in_priograph_us.percentile(99.0).unwrap_or_default(), i64),
-            ("time_in_priograph_us_max", self.time_in_priograph_us.maximum().unwrap_or_default(), i64),
-        );
-        self.time_in_priograph_us.clear();
     }
 
      fn least_loaded_worker(
