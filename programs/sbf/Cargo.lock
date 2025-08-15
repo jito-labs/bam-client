@@ -229,6 +229,7 @@ dependencies = [
  "tikv-jemallocator",
  "tokio",
  "tonic",
+ "url 2.5.4",
 ]
 
 [[package]]
