@@ -1,6 +1,6 @@
 use {
     agave_validator::{
-        admin_rpc_service, cli, dashboard::Dashboard, ledger_lockfile, lock_ledger,
+        admin_rpc_service, cli, commands, dashboard::Dashboard, ledger_lockfile, lock_ledger,
         println_name_value,
     },
     clap::{crate_name, value_t, value_t_or_exit, values_t_or_exit},
@@ -404,7 +404,10 @@ fn main() {
         };
 
     genesis.bam_url = Arc::new(Mutex::new(
-        matches.value_of("bam_url").map(|url| url.into()),
+        commands::bam::extract_bam_url(&matches).unwrap_or_else(|err| {
+            println!("Error: BAM URL invalid: {err}");
+            exit(1);
+        }),
     ));
     admin_rpc_service::run(
         &ledger_path,

@@ -1067,10 +1067,7 @@ pub fn test_app<'a>(version: &'a str, default_args: &'a DefaultTestArgs) -> App<
                 ),
         )
         .arg(
-            Arg::with_name("bam_url")
-                .long("bam-url")
-                .help("URL of BAM Node; leave empty to disable BAM")
-                .takes_value(true),
+            commands::bam::argument()
         )
 }
 
