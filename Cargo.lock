@@ -484,10 +484,12 @@ dependencies = [
  "spl-token-2022",
  "symlink",
  "tempfile",
+ "test-case",
  "thiserror 2.0.12",
  "tikv-jemallocator",
  "tokio",
  "tonic",
+ "url 2.5.4",
 ]
 
 [[package]]

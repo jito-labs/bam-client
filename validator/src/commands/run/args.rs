@@ -1,5 +1,8 @@
 use {
-    crate::cli::{hash_validator, port_range_validator, port_validator, DefaultArgs},
+    crate::{
+        cli::{hash_validator, port_range_validator, port_validator, DefaultArgs},
+        commands::bam,
+    },
     clap::{App, Arg},
     solana_clap_utils::{
         hidden_unless_forced,
@@ -1626,13 +1629,11 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
                 "Specifies the pubkey of the leader used in wen restart. \
                 May get stuck if the leader used is different from others.",
             ),
-    ).arg(
-        Arg::with_name("bam_url")
-            .long("bam-url")
-            .help("URL of BAM Node; leave empty to disable BAM.")
-            .takes_value(true)
     )
-        .arg(
+    .arg(
+        bam::argument()
+    )
+    .arg(
         Arg::with_name("block_engine_url")
             .long("block-engine-url")
             .help("Block engine url.  Set to empty string to disable block engine connection.")
