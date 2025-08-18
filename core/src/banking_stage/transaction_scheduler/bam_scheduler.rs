@@ -1053,4 +1053,92 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    #[ignore]
+    #[should_panic(expected = "node must exist")]
+    fn test_prio_graph_clears_on_slot_boundary() {
+        let TestScheduler {
+            mut scheduler,
+            consume_work_receivers: _,
+            finished_consume_work_sender: _,
+            response_receiver: _,
+        } = create_test_scheduler(4);
+
+        let keypair_a = Keypair::new();
+        let keypair_b = Keypair::new();
+
+        // Create container with some transactions
+        let mut container = create_container(vec![
+            (
+                &keypair_a,
+                vec![Pubkey::new_unique()],
+                1000,
+                seq_id_to_priority(0),
+            ),
+            (
+                &keypair_b,
+                vec![Pubkey::new_unique()],
+                2000,
+                seq_id_to_priority(1),
+            ),
+        ]);
+
+        let (bank_forks, _) = test_bank_forks();
+        let bank = bank_forks.read().unwrap().working_bank();
+
+        // Set initial slot with bank start
+        let decision = BufferedPacketsDecision::Consume(BankStart {
+            working_bank: bank.clone(),
+            bank_creation_time: Arc::new(Instant::now()),
+        });
+
+        scheduler
+            .receive_completed(&mut container, &decision)
+            .unwrap();
+        assert_eq!(scheduler.slot, Some(bank.slot()));
+
+        // Pull transactions into prio_graph
+        scheduler.pull_into_prio_graph(&mut container);
+        assert!(
+            !scheduler.prio_graph.is_empty(),
+            "Prio graph should have transactions"
+        );
+
+        // Store transaction IDs that are currently in the prio_graph
+        let mut stored_txn_ids = Vec::new();
+        while let Some(txn_id) = scheduler.prio_graph.pop() {
+            stored_txn_ids.push(txn_id);
+            // Unblock to allow the next transaction to be popped
+            scheduler.prio_graph.unblock(&txn_id);
+        }
+
+        // Re-insert the transactions back into prio_graph for testing
+        for txn_id in &stored_txn_ids {
+            // Get transaction from container to re-insert
+            if let Some((batch_ids, _, _)) = container.get_batch(txn_id.id) {
+                let txns = batch_ids
+                    .iter()
+                    .filter_map(|id| container.get_transaction(*id));
+                scheduler.prio_graph.insert_transaction(
+                    *txn_id,
+                    BamScheduler::<RuntimeTransaction<SanitizedTransaction>>::get_transactions_account_access(txns.into_iter()),
+                );
+            }
+        }
+
+        // Simulate slot boundary change by changing to no bank (None)
+        let decision_no_bank = BufferedPacketsDecision::Forward;
+        scheduler
+            .receive_completed(&mut container, &decision_no_bank)
+            .unwrap();
+
+        assert_eq!(scheduler.slot, None);
+
+        // This should panic because the prio_graph has been cleared
+        // and the transaction ID no longer exists in the graph
+        if let Some(first_id) = stored_txn_ids.first() {
+            scheduler.prio_graph.unblock(first_id);
+        }
+    }
 }

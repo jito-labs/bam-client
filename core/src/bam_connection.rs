@@ -215,26 +215,33 @@ impl BamConnection {
                             }
                             BamOutboundMessage::AtomicTxnBatchResult(result) => {
                                 metrics.bundleresult_sent.fetch_add(1, Relaxed);
-                                waiting_results.push(result.clone());
+                                waiting_results.push(result);
                             }
                             _ => {}
                         }
                     }
-                    if !waiting_results.is_empty() {
-                        let outbound = SchedulerMessageV0 {
-                            msg: Some(Msg::MultipleAtomicTxnBatchResult(jito_protos::proto::bam_types::MultipleAtomicTxnBatchResult {
-                                results: std::mem::take(&mut waiting_results),
-                            })),
-                        };
-                        let _ = outbound_sender.try_send(v0_to_versioned_proto(outbound)).inspect_err(|_| {
-                            error!("Failed to send outbound message with results");
-                        });
-                    }
+                    Self::send_batch_results(&mut outbound_sender, std::mem::take(&mut waiting_results));
                 }
             }
         }
         is_healthy.store(false, Relaxed);
         let _ = builder_config_task.await.ok();
+    }
+
+    fn send_batch_results(
+        outbound_sender: &mut mpsc::Sender<SchedulerMessage>,
+        results: Vec<jito_protos::proto::bam_types::AtomicTxnBatchResult>,
+    ) {
+        if !results.is_empty() {
+            let outbound = SchedulerMessageV0 {
+                msg: Some(Msg::MultipleAtomicTxnBatchResult(
+                    jito_protos::proto::bam_types::MultipleAtomicTxnBatchResult { results },
+                )),
+            };
+            if let Err(e) = outbound_sender.try_send(v0_to_versioned_proto(outbound)) {
+                error!("Failed to send outbound message with results: {:?}", e);
+            }
+        }
     }
 
     async fn refresh_config_task(
