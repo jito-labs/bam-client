@@ -851,7 +851,6 @@ mod tests {
                     ..Default::default()
                 }),
                 size: data.len() as u64,
-                ..Default::default()
             }),
         };
 
@@ -898,7 +897,6 @@ mod tests {
                 ..Default::default()
             }),
             size: vote_data.len() as u64,
-            ..Default::default()
         };
 
         let batch = AtomicTxnBatch {
