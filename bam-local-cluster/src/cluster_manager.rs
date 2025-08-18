@@ -314,7 +314,6 @@ impl BamValidator {
             .arg("0");
 
         let output = cmd.output()?;
-        info!("create_snapshot output: {:?}", output);
         if !output.status.success() {
             return Err(anyhow::anyhow!(
                 "Failed to create snapshot: process exited with status: {}, output: {:?}",
