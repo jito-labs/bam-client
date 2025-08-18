@@ -216,6 +216,10 @@ impl BamConnection {
                             BamOutboundMessage::AtomicTxnBatchResult(result) => {
                                 metrics.bundleresult_sent.fetch_add(1, Relaxed);
                                 waiting_results.push(result);
+                                const MAX_WAITING_RESULTS: usize = 24;
+                                if waiting_results.len() >= MAX_WAITING_RESULTS {
+                                    Self::send_batch_results(&mut outbound_sender, std::mem::take(&mut waiting_results));
+                                }
                             }
                             _ => {}
                         }
