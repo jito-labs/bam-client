@@ -32,6 +32,9 @@ pub struct BamConnection {
     exit: Arc<AtomicBool>,
 }
 
+
+const AUTH_LABEL: &[u8] = b"X_OFF_CHAIN_JITO_BAM_V1\0";
+
 impl BamConnection {
     /// Try to initialize a connection to the BAM Node; if it is not possible to connect, it will return an error.
     pub async fn try_init(
@@ -259,14 +262,11 @@ impl BamConnection {
         &self.url
     }
 
-    pub const AUTH_LABEL: &[u8] = b"X_OFF_CHAIN_JITO_BAM_V1";
-    pub const SEP: u8 = 0x00;
 
     /// Bytes that must be signed/verified
     pub fn labeled_bytes(challenge: &[u8]) -> Vec<u8> {
-        let mut v = Vec::with_capacity(Self::AUTH_LABEL.len() + 1 + challenge.len());
-        v.extend_from_slice(Self::AUTH_LABEL);
-        v.push(Self::SEP);
+        let mut v = Vec::with_capacity(AUTH_LABEL.len() + challenge.len());
+        v.extend_from_slice(AUTH_LABEL);
         v.extend_from_slice(challenge);
         v
     }
