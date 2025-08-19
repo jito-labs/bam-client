@@ -63,6 +63,7 @@ impl BamValidator {
         vote_path: &PathBuf,
         runtime: &Runtime,
         config: &CustomValidatorConfig,
+        quiet: bool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let validator_binary = format!("{}/agave-validator", cluster_config.validator_build_path);
 
@@ -168,7 +169,7 @@ impl BamValidator {
         }
 
         // Spawn log file tailing
-        {
+        if !quiet {
             let node_name = node_name.clone();
             runtime.spawn(async move {
                 Self::tail_log_file(&log_file_path, &node_name).await;
@@ -188,6 +189,7 @@ impl BamValidator {
 
         cmd.arg("-l")
             .arg(ledger_path.to_str().unwrap())
+            .arg("--ignore-ulimit-nofile-error")
             .arg("verify")
             .arg("--print-bank-hash");
 
@@ -307,17 +309,16 @@ impl BamValidator {
         cmd.env("RUST_LOG", "info")
             .arg("--ledger")
             .arg(validator_ledger_path.to_str().unwrap())
+            .arg("--ignore-ulimit-nofile-error")
             .arg("create-snapshot")
             .arg("0");
 
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
-
-        let status = cmd.status()?;
-        if !status.success() {
+        let output = cmd.output()?;
+        if !output.status.success() {
             return Err(anyhow::anyhow!(
-                "Failed to create snapshot: process exited with status {}",
-                status
+                "Failed to create snapshot: process exited with status: {}, output: {:?}",
+                output.status,
+                output
             ));
         }
         Ok(())
@@ -330,7 +331,10 @@ pub struct BamLocalCluster {
 }
 
 impl BamLocalCluster {
-    pub fn new(config: LocalClusterConfig) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(
+        config: LocalClusterConfig,
+        quiet: bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         const BOOTSTRAP_GOSSIP: &str = "127.0.0.1:8001";
         const BOOTSTRAP_GOSSIP_PORT: u16 = 8001;
         const BOOTSTRAP_RPC_PORT: u16 = 8899;
@@ -427,6 +431,7 @@ impl BamLocalCluster {
                 &validator_config.vote_keypair,
                 &runtime,
                 validator_config,
+                quiet,
             )?;
             validators.push(validator);
 
