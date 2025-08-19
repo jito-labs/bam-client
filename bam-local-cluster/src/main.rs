@@ -22,7 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg(
             Arg::with_name("quiet")
                 .long("quiet")
-                .help("Quiet mode, don't tail the log file to stdout")
+                .help("Quiet mode does not tail the validator log files to stdout")
                 .takes_value(false)
                 .required(false),
         )
