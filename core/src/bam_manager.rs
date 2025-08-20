@@ -208,6 +208,10 @@ impl BamManager {
         };
 
         let commission = builder_info.builder_commission;
+        if commission > 100 {
+            error!("Block builder commission must be <= 100");
+            return;
+        }
         let mut block_builder_fee_info = block_builder_fee_info.lock().unwrap();
         block_builder_fee_info.block_builder = pubkey;
         block_builder_fee_info.block_builder_commission = commission;
