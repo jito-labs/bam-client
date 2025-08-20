@@ -292,8 +292,8 @@ impl<Tx: TransactionWithMeta> TransactionStateContainer<Tx> {
         self.batch_id_to_transaction_ids
             .insert(batch_id, transaction_ids);
 
-        self.priority_queue
-            .push(TransactionPriorityId::new(priority, batch_id));
+        let priority_id = TransactionPriorityId::new(priority, batch_id);
+        self.push_ids_into_queue(std::iter::once(priority_id));
 
         Some(batch_id)
     }
