@@ -1099,7 +1099,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     #[should_panic(expected = "node must exist")]
     fn test_prio_graph_clears_on_slot_boundary() {
         let TestScheduler {
