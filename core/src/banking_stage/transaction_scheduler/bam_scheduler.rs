@@ -52,8 +52,8 @@ fn passthrough_priority(
     *id
 }
 
-const MAX_SCHEDULED_PER_WORKER: usize = 1;
-const MAX_TXN_PER_BATCH: usize = 1;
+pub const MAX_SCHEDULED_PER_WORKER: usize = 1;
+pub const MAX_TXN_PER_BATCH: usize = 1;
 
 pub struct BamScheduler<Tx: TransactionWithMeta> {
     workers_scheduled_count: Vec<usize>,
@@ -68,6 +68,9 @@ pub struct BamScheduler<Tx: TransactionWithMeta> {
     insertion_to_prio_graph_time: HashMap<u32, Instant>,
     time_in_priograph_us: Histogram,
     slot: Option<Slot>,
+
+    max_scheduled_per_worker: usize,
+    max_txn_per_batch: usize,
 
     // Reusable objects to avoid allocations
     reusable_consume_work: Vec<ConsumeWork<Tx>>,
@@ -89,6 +92,8 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         consume_work_senders: Vec<Sender<ConsumeWork<Tx>>>,
         finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
         response_sender: Sender<BamOutboundMessage>,
+        max_scheduled_per_worker: usize,
+        max_txn_per_batch: usize,
     ) -> Self {
         Self {
             workers_scheduled_count: vec![0; consume_work_senders.len()],
@@ -102,6 +107,8 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             insertion_to_prio_graph_time: HashMap::default(),
             time_in_priograph_us: Histogram::new(),
             slot: None,
+            max_scheduled_per_worker,
+            max_txn_per_batch,
             reusable_consume_work: Vec::new(),
             reusable_priority_ids: Vec::new(),
             reusable_batches_for_scheduling: Vec::new(),
@@ -144,7 +151,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
 
     fn get_best_available_worker(&mut self) -> Option<usize> {
         let mut best_worker_index = None;
-        let mut best_worker_count = MAX_SCHEDULED_PER_WORKER;
+        let mut best_worker_count = self.max_scheduled_per_worker;
         for (worker_index, count) in self.workers_scheduled_count.iter_mut().enumerate() {
             if *count == 0 {
                 return Some(worker_index);
@@ -238,7 +245,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 current_batch_ids.push(next_batch_id);
             }
 
-            if current_batch_ids.len() >= MAX_TXN_PER_BATCH {
+            if current_batch_ids.len() >= self.max_txn_per_batch {
                 break;
             }
         }
@@ -489,10 +496,12 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         }
 
         // Drain container and send back 'retryable'
-        while let Some(next_batch_id) = container.pop() {
-            let seq_id = priority_to_seq_id(next_batch_id.priority);
-            self.send_no_leader_slot_bundle_result(seq_id);
-            container.remove_by_id(next_batch_id.id);
+        if self.slot.is_none() {
+            while let Some(next_batch_id) = container.pop() {
+                let seq_id = priority_to_seq_id(next_batch_id.priority);
+                self.send_no_leader_slot_bundle_result(seq_id);
+                container.remove_by_id(next_batch_id.id);
+            }
         }
 
         // Unblock all transactions blocked by inflight batches
@@ -696,6 +705,8 @@ mod tests {
             consume_work_senders,
             finished_consume_work_receiver,
             response_sender,
+            5,
+            16,
         );
         TestScheduler {
             scheduler,
@@ -860,7 +871,7 @@ mod tests {
         // Only two should have been scheduled as one is blocked
         assert_eq!(result.num_scheduled, 2);
 
-        // Since both are not bundles; should be scheduled together to first worker
+        // First one scheduled to first worker
         let work_1 = consume_work_receivers[0].try_recv().unwrap();
         assert_eq!(work_1.ids.len(), 2);
 
