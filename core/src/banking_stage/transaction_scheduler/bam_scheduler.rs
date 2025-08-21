@@ -488,12 +488,10 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         }
 
         // Drain container and send back 'retryable'
-        if self.slot.is_none() {
-            while let Some(next_batch_id) = container.pop() {
-                let seq_id = priority_to_seq_id(next_batch_id.priority);
-                self.send_no_leader_slot_bundle_result(seq_id);
-                container.remove_by_id(next_batch_id.id);
-            }
+        while let Some(next_batch_id) = container.pop() {
+            let seq_id = priority_to_seq_id(next_batch_id.priority);
+            self.send_no_leader_slot_bundle_result(seq_id);
+            container.remove_by_id(next_batch_id.id);
         }
 
         // Unblock all transactions blocked by inflight batches
