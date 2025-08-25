@@ -32,7 +32,6 @@ pub struct BamConnection {
     exit: Arc<AtomicBool>,
 }
 
-
 const AUTH_LABEL: &[u8] = b"X_OFF_CHAIN_JITO_BAM_V1\0";
 
 impl BamConnection {
@@ -261,7 +260,6 @@ impl BamConnection {
     pub fn url(&self) -> &str {
         &self.url
     }
-
 
     /// Bytes that must be signed/verified
     pub fn labeled_bytes(challenge: &[u8]) -> Vec<u8> {
