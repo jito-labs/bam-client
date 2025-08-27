@@ -341,6 +341,7 @@ impl Tpu {
             sigverify_stage_sender.clone(),
             exit.clone(),
             bam_enabled.clone(),
+            cluster_info.my_contact_info().clone(),
         );
 
         let relayer_stage = RelayerStage::new(

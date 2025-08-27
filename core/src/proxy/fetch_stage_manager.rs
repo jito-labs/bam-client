@@ -37,7 +37,7 @@ impl FetchStageState {
     fn reset_to_bam_state(&mut self) {
         self.fetch_connected = false;
         self.heartbeat_received = false;
-        self.pending_disconnect = false;
+        self.pending_disconnect = true;
     }
 
     fn switch_to_connected_mode(&mut self) {
@@ -87,6 +87,7 @@ impl FetchStageManager {
         packet_tx: Sender<PacketBatch>,
         exit: Arc<AtomicBool>,
         bam_enabled: Arc<AtomicBool>,
+        my_fallback_contact_info: contact_info::ContactInfo,
     ) -> Self {
         let t_hdl = Self::start(
             cluster_info,
@@ -95,6 +96,7 @@ impl FetchStageManager {
             packet_tx,
             exit,
             bam_enabled,
+            my_fallback_contact_info,
         );
 
         Self { t_hdl }
@@ -119,10 +121,10 @@ impl FetchStageManager {
         packet_tx: Sender<PacketBatch>,
         exit: Arc<AtomicBool>,
         bam_enabled: Arc<AtomicBool>,
+        my_fallback_contact_info: contact_info::ContactInfo,
     ) -> JoinHandle<()> {
         Builder::new().name("fetch-stage-manager".into()).spawn(move || {
             // Save validator's original TPU addresses for fallback
-            let my_fallback_contact_info = cluster_info.my_contact_info();
 
             let mut state = FetchStageState::new();
 
