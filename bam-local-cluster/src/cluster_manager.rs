@@ -53,8 +53,8 @@ impl BamValidator {
         node_name: &str,
         gossip_port: Option<u16>,
         rpc_port: u16,
-        dynamic_port_range_start: u64,
-        dynamic_port_range_end: u64,
+        dynamic_port_range_start: u16,
+        dynamic_port_range_end: u16,
         cluster_config: &LocalClusterConfig,
         genesis_config: &GenesisConfig,
         bootstrap_gossip: Option<&str>,
@@ -403,8 +403,9 @@ impl BamLocalCluster {
 
             let log_file_path = ledger_path.join("validator.log");
 
-            let dynamic_port_range_start =
-                8_000_usize.saturating_add(i.saturating_mul(1000)) as u64;
+            let dynamic_port_range_start = config
+                .dynamic_port_range_start
+                .saturating_add(i.saturating_mul(1000) as u16);
             let dynamic_port_range_end = dynamic_port_range_start.saturating_add(1000);
 
             let validator = BamValidator::start_process(
@@ -415,7 +416,7 @@ impl BamLocalCluster {
                 if is_bootstrap {
                     BOOTSTRAP_RPC_PORT
                 } else {
-                    dynamic_port_range_start.saturating_add(100) as u16
+                    dynamic_port_range_start.saturating_add(100)
                 },
                 dynamic_port_range_start,
                 dynamic_port_range_end,
