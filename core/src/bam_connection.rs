@@ -2,23 +2,26 @@
 // Keeps track of last received heartbeat 'behind the scenes' and will mark itself as unhealthy if no heartbeat is received
 
 use {
-    crate::bam_dependencies::v0_to_versioned_proto,
+    crate::bam_dependencies::{v0_to_versioned_proto, BamOutboundMessage},
     futures::{channel::mpsc, SinkExt, StreamExt},
     jito_protos::proto::{
         bam_api::{
-            bam_node_api_client::BamNodeApiClient, start_scheduler_message_v0::Msg,
-            start_scheduler_response::VersionedMsg, start_scheduler_response_v0::Resp,
-            AuthChallengeRequest, ConfigRequest, ConfigResponse, StartSchedulerMessage,
-            StartSchedulerMessageV0, StartSchedulerResponse, StartSchedulerResponseV0,
+            bam_node_api_client::BamNodeApiClient, scheduler_message_v0::Msg,
+            scheduler_response::VersionedMsg, scheduler_response_v0::Resp, AuthChallengeRequest,
+            ConfigRequest, ConfigResponse, SchedulerMessage, SchedulerMessageV0, SchedulerResponse,
+            SchedulerResponseV0,
         },
         bam_types::{AtomicTxnBatch, AuthProof, ValidatorHeartBeat},
     },
     solana_gossip::cluster_info::ClusterInfo,
     solana_keypair::Keypair,
     solana_signer::Signer,
-    std::sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
-        Arc, Mutex,
+    std::{
+        sync::{
+            atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
+            Arc, Mutex,
+        },
+        time::SystemTime,
     },
     thiserror::Error,
     tokio::time::{interval, timeout},
@@ -38,7 +41,7 @@ impl BamConnection {
         url: String,
         cluster_info: Arc<ClusterInfo>,
         batch_sender: crossbeam_channel::Sender<AtomicTxnBatch>,
-        outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessageV0>,
+        outbound_receiver: crossbeam_channel::Receiver<BamOutboundMessage>,
     ) -> Result<Self, TryInitError> {
         let backend_endpoint = tonic::transport::Endpoint::from_shared(url.clone())?;
         let connection_timeout = std::time::Duration::from_secs(5);
@@ -49,9 +52,9 @@ impl BamConnection {
 
         let (outbound_sender, outbound_receiver_internal) = mpsc::channel(100_000);
         let outbound_stream =
-            tonic::Request::new(outbound_receiver_internal.map(|req: StartSchedulerMessage| req));
+            tonic::Request::new(outbound_receiver_internal.map(|req: SchedulerMessage| req));
         let inbound_stream = validator_client
-            .start_scheduler_stream(outbound_stream)
+            .init_scheduler_stream(outbound_stream)
             .await
             .map_err(|e| {
                 error!("Failed to start scheduler stream: {:?}", e);
@@ -89,15 +92,15 @@ impl BamConnection {
     #[allow(clippy::too_many_arguments)]
     async fn connection_task(
         exit: Arc<AtomicBool>,
-        mut inbound_stream: tonic::Streaming<StartSchedulerResponse>,
-        mut outbound_sender: mpsc::Sender<StartSchedulerMessage>,
+        mut inbound_stream: tonic::Streaming<SchedulerResponse>,
+        mut outbound_sender: mpsc::Sender<SchedulerMessage>,
         mut validator_client: BamNodeApiClient<tonic::transport::channel::Channel>,
         config: Arc<Mutex<Option<ConfigResponse>>>,
         batch_sender: crossbeam_channel::Sender<AtomicTxnBatch>,
         cluster_info: Arc<ClusterInfo>,
         metrics: Arc<BamConnectionMetrics>,
         is_healthy: Arc<AtomicBool>,
-        outbound_receiver: crossbeam_channel::Receiver<StartSchedulerMessageV0>,
+        outbound_receiver: crossbeam_channel::Receiver<BamOutboundMessage>,
     ) {
         let mut last_heartbeat = std::time::Instant::now();
         let mut heartbeat_interval = interval(std::time::Duration::from_secs(5));
@@ -117,7 +120,7 @@ impl BamConnection {
         };
 
         // Send it as first message
-        let start_message = StartSchedulerMessageV0 {
+        let start_message = SchedulerMessageV0 {
             msg: Some(Msg::AuthProof(auth_proof)),
         };
         if outbound_sender
@@ -138,11 +141,17 @@ impl BamConnection {
             validator_client.clone(),
             metrics.clone(),
         ));
+        let mut waiting_results = Vec::new();
         while !exit.load(Relaxed) {
             tokio::select! {
                 _ = heartbeat_interval.tick() => {
-                    let _ = outbound_sender.try_send(v0_to_versioned_proto(StartSchedulerMessageV0 {
-                        msg: Some(Msg::HeartBeat(ValidatorHeartBeat {})),
+                    let _ = outbound_sender.try_send(v0_to_versioned_proto(SchedulerMessageV0 {
+                        msg: Some(Msg::HeartBeat(ValidatorHeartBeat {
+                            time_sent_microseconds: u64::try_from(SystemTime::now()
+                                .duration_since(SystemTime::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_micros()).unwrap_or_default(),
+                        })),
                     }));
                     metrics.heartbeat_sent.fetch_add(1, Relaxed);
                 }
@@ -177,14 +186,16 @@ impl BamConnection {
                     };
 
                     match inbound {
-                        StartSchedulerResponseV0 { resp: Some(Resp::HeartBeat(_)), .. } => {
+                        SchedulerResponseV0 { resp: Some(Resp::HeartBeat(_)), .. } => {
                             last_heartbeat = std::time::Instant::now();
                             metrics.heartbeat_received.fetch_add(1, Relaxed);
                         }
-                        StartSchedulerResponseV0 { resp: Some(Resp::AtomicTxnBatch(batch)), .. } => {
-                            let _ = batch_sender.try_send(batch).inspect_err(|_| {
-                                error!("Failed to send bundle to receiver");
-                            });
+                        SchedulerResponseV0 { resp: Some(Resp::MultipleAtomicTxnBatch(batches)), .. } => {
+                            for batch in batches.batches {
+                                let _ = batch_sender.try_send(batch).inspect_err(|_| {
+                                    error!("Failed to send bundle to receiver");
+                                });
+                            }
                             metrics.bundle_received.fetch_add(1, Relaxed);
                         }
                         _ => {}
@@ -192,25 +203,49 @@ impl BamConnection {
                 }
                 _ = outbound_tick_interval.tick() => {
                     while let Ok(outbound) = outbound_receiver.try_recv() {
-                        match outbound.msg.as_ref() {
-                            Some(Msg::LeaderState(_)) => {
+                        match outbound {
+                            BamOutboundMessage::LeaderState(leader_state) => {
                                 metrics.leaderstate_sent.fetch_add(1, Relaxed);
+                                let outbound = SchedulerMessageV0 {
+                                    msg: Some(Msg::LeaderState(leader_state)),
+                                };
+                                let _ = outbound_sender.try_send(v0_to_versioned_proto(outbound)).inspect_err(|_| {
+                                    error!("Failed to send outbound message");
+                                });
                             }
-                            Some(Msg::AtomicTxnBatchResult(_)) => {
+                            BamOutboundMessage::AtomicTxnBatchResult(result) => {
                                 metrics.bundleresult_sent.fetch_add(1, Relaxed);
+                                waiting_results.push(result);
+                                const MAX_WAITING_RESULTS: usize = 24;
+                                if waiting_results.len() >= MAX_WAITING_RESULTS {
+                                    Self::send_batch_results(&mut outbound_sender, std::mem::take(&mut waiting_results));
+                                }
                             }
                             _ => {}
                         }
-                        let _ = outbound_sender.try_send(v0_to_versioned_proto(outbound)).inspect_err(|_| {
-                            error!("Failed to send outbound message");
-                        });
-                        metrics.outbound_sent.fetch_add(1, Relaxed);
                     }
+                    Self::send_batch_results(&mut outbound_sender, std::mem::take(&mut waiting_results));
                 }
             }
         }
         is_healthy.store(false, Relaxed);
         let _ = builder_config_task.await.ok();
+    }
+
+    fn send_batch_results(
+        outbound_sender: &mut mpsc::Sender<SchedulerMessage>,
+        results: Vec<jito_protos::proto::bam_types::AtomicTxnBatchResult>,
+    ) {
+        if !results.is_empty() {
+            let outbound = SchedulerMessageV0 {
+                msg: Some(Msg::MultipleAtomicTxnBatchResult(
+                    jito_protos::proto::bam_types::MultipleAtomicTxnBatchResult { results },
+                )),
+            };
+            if let Err(e) = outbound_sender.try_send(v0_to_versioned_proto(outbound)) {
+                error!("Failed to send outbound message with results: {:?}", e);
+            }
+        }
     }
 
     async fn refresh_config_task(
