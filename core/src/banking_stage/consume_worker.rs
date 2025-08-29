@@ -310,6 +310,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
                     cus_consumed: *compute_units as u32,
                     feepayer_balance_lamports: bank.get_balance(work.transactions[i].fee_payer()),
                     loaded_accounts_data_size: *loaded_accounts_data_size,
+                    execution_success: errors.get(i).cloned().flatten().is_none(),
                 }));
             } else {
                 let not_committed_reason = errors
