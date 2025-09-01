@@ -163,7 +163,7 @@ use {
     solana_svm_callback::{AccountState, InvokeContextCallback, TransactionProcessingCallback},
     solana_svm_transaction::svm_message::SVMMessage,
     solana_system_transaction as system_transaction,
-    solana_sysvar::{self as sysvar, last_restart_slot::LastRestartSlot, Sysvar},
+    solana_sysvar::{self as sysvar, last_restart_slot::LastRestartSlot, recent_blockhashes::IterItem, Sysvar},
     solana_sysvar_id::SysvarId,
     solana_time_utils::years_as_slots,
     solana_timings::{ExecuteTimingType, ExecuteTimings},
@@ -2577,6 +2577,11 @@ impl Bank {
     pub fn update_recent_blockhashes(&self) {
         let blockhash_queue = self.blockhash_queue.read().unwrap();
         self.update_recent_blockhashes_locked(&blockhash_queue);
+    }
+
+    pub fn get_recent_blockhashes(&self) -> Vec<Hash> {
+        let blockhash_queue = self.blockhash_queue.read().unwrap();
+        blockhash_queue.get_recent_blockhashes().into_iter().map(|IterItem(_, hash ,_)| *hash).collect()
     }
 
     fn get_timestamp_estimate(

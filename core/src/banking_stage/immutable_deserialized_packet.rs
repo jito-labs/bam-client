@@ -54,6 +54,7 @@ pub struct ImmutableDeserializedPacket {
     transaction: SanitizedVersionedTransaction,
     forwarded: bool,
     message_hash: Hash,
+    packet_data: Vec<u8>,
     is_simple_vote: bool,
     compute_unit_price: u64,
     compute_unit_limit: u32,
@@ -91,6 +92,7 @@ impl ImmutableDeserializedPacket {
             transaction: sanitized_transaction,
             forwarded,
             message_hash,
+            packet_data: packet.data(..).unwrap_or(&[]).to_vec(),
             is_simple_vote,
             compute_unit_price,
             compute_unit_limit,
@@ -107,6 +109,10 @@ impl ImmutableDeserializedPacket {
 
     pub fn message_hash(&self) -> &Hash {
         &self.message_hash
+    }
+
+    pub fn packet_data(&self) -> Vec<u8> {
+        self.packet_data.clone()
     }
 
     pub fn is_simple_vote(&self) -> bool {

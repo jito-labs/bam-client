@@ -1,5 +1,6 @@
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
+use solana_account::AccountSharedData;
 use {
     super::{
         scheduler_metrics::{SchedulerCountMetrics, SchedulerTimingMetrics},
@@ -45,7 +46,8 @@ use {
     },
 };
 use solana_pubkey::Pubkey;
-use std::{collections::HashSet, sync::atomic::AtomicBool};
+use std::{collections::HashSet, io::Write, sync::atomic::AtomicBool};
+ use solana_hash::Hash;
 
 #[derive(Debug)]
 #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
@@ -187,8 +189,11 @@ impl SanitizedTransactionReceiveAndBuffer {
         let lock_results: [_; CHUNK_SIZE] = core::array::from_fn(|_| Ok(()));
 
         let mut transactions = ArrayVec::<_, CHUNK_SIZE>::new();
+        let mut saved_packets = ArrayVec::<_, CHUNK_SIZE>::new();
         let mut max_ages = ArrayVec::<_, CHUNK_SIZE>::new();
         let mut fee_budget_limits_vec = ArrayVec::<_, CHUNK_SIZE>::new();
+
+        record_block_hashes_to_archive(&working_bank);
 
         let mut error_counts = TransactionErrorMetrics::default();
         for chunk in packets.chunks(CHUNK_SIZE) {
@@ -196,34 +201,39 @@ impl SanitizedTransactionReceiveAndBuffer {
             chunk
                 .iter()
                 .filter_map(|packet| {
-                    packet.build_sanitized_transaction(
+                    if let Some(txn_and_slot) = packet.build_sanitized_transaction(
                         vote_only,
                         root_bank.as_ref(),
                         root_bank.get_reserved_account_keys(),
-                    )
+                    ) {
+                        Some((txn_and_slot, packet.packet_data()))
+                    } else {
+                        None
+                    }
                 })
                 .inspect(|_| post_sanitization_count += 1)
-                .filter(|(tx, _deactivation_slot)| {
+                .filter(|((tx, _deactivation_slot), _packet_data)| {
                     validate_account_locks(
                         tx.message().account_keys(),
                         transaction_account_lock_limit,
                     )
                     .is_ok()
                 })
-                .filter(|(tx, _deactivation_slot)| {
+                .filter(|((tx, _deactivation_slot), _packet_data)| {
                     !tx.message()
                         .account_keys()
                         .iter()
                         .any(|account| self.blacklisted_accounts.contains(account))
                 })
-                .filter_map(|(tx, deactivation_slot)| {
+                .filter_map(|((tx, deactivation_slot), packet_data)| {
                     tx.compute_budget_instruction_details()
                         .sanitize_and_convert_to_compute_budget_limits(&working_bank.feature_set)
-                        .map(|compute_budget| (tx, deactivation_slot, compute_budget.into()))
+                        .map(|compute_budget| (tx, deactivation_slot, packet_data, compute_budget.into()))
                         .ok()
                 })
-                .for_each(|(tx, deactivation_slot, fee_budget_limits)| {
+                .for_each(|(tx, deactivation_slot, packet_data, fee_budget_limits)| {
                     transactions.push(tx);
+                    saved_packets.push(packet_data);
                     max_ages.push(calculate_max_age(
                         sanitized_epoch,
                         deactivation_slot,
@@ -244,13 +254,14 @@ impl SanitizedTransactionReceiveAndBuffer {
             let mut post_transaction_check_count = Saturating::<usize>(0);
             let mut num_dropped_on_capacity = Saturating::<usize>(0);
             let mut num_buffered = Saturating::<usize>(0);
-            for (((transaction, max_age), fee_budget_limits), _check_result) in transactions
+            for ((((transaction, max_age), fee_budget_limits), packet_data), _check_result) in transactions
                 .drain(..)
                 .zip(max_ages.drain(..))
                 .zip(fee_budget_limits_vec.drain(..))
+                .zip(saved_packets.drain(..))
                 .zip(check_results)
                 .filter(|(_, check_result)| check_result.is_ok())
-                .filter(|(((tx, _), _), _)| {
+                .filter(|((((tx, _max_age), _), _), _)| {
                     Consumer::check_fee_payer_unlocked(&working_bank, tx, &mut error_counts).is_ok()
                 })
             {
@@ -259,10 +270,12 @@ impl SanitizedTransactionReceiveAndBuffer {
                 let (priority, cost) =
                     calculate_priority_and_cost(&transaction, &fee_budget_limits, &working_bank);
 
+                if self.enable_recv_recording.load(std::sync::atomic::Ordering::Relaxed) {
+                    record_transaction_to_archive(&transaction, &packet_data, &working_bank);
+                }
+
                 if container.insert_new_transaction(transaction, max_age, priority, cost) {
                     num_dropped_on_capacity += 1;
-                } else if self.enable_recv_recording.load(std::sync::atomic::Ordering::Relaxed) {
-                    todo!();
                 }
                 num_buffered += 1;
             }
@@ -289,6 +302,75 @@ impl SanitizedTransactionReceiveAndBuffer {
             });
         }
     }
+}
+
+const ARCHIVE_FILE_PATH: &str = "/tmp/recv_recording_archive";
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+enum ArchiveRecord {
+    Blockhashes(Vec<Hash>),
+    Account(AccountSharedData),
+    Transaction(Vec<u8>),
+}
+
+fn record_block_hashes_to_archive(
+    working_bank: &Bank,
+) {
+    let blockhashes = working_bank.get_recent_blockhashes();
+    if blockhashes.is_empty() {
+        return;
+    }
+
+    let archive_path = std::path::Path::new(ARCHIVE_FILE_PATH);
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(archive_path)
+        .expect("Failed to open archive file");
+
+    let archive_record = ArchiveRecord::Blockhashes(blockhashes);
+
+    let Ok(serialized_record) = bincode::serialize(&archive_record) else {
+        return;
+    };
+
+    file.write(&serialized_record)
+        .expect("Failed to write blockhashes to archive file");
+}
+
+fn record_transaction_to_archive(
+    transaction: &RuntimeTransaction<SanitizedTransaction>,
+    packet_data: &[u8],
+    bank: &Bank,
+) {
+    // 0. Open the archive file for appending.
+    let archive_path = std::path::Path::new(ARCHIVE_FILE_PATH);
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(archive_path)
+        .expect("Failed to open archive file");
+
+    // 1. Save the state of all accounts read or written to by the transaction.
+    for account_key in transaction.account_keys().iter() {
+        let Some(account_data) = bank.get_account(account_key) else {
+            continue;
+        };
+        let archive_record = ArchiveRecord::Account(account_data);
+        let Ok(serialized_account) = bincode::serialize(&archive_record) else {
+            continue;
+        };
+        file.write(&serialized_account)
+            .expect("Failed to write account data to archive file");
+    }
+
+    // 2. Save the transaction itself.
+    let archive_record = ArchiveRecord::Transaction(packet_data.to_vec());
+    let Ok(serialized_transaction) = bincode::serialize(&archive_record) else {
+        return;
+    };
+    file.write(&serialized_transaction)
+        .expect("Failed to write transaction to archive file");
 }
 
 #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
