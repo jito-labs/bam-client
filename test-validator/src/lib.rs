@@ -1080,6 +1080,7 @@ impl TestValidator {
             accounts_db_config,
             runtime_config,
             bam_url: config.bam_url.clone(),
+            enable_recv_recording: config.enable_recv_recording.clone(),
             ..ValidatorConfig::default_for_test()
         };
         if let Some(ref tower_storage) = config.tower_storage {
