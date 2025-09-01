@@ -176,6 +176,7 @@ impl Tpu {
         shred_receiver_address: Arc<RwLock<Option<SocketAddr>>>,
         preallocated_bundle_cost: u64,
         bam_url: Arc<Mutex<Option<String>>>,
+        enable_recv_recording: Arc<AtomicBool>,
     ) -> Self {
         let TpuSockets {
             transactions: transactions_sockets,
@@ -428,6 +429,7 @@ impl Tpu {
                 cluster_info: cluster_info.clone(),
             }),
             Some(bam_dependencies.clone()),
+            enable_recv_recording.clone(),
         );
 
         let SpawnForwardingStageResult {

@@ -64,7 +64,7 @@ use {
         net::{IpAddr, Ipv4Addr, SocketAddr},
         path::{Path, PathBuf},
         str::FromStr,
-        sync::{Arc, Mutex, RwLock},
+        sync::{atomic::AtomicBool, Arc, Mutex, RwLock},
         time::Duration,
     },
     tokio::time::sleep,
@@ -135,6 +135,7 @@ pub struct TestValidatorGenesis {
     pub geyser_plugin_manager: Arc<RwLock<GeyserPluginManager>>,
     admin_rpc_service_post_init: Arc<RwLock<Option<AdminRpcRequestMetadataPostInit>>>,
     pub bam_url: Arc<Mutex<Option<String>>>,
+    pub enable_recv_recording: Arc<AtomicBool>,
 }
 
 impl Default for TestValidatorGenesis {
@@ -169,6 +170,7 @@ impl Default for TestValidatorGenesis {
             admin_rpc_service_post_init:
                 Arc::<RwLock<Option<AdminRpcRequestMetadataPostInit>>>::default(),
             bam_url: Arc::new(Mutex::new(None)),
+            enable_recv_recording: Arc::new(AtomicBool::new(false)),
         }
     }
 }

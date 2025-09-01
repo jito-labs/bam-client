@@ -392,6 +392,7 @@ impl BankingStage {
         block_cost_limit_block_cost_limit_reservation_cb: impl Fn(&Bank) -> u64 + Clone + Send + 'static,
         tip_processing_dependencies: Option<TipProcessingDependencies>,
         bam_dependencies: Option<BamDependencies>,
+        enable_recv_recording: Arc<AtomicBool>,
     ) -> Self {
         Self::new_num_threads(
             block_production_method,
@@ -413,6 +414,7 @@ impl BankingStage {
             block_cost_limit_block_cost_limit_reservation_cb,
             tip_processing_dependencies,
             bam_dependencies,
+            enable_recv_recording,
         )
     }
 
@@ -437,6 +439,7 @@ impl BankingStage {
         block_cost_limit_reservation_cb: impl Fn(&Bank) -> u64 + Clone + Send + 'static,
         tip_processing_dependencies: Option<TipProcessingDependencies>,
         bam_dependencies: Option<BamDependencies>,
+        enable_recv_recording: Arc<AtomicBool>,
     ) -> Self {
         match block_production_method {
             BlockProductionMethod::CentralScheduler
@@ -465,6 +468,7 @@ impl BankingStage {
                     block_cost_limit_reservation_cb,
                     tip_processing_dependencies,
                     bam_dependencies,
+                    enable_recv_recording,
                 )
             }
         }
@@ -491,6 +495,7 @@ impl BankingStage {
         block_cost_limit_reservation_cb: impl Fn(&Bank) -> u64 + Clone + Send + 'static,
         tip_processing_dependencies: Option<TipProcessingDependencies>,
         bam_dependencies: Option<BamDependencies>,
+        enable_recv_recording: Arc<AtomicBool>,
     ) -> Self {
         assert!(num_threads >= MIN_TOTAL_THREADS);
         let vote_storage = {
@@ -528,6 +533,7 @@ impl BankingStage {
                     PacketDeserializer::new(non_vote_receiver),
                     bank_forks.clone(),
                     blacklisted_accounts.clone(),
+                    enable_recv_recording,
                 );
                 Self::spawn_scheduler_and_workers(
                     &mut bank_thread_hdls,

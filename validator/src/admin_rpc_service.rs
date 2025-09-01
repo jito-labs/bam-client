@@ -58,6 +58,7 @@ pub struct AdminRpcRequestMetadata {
     pub post_init: Arc<RwLock<Option<AdminRpcRequestMetadataPostInit>>>,
     pub rpc_to_plugin_manager_sender: Option<Sender<GeyserPluginManagerRequest>>,
     pub bam_url: Arc<Mutex<Option<String>>>,
+    pub enable_recv_recording: Arc<AtomicBool>,
 }
 
 impl Metadata for AdminRpcRequestMetadata {}
@@ -274,6 +275,9 @@ pub trait AdminRpc {
 
     #[rpc(meta, name = "setBamUrl")]
     fn set_bam_url(&self, meta: Self::Metadata, bam_url: Option<String>) -> Result<()>;
+
+    #[rpc(meta, name = "enableRecvRecording")]
+    fn enable_recv_recording(&self, meta: Self::Metadata, enable: bool) -> Result<()>;
 
     #[rpc(meta, name = "setRelayerConfig")]
     fn set_relayer_config(
@@ -570,6 +574,12 @@ impl AdminRpc for AdminRpcImpl {
         }
 
         *meta.bam_url.lock().unwrap() = bam_url;
+        Ok(())
+    }
+
+    fn enable_recv_recording(&self, meta: Self::Metadata, enable: bool) -> Result<()> {
+        debug!("enable_recv_recording request received: {enable}");
+        meta.enable_recv_recording.store(enable, Ordering::Relaxed);
         Ok(())
     }
 
@@ -1172,6 +1182,7 @@ mod tests {
                 staked_nodes_overrides: Arc::new(RwLock::new(HashMap::new())),
                 rpc_to_plugin_manager_sender: None,
                 bam_url: Arc::new(Mutex::new(None)),
+                enable_recv_recording: Arc::new(AtomicBool::new(false)),
             };
             let mut io = MetaIoHandler::default();
             io.extend_with(AdminRpcImpl.to_delegate());
@@ -1593,6 +1604,7 @@ mod tests {
                 staked_nodes_overrides: Arc::new(RwLock::new(HashMap::new())),
                 rpc_to_plugin_manager_sender: None,
                 bam_url: Arc::new(Mutex::new(None)),
+                enable_recv_recording: Arc::new(AtomicBool::new(false)),
             };
 
             let _validator = Validator::new(

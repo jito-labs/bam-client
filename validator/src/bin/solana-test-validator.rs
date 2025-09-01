@@ -423,6 +423,7 @@ fn main() {
             tower_storage: tower_storage.clone(),
             rpc_to_plugin_manager_sender,
             bam_url: genesis.bam_url.clone(),
+            enable_recv_recording: genesis.enable_recv_recording.clone(),
         },
     );
     let dashboard = if output == Output::Dashboard {

@@ -45,7 +45,7 @@ use {
     },
 };
 use solana_pubkey::Pubkey;
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::atomic::AtomicBool};
 
 #[derive(Debug)]
 #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
@@ -73,6 +73,7 @@ pub(crate) struct SanitizedTransactionReceiveAndBuffer {
     packet_receiver: PacketDeserializer,
     bank_forks: Arc<RwLock<BankForks>>,
     blacklisted_accounts: HashSet<Pubkey>,
+    enable_recv_recording: Arc<AtomicBool>,
 }
 
 impl ReceiveAndBuffer for SanitizedTransactionReceiveAndBuffer {
@@ -151,11 +152,13 @@ impl SanitizedTransactionReceiveAndBuffer {
         packet_receiver: PacketDeserializer,
         bank_forks: Arc<RwLock<BankForks>>,
         blacklisted_accounts: HashSet<Pubkey>,
+        enable_recv_recording: Arc<AtomicBool>,
     ) -> Self {
         Self {
             packet_receiver,
             bank_forks,
             blacklisted_accounts,
+            enable_recv_recording,
         }
     }
 
@@ -258,6 +261,8 @@ impl SanitizedTransactionReceiveAndBuffer {
 
                 if container.insert_new_transaction(transaction, max_age, priority, cost) {
                     num_dropped_on_capacity += 1;
+                } else if self.enable_recv_recording.load(std::sync::atomic::Ordering::Relaxed) {
+                    todo!();
                 }
                 num_buffered += 1;
             }

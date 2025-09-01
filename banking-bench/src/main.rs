@@ -40,7 +40,7 @@ use {
     solana_transaction::Transaction,
     std::{
         collections::HashSet,
-        sync::{atomic::Ordering, Arc, RwLock},
+        sync::{atomic::{AtomicBool, Ordering}, Arc, RwLock},
         thread::sleep,
         time::{Duration, Instant},
     },
@@ -484,6 +484,7 @@ fn main() {
         |_| 0,
         None,
         None,
+        Arc::new(AtomicBool::new(false)),
     );
 
     // This is so that the signal_receiver does not go out of scope after the closure.

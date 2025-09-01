@@ -308,6 +308,7 @@ pub struct ValidatorConfig {
     pub tip_manager_config: TipManagerConfig,
     pub preallocated_bundle_cost: u64,
     pub bam_url: Arc<Mutex<Option<String>>>,
+    pub enable_recv_recording: Arc<AtomicBool>,
 }
 
 impl Default for ValidatorConfig {
@@ -390,6 +391,7 @@ impl Default for ValidatorConfig {
             tip_manager_config: TipManagerConfig::default(),
             preallocated_bundle_cost: 0,
             bam_url: Arc::new(Mutex::new(None)),
+            enable_recv_recording: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -1692,6 +1694,7 @@ impl Validator {
             config.shred_receiver_address.clone(),
             config.preallocated_bundle_cost,
             config.bam_url.clone(),
+            config.enable_recv_recording.clone(),
         );
 
         datapoint_info!(

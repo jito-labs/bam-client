@@ -1184,6 +1184,7 @@ pub fn execute(
             staked_nodes_overrides,
             rpc_to_plugin_manager_sender,
             bam_url: validator_config.bam_url.clone(),
+            enable_recv_recording: Arc::new(AtomicBool::new(false)),
         },
     );
 
