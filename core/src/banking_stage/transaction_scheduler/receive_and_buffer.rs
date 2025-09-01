@@ -1,6 +1,8 @@
+use agave_feature_set::FeatureSet;
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
 use solana_account::AccountSharedData;
+use solana_slot_hashes::SlotHashes;
 use {
     super::{
         scheduler_metrics::{SchedulerCountMetrics, SchedulerTimingMetrics},
@@ -194,6 +196,8 @@ impl SanitizedTransactionReceiveAndBuffer {
         let mut fee_budget_limits_vec = ArrayVec::<_, CHUNK_SIZE>::new();
 
         record_block_hashes_to_archive(&working_bank);
+        record_slot_hashes_to_archive(&working_bank);
+        record_feature_set_to_archive(&working_bank.feature_set);
 
         let mut error_counts = TransactionErrorMetrics::default();
         for chunk in packets.chunks(CHUNK_SIZE) {
@@ -309,7 +313,9 @@ const ARCHIVE_FILE_PATH: &str = "/tmp/recv_recording_archive";
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 enum ArchiveRecord {
     Blockhashes(Vec<Hash>),
-    Account(AccountSharedData),
+    Slothashes(SlotHashes),
+    ActiveFeatures(Vec<(Pubkey, u64)>),
+    Account((Pubkey, AccountSharedData)),
     Transaction(Vec<u8>),
 }
 
@@ -334,8 +340,62 @@ fn record_block_hashes_to_archive(
         return;
     };
 
+    file.write(serialized_record.len().to_le_bytes().as_slice())
+        .expect("Failed to write blockhashes length to archive file");
     file.write(&serialized_record)
         .expect("Failed to write blockhashes to archive file");
+}
+
+fn record_slot_hashes_to_archive(
+    working_bank: &Bank,
+) {
+    let Some(slot_hashes_account) = working_bank.get_account(&solana_slot_hashes::sysvar::ID) else {
+        return;
+    };
+    let Ok(slot_hashes) = bincode::deserialize::<SlotHashes>(&slot_hashes_account.data_clone()) else {
+        return;
+    };
+    if slot_hashes.is_empty() {
+        return;
+    }
+
+    let archive_path = std::path::Path::new(ARCHIVE_FILE_PATH);
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(archive_path)
+        .expect("Failed to open archive file");
+
+    let archive_record = ArchiveRecord::Slothashes(slot_hashes);
+
+    let Ok(serialized_record) = bincode::serialize(&archive_record) else {
+        return;
+    };
+
+    file.write(serialized_record.len().to_le_bytes().as_slice())
+        .expect("Failed to write slothashes length to archive file");
+    file.write(&serialized_record)
+        .expect("Failed to write slothashes to archive file");
+}
+
+fn record_feature_set_to_archive(feature_set: &FeatureSet) {
+    let archive_path = std::path::Path::new(ARCHIVE_FILE_PATH);
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(archive_path)
+        .expect("Failed to open archive file");
+
+    let active_features = feature_set.active().iter().map(|(k, v)| (*k, *v)).collect();
+    let archive_record = ArchiveRecord::ActiveFeatures(active_features);
+    let Ok(serialized_record) = bincode::serialize(&archive_record) else {
+        return;
+    };
+
+    file.write(serialized_record.len().to_le_bytes().as_slice())
+        .expect("Failed to write feature set length to archive file");
+    file.write(&serialized_record)
+        .expect("Failed to write feature set to archive file");
 }
 
 fn record_transaction_to_archive(
@@ -356,10 +416,12 @@ fn record_transaction_to_archive(
         let Some(account_data) = bank.get_account(account_key) else {
             continue;
         };
-        let archive_record = ArchiveRecord::Account(account_data);
+        let archive_record = ArchiveRecord::Account((*account_key, account_data));
         let Ok(serialized_account) = bincode::serialize(&archive_record) else {
             continue;
         };
+        file.write(serialized_account.len().to_le_bytes().as_slice())
+            .expect("Failed to write account data length to archive file");
         file.write(&serialized_account)
             .expect("Failed to write account data to archive file");
     }
@@ -369,6 +431,8 @@ fn record_transaction_to_archive(
     let Ok(serialized_transaction) = bincode::serialize(&archive_record) else {
         return;
     };
+    file.write(serialized_transaction.len().to_le_bytes().as_slice())
+        .expect("Failed to write transaction length to archive file");
     file.write(&serialized_transaction)
         .expect("Failed to write transaction to archive file");
 }
