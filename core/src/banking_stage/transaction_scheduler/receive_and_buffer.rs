@@ -196,6 +196,8 @@ impl SanitizedTransactionReceiveAndBuffer {
         let mut fee_budget_limits_vec = ArrayVec::<_, CHUNK_SIZE>::new();
 
         if self.enable_recv_recording.load(std::sync::atomic::Ordering::Relaxed) {
+            record_current_slot_to_archive(working_bank.slot());
+            record_finalized_slot_to_archive(root_bank.slot());
             record_block_hashes_to_archive(&working_bank);
             record_slot_hashes_to_archive(&working_bank);
             record_feature_set_to_archive(&working_bank.feature_set);
@@ -314,11 +316,51 @@ const ARCHIVE_FILE_PATH: &str = "/tmp/recv_recording_archive";
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 enum ArchiveRecord {
+    CurrentSlot(Slot),
+    FinalizedSlot(Slot),
     Blockhashes(Vec<Hash>),
     Slothashes(SlotHashes),
     ActiveFeatures(Vec<(Pubkey, u64)>),
     Account((Pubkey, AccountSharedData)),
     Transaction(Vec<u8>),
+}
+
+fn record_current_slot_to_archive(slot: Slot) {
+    let archive_path = std::path::Path::new(ARCHIVE_FILE_PATH);
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(archive_path)
+        .expect("Failed to open archive file");
+
+    let archive_record = ArchiveRecord::CurrentSlot(slot);
+    let Ok(serialized_record) = bincode::serialize(&archive_record) else {
+        return;
+    };
+
+    file.write(serialized_record.len().to_le_bytes().as_slice())
+        .expect("Failed to write current slot length to archive file");
+    file.write(&serialized_record)
+        .expect("Failed to write current slot to archive file");
+}
+
+fn record_finalized_slot_to_archive(slot: Slot) {
+    let archive_path = std::path::Path::new(ARCHIVE_FILE_PATH);
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(archive_path)
+        .expect("Failed to open archive file");
+
+    let archive_record = ArchiveRecord::FinalizedSlot(slot);
+    let Ok(serialized_record) = bincode::serialize(&archive_record) else {
+        return;
+    };
+
+    file.write(serialized_record.len().to_le_bytes().as_slice())
+        .expect("Failed to write finalized slot length to archive file");
+    file.write(&serialized_record)
+        .expect("Failed to write finalized slot to archive file");
 }
 
 fn record_block_hashes_to_archive(
