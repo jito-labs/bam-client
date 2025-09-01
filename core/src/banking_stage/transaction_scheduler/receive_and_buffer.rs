@@ -279,7 +279,7 @@ impl SanitizedTransactionReceiveAndBuffer {
                     calculate_priority_and_cost(&transaction, &fee_budget_limits, &working_bank);
 
                 if self.enable_recv_recording.load(std::sync::atomic::Ordering::Relaxed) {
-                    record_transaction_to_archive(&transaction, &packet_data, &working_bank);
+                    record_transaction_to_archive(&transaction, &packet_data, &working_bank, &root_bank);
                 }
 
                 if container.insert_new_transaction(transaction, max_age, priority, cost) {
@@ -445,7 +445,8 @@ fn record_feature_set_to_archive(feature_set: &FeatureSet) {
 fn record_transaction_to_archive(
     transaction: &RuntimeTransaction<SanitizedTransaction>,
     packet_data: &[u8],
-    bank: &Bank,
+    working_bank: &Bank,
+    rooted_bank: &Bank
 ) {
     // 0. Open the archive file for appending.
     let archive_path = std::path::Path::new(ARCHIVE_FILE_PATH);
@@ -457,10 +458,23 @@ fn record_transaction_to_archive(
 
     // 1. Save the state of all accounts read or written to by the transaction.
     for account_key in transaction.account_keys().iter() {
-        let Some(account_data) = bank.get_account(account_key) else {
+        let Some(account_data) = working_bank.get_account(account_key) else {
             continue;
         };
         let archive_record = ArchiveRecord::Account((*account_key, account_data));
+        let Ok(serialized_account) = bincode::serialize(&archive_record) else {
+            continue;
+        };
+        file.write(serialized_account.len().to_le_bytes().as_slice())
+            .expect("Failed to write account data length to archive file");
+        file.write(&serialized_account)
+            .expect("Failed to write account data to archive file");
+    }
+    for lookup in transaction.message_address_table_lookups() {
+        let Some(account_data) = rooted_bank.get_account(lookup.account_key) else {
+            continue;
+        };
+        let archive_record = ArchiveRecord::Account((*lookup.account_key, account_data));
         let Ok(serialized_account) = bincode::serialize(&archive_record) else {
             continue;
         };
