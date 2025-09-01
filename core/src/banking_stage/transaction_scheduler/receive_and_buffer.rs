@@ -195,9 +195,11 @@ impl SanitizedTransactionReceiveAndBuffer {
         let mut max_ages = ArrayVec::<_, CHUNK_SIZE>::new();
         let mut fee_budget_limits_vec = ArrayVec::<_, CHUNK_SIZE>::new();
 
-        record_block_hashes_to_archive(&working_bank);
-        record_slot_hashes_to_archive(&working_bank);
-        record_feature_set_to_archive(&working_bank.feature_set);
+        if self.enable_recv_recording.load(std::sync::atomic::Ordering::Relaxed) {
+            record_block_hashes_to_archive(&working_bank);
+            record_slot_hashes_to_archive(&working_bank);
+            record_feature_set_to_archive(&working_bank.feature_set);
+        }
 
         let mut error_counts = TransactionErrorMetrics::default();
         for chunk in packets.chunks(CHUNK_SIZE) {
