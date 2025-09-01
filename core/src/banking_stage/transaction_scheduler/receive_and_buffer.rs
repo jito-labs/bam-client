@@ -195,13 +195,7 @@ impl SanitizedTransactionReceiveAndBuffer {
         let mut max_ages = ArrayVec::<_, CHUNK_SIZE>::new();
         let mut fee_budget_limits_vec = ArrayVec::<_, CHUNK_SIZE>::new();
 
-        if self.enable_recv_recording.load(std::sync::atomic::Ordering::Relaxed) {
-            record_current_slot_to_archive(working_bank.slot());
-            record_finalized_slot_to_archive(root_bank.slot());
-            record_block_hashes_to_archive(&working_bank);
-            record_slot_hashes_to_archive(&working_bank);
-            record_feature_set_to_archive(&working_bank.feature_set);
-        }
+        let mut recorded_cluster_meta = false;
 
         let mut error_counts = TransactionErrorMetrics::default();
         for chunk in packets.chunks(CHUNK_SIZE) {
@@ -279,6 +273,16 @@ impl SanitizedTransactionReceiveAndBuffer {
                     calculate_priority_and_cost(&transaction, &fee_budget_limits, &working_bank);
 
                 if self.enable_recv_recording.load(std::sync::atomic::Ordering::Relaxed) {
+                    // Record cluster metadata once per call (if we received any transactions)
+                    if !recorded_cluster_meta {
+                        record_current_slot_to_archive(working_bank.slot());
+                        record_finalized_slot_to_archive(root_bank.slot());
+                        record_block_hashes_to_archive(&working_bank);
+                        record_slot_hashes_to_archive(&working_bank);
+                        record_feature_set_to_archive(&working_bank.feature_set);
+                        recorded_cluster_meta = true;
+                    }
+
                     record_transaction_to_archive(&transaction, &packet_data, &working_bank, &root_bank);
                 }
 
