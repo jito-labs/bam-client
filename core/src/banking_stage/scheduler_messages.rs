@@ -70,6 +70,5 @@ pub enum TransactionResult {
 #[derive(Clone, Debug)]
 pub enum NotCommittedReason {
     PohTimeout,
-    BatchRevert,
     Error(TransactionError),
 }

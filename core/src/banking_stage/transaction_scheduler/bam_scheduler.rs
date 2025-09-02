@@ -387,11 +387,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 .enumerate()
                 .find_map(|(index, result)| {
                     if let TransactionResult::NotCommitted(reason) = result {
-                        if matches!(reason, &NotCommittedReason::BatchRevert) {
-                            None
-                        } else {
-                            Some((index, reason.clone()))
-                        }
+                        Some((index, reason.clone()))
                     } else {
                         None
                     }
@@ -417,7 +413,6 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             TransactionResult::NotCommitted(reason) => {
                 let (index, not_commit_reason) = match reason {
                     NotCommittedReason::PohTimeout => (0, NotCommittedReason::PohTimeout),
-                    NotCommittedReason::BatchRevert => (0, NotCommittedReason::BatchRevert),
                     NotCommittedReason::Error(err) => (0, NotCommittedReason::Error(err.clone())),
                 };
                 atomic_txn_batch_result::Result::NotCommitted(
@@ -437,14 +432,6 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             NotCommittedReason::PohTimeout => {
                 jito_protos::proto::bam_types::not_committed::Reason::SchedulingError(
                     SchedulingError::PohTimeout as i32,
-                )
-            }
-            // Should not happen, but just in case:
-            NotCommittedReason::BatchRevert => {
-                jito_protos::proto::bam_types::not_committed::Reason::GenericInvalid(
-                    jito_protos::proto::bam_types::GenericInvalid {
-                        message: "Batch revert logical error".to_string(),
-                    },
                 )
             }
             NotCommittedReason::Error(err) => {
