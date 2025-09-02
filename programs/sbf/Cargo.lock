@@ -275,6 +275,7 @@ dependencies = [
  "tikv-jemallocator",
  "tokio",
  "tonic",
+ "url 2.5.4",
 ]
 
 [[package]]
@@ -6874,6 +6875,7 @@ dependencies = [
  "serde_bytes",
  "serde_derive",
  "slab",
+ "smallvec",
  "solana-account 3.0.0",
  "solana-accounts-db",
  "solana-address-lookup-table-interface 3.0.0",
@@ -6885,6 +6887,7 @@ dependencies = [
  "solana-client",
  "solana-clock 3.0.0",
  "solana-cluster-type",
+ "solana-commitment-config",
  "solana-compute-budget",
  "solana-compute-budget-instruction",
  "solana-compute-budget-interface",
@@ -6956,6 +6959,7 @@ dependencies = [
  "solana-vote",
  "solana-vote-program",
  "solana-wen-restart",
+ "spl-memo-interface",
  "static_assertions",
  "strum",
  "strum_macros",
