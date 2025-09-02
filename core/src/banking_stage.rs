@@ -664,7 +664,7 @@ impl BankingStage {
             let (finished_work_sender, finished_work_receiver) = unbounded();
 
             // Spawn the worker threads
-            let mut worker_metrics = Vec::with_capacity(num_workers as usize);
+            let mut worker_metrics = Vec::with_capacity(num_workers);
             for (index, work_receiver) in work_receivers.into_iter().enumerate() {
                 let id = index as u32;
                 let consume_worker = ConsumeWorker::new_with_tip_processing_deps(
