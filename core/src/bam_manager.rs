@@ -20,7 +20,7 @@ use {
         proxy::block_engine_stage::BlockBuilderFeeInfo,
     },
     jito_protos::proto::{
-        bam_api::{start_scheduler_message_v0::Msg, ConfigResponse, StartSchedulerMessageV0},
+        bam_api::ConfigResponse,
         bam_types::{LeaderState, Socket},
     },
     solana_gossip::cluster_info::ClusterInfo,
@@ -138,11 +138,9 @@ impl BamManager {
                 if bank_start.should_working_bank_still_be_processing_txs() {
                     let leader_state = Self::generate_leader_state(&bank_start.working_bank);
                     payment_sender.send_slot(leader_state.slot);
-                    let _ = dependencies
-                        .outbound_sender
-                        .try_send(StartSchedulerMessageV0 {
-                            msg: Some(Msg::LeaderState(leader_state)),
-                        });
+                    let _ = dependencies.outbound_sender.try_send(
+                        crate::bam_dependencies::BamOutboundMessage::LeaderState(leader_state),
+                    );
                 }
             }
 
@@ -158,11 +156,11 @@ impl BamManager {
     fn generate_leader_state(bank: &Bank) -> LeaderState {
         let max_block_cu = bank.read_cost_tracker().unwrap().block_cost_limit();
         let consumed_block_cu = bank.read_cost_tracker().unwrap().block_cost();
-        let slot_cu_budget = max_block_cu.saturating_sub(consumed_block_cu) as u32;
+        let slot_cu_budget_remaining = max_block_cu.saturating_sub(consumed_block_cu) as u32;
         LeaderState {
             slot: bank.slot(),
             tick: (bank.tick_height() % bank.ticks_per_slot()) as u32,
-            slot_cu_budget,
+            slot_cu_budget_remaining,
         }
     }
 
