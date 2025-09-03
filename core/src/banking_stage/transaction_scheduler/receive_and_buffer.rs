@@ -75,7 +75,7 @@ pub(crate) struct ReceivingStats {
 }
 
 impl ReceivingStats {
-    fn accumulate(&mut self, other: ReceivingStats) {
+    pub(crate) fn accumulate(&mut self, other: ReceivingStats) {
         self.num_received += other.num_received;
         self.num_dropped_without_parsing += other.num_dropped_without_parsing;
         self.num_dropped_on_parsing_and_sanitization +=
