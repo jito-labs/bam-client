@@ -2101,26 +2101,25 @@ mod tests {
         // InstructionError::InsufficientFunds that is then committed. Needs to be
         // MAX_NUM_TRANSACTIONS_PER_BATCH at least so it doesn't conflict on account locks
         // with the below transaction
-        let mut transactions = vec![
+        let transactions = vec![
+            // this one will fail
             system_transaction::transfer(
                 &mint_keypair,
                 &Pubkey::new_unique(),
                 lamports + 1,
                 genesis_config.hash(),
-            );
-            TARGET_NUM_TRANSACTIONS_PER_BATCH
+            ),
+            // Make one transaction that will succeed.
+            system_transaction::transfer(
+                &mint_keypair,
+                &Pubkey::new_unique(),
+                1,
+                genesis_config.hash(),
+            ),
         ];
 
-        // Make one transaction that will succeed.
-        transactions.push(system_transaction::transfer(
-            &mint_keypair,
-            &Pubkey::new_unique(),
-            1,
-            genesis_config.hash(),
-        ));
-
         let transactions_len = transactions.len();
-        info!("transactions_len: {:?}", transactions_len);
+
         let ProcessTransactionBatchOutput {
             cost_model_throttled_transactions_count: _cost_model_throttled_transactions_count,
             cost_model_us: _cost_model_us,
@@ -2135,15 +2134,27 @@ mod tests {
                 .len(),
             transactions_len,
         );
-        for commit_transaction_result in execute_and_commit_transactions_output
+        let results = execute_and_commit_transactions_output
             .commit_transactions_result
-            .unwrap()
-        {
-            assert_eq!(
-                commit_transaction_result,
-                CommitTransactionDetails::NotCommitted(TransactionError::InsufficientFundsForFee)
-            );
-        }
+            .unwrap();
+
+        assert_eq!(results.len(), transactions_len);
+        assert_matches!(
+            results.first(),
+            Some(CommitTransactionDetails::NotCommitted(
+                TransactionError::InstructionError(
+                    0,
+                    InstructionError::Custom(1) // SystemError::ResultWithNegativeLamports
+                )
+            ))
+        );
+        assert_matches!(
+            results.get(1),
+            Some(CommitTransactionDetails::NotCommitted(
+                TransactionError::CommitCancelled
+            ))
+        );
+
         assert_eq!(
             execute_and_commit_transactions_output.transaction_counts,
             LeaderProcessedTransactionCounts {
