@@ -8,6 +8,9 @@ homepage = { workspace = true }
 license = { workspace = true }
 edition = { workspace = true }
 
+[features]
+dev-context-only-utils = []
+
 [dependencies]
 agave-feature-set = { workspace = true }
 anyhow = { workspace = true }
@@ -42,6 +45,3 @@ solana-system-interface = { workspace = true }
 solana-vote-program = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 toml = { workspace = true }
-
-[features]
-dev-context-only-utils = []
