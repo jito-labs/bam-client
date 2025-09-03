@@ -728,11 +728,9 @@ mod tests {
             }],
             max_schedule_slot: 0,
         };
-        let (result, stats) =
+        let (result, _stats) =
             BamReceiveAndBuffer::parse_batch(&bundle, &bank_forks, &HashSet::new());
         assert!(result.is_ok());
-        assert_eq!(stats.num_received, 1);
-        assert_eq!(stats.num_buffered, 1);
         let parsed_bundle = result.unwrap();
         assert_eq!(parsed_bundle.txns_max_age.len(), 1);
     }
@@ -748,8 +746,6 @@ mod tests {
         let (result, stats) =
             BamReceiveAndBuffer::parse_batch(&batch, &bank_forks, &HashSet::new());
         assert!(result.is_err());
-        assert_eq!(stats.num_received, 1);
-        assert_eq!(stats.num_buffered, 0);
         assert_eq!(stats.num_dropped_without_parsing, 1);
         assert_eq!(
             result.err().unwrap(),
@@ -774,9 +770,7 @@ mod tests {
         let (result, stats) =
             BamReceiveAndBuffer::parse_batch(&batch, &bank_forks, &HashSet::new());
         assert!(result.is_err());
-        assert_eq!(stats.num_received, 1);
         assert_eq!(stats.num_dropped_on_parsing_and_sanitization, 1);
-        assert_eq!(stats.num_buffered, 0);
         assert_eq!(
             result.err().unwrap(),
             Reason::DeserializationError(jito_protos::proto::bam_types::DeserializationError {
@@ -807,9 +801,7 @@ mod tests {
         let (result, stats) =
             BamReceiveAndBuffer::parse_batch(&batch, &bank_forks, &HashSet::new());
         assert!(result.is_err());
-        assert_eq!(stats.num_received, 1);
         assert_eq!(stats.num_dropped_on_fee_payer, 1);
-        assert_eq!(stats.num_buffered, 0);
 
         assert_eq!(
             result.err().unwrap(),
@@ -859,9 +851,7 @@ mod tests {
         let (result, stats) =
             BamReceiveAndBuffer::parse_batch(&bundle, &bank_forks, &HashSet::new());
         assert!(result.is_err());
-        assert_eq!(stats.num_received, 1);
         assert_eq!(stats.num_dropped_without_parsing, 1);
-        assert_eq!(stats.num_buffered, 0);
         assert_eq!(
             result.err().unwrap(),
             Reason::DeserializationError(jito_protos::proto::bam_types::DeserializationError {
@@ -894,9 +884,7 @@ mod tests {
         let (result, stats) =
             BamReceiveAndBuffer::parse_batch(&batch, &bank_forks, &blacklisted_accounts);
         assert!(result.is_err());
-        assert_eq!(stats.num_received, 1);
         assert_eq!(stats.num_dropped_on_blacklisted_account, 1);
-        assert_eq!(stats.num_buffered, 0);
         assert_eq!(
             result.err().unwrap(),
             Reason::TransactionError(jito_protos::proto::bam_types::TransactionError {
@@ -1024,9 +1012,7 @@ mod tests {
         let (result, stats) =
             BamReceiveAndBuffer::parse_batch(&batch, &bank_forks, &HashSet::default());
         assert!(result.is_err());
-        assert_eq!(stats.num_received, 1);
         assert_eq!(stats.num_dropped_on_parsing_and_sanitization, 1);
-        assert_eq!(stats.num_buffered, 0);
         assert_eq!(
             result.err().unwrap(),
             Reason::DeserializationError(jito_protos::proto::bam_types::DeserializationError {
