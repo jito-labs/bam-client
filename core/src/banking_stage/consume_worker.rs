@@ -1006,7 +1006,7 @@ mod tests {
             transaction_recorder::TransactionRecorder,
         },
         solana_poh_config::PohConfig,
-        solana_program_binaries::spl_programs,
+        solana_program_test::programs::spl_programs,
         solana_pubkey::Pubkey,
         solana_rent::Rent,
         solana_runtime::{
