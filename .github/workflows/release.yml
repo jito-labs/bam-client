@@ -50,6 +50,22 @@ jobs:
               prerelease: true
             });
             core.setOutput('upload_url', release.data.upload_url);
+      
+      - name: Create tarball with submodules
+        run: |
+          RELEASE_NAME="jito-solana-jds-${{ github.ref_name }}.tar.gz"
+          tar --exclude-vcs -C . -czf "/tmp/$RELEASE_NAME" .
+          mv "/tmp/$RELEASE_NAME" .
+
+      - name: Upload source-with-submodules tarball
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create.outputs.upload_url }}
+          asset_path: ./jito-solana-jds-${{ github.ref_name }}.tar.gz
+          asset_name: jito-solana-jds-${{ github.ref_name }}.tar.gz
+          asset_content_type: application/gzip
 
   # version-bump:
   #   if: github.repository == 'anza-xyz/agave'
