@@ -299,7 +299,7 @@ impl BamReceiveAndBuffer {
                 return (
                     Err(Reason::DeserializationError(
                         jito_protos::proto::bam_types::DeserializationError {
-                            index: 0,
+                            index: index as u32,
                             reason: DeserializationErrorReason::SanitizeError as i32,
                         },
                     )),
