@@ -213,9 +213,10 @@ impl BamConnection {
                                 let outbound = SchedulerMessageV0 {
                                     msg: Some(Msg::LeaderState(leader_state)),
                                 };
-                                let _ = outbound_sender.send(v0_to_versioned_proto(outbound)).await.inspect_err(|_| {
+                                if outbound_sender.try_send(v0_to_versioned_proto(outbound)).is_err() {
                                     error!("Failed to send outbound message");
-                                });
+                                    break;
+                                }
                             }
                             BamOutboundMessage::AtomicTxnBatchResult(result) => {
                                 metrics.bundleresult_sent.fetch_add(1, Relaxed);
