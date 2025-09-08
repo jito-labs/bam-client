@@ -482,6 +482,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         if bank_start.map(|bs| bs.working_bank.slot()) == self.slot {
             return;
         }
+        let prev_slot = self.slot;
         if let Some(bank_start) = bank_start {
             info!(
                 "Bank boundary detected: slot changed from {:?} to {:?}",
@@ -507,7 +508,9 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         // and then drain the prio-graph
         for (_, inflight_info) in self.inflight_batch_info.iter() {
             for priority_id in &inflight_info.priority_ids {
-                self.prio_graph.unblock(priority_id);
+                if prev_slot == Some(inflight_info.slot) {
+                    self.prio_graph.unblock(priority_id);
+                }
             }
         }
         let now = Instant::now();
