@@ -64,7 +64,6 @@ pub struct BamScheduler<Tx: TransactionWithMeta> {
     next_batch_id: u64,
     inflight_batch_info: HashMap<TransactionBatchId, InflightBatchInfo>,
     prio_graph: SchedulerPrioGraph,
-    prio_graph_instance: u64,
     insertion_to_prio_graph_time: HashMap<u32, Instant>,
     time_in_priograph_us: Histogram,
     slot: Option<Slot>,
@@ -84,7 +83,7 @@ pub struct BamScheduler<Tx: TransactionWithMeta> {
 struct InflightBatchInfo {
     pub priority_ids: Vec<TransactionPriorityId>,
     pub worker_index: usize,
-    pub prio_graph_instance: u64,
+    pub slot: Slot,
 }
 
 impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
@@ -103,7 +102,6 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             next_batch_id: 0,
             inflight_batch_info: HashMap::default(),
             prio_graph: PrioGraph::new(passthrough_priority),
-            prio_graph_instance: 0,
             insertion_to_prio_graph_time: HashMap::default(),
             time_in_priograph_us: Histogram::new(),
             slot: None,
@@ -193,7 +191,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                     container,
                     slot,
                 );
-                self.send_to_worker(worker_index, priority_ids, work);
+                self.send_to_worker(worker_index, priority_ids, work, slot);
                 *num_scheduled += len;
             }
         }
@@ -259,6 +257,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         worker_index: usize,
         priority_ids: Vec<TransactionPriorityId>,
         work: ConsumeWork<Tx>,
+        slot: Slot,
     ) {
         let consume_work_sender = &self.consume_work_senders[worker_index];
         let batch_id = work.batch_id;
@@ -268,7 +267,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             InflightBatchInfo {
                 priority_ids,
                 worker_index,
-                prio_graph_instance: self.prio_graph_instance,
+                slot,
             },
         );
         self.workers_scheduled_count[worker_index] += 1;
@@ -525,8 +524,6 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         }
 
         self.insertion_to_prio_graph_time.clear();
-        self.prio_graph_instance += 1;
-        self.prio_graph.clear();
 
         datapoint_info!(
             "bam_scheduler_bank_boundary-metrics",
@@ -623,7 +620,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                 }
 
                 // If in the same slot, unblock the transaction
-                if inflight_batch_info.prio_graph_instance == self.prio_graph_instance {
+                if Some(inflight_batch_info.slot) == self.slot {
                     self.prio_graph.unblock(priority_id);
                 }
 
