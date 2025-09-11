@@ -7,7 +7,9 @@ use crate::banking_stage::transaction_scheduler::receive_and_buffer::Disconnecte
 use crossbeam_channel::{RecvTimeoutError, TryRecvError};
 use solana_clock::MAX_PROCESSING_AGE;
 use solana_packet::{PacketFlags, PACKET_DATA_SIZE};
+use solana_perf::sigverify::verify_packet;
 use solana_pubkey::Pubkey;
+use solana_sanitize::SanitizeError;
 use solana_transaction::sanitized::SanitizedTransaction;
 use std::{
     cmp::min,
@@ -102,7 +104,7 @@ impl BamReceiveAndBuffer {
 
         let mut result = Vec::with_capacity(in_packets.size_hint().0);
         for (i, p) in in_packets.enumerate() {
-            let solana_packet = proto_packet_to_packet(p);
+            let mut solana_packet = proto_packet_to_packet(p);
             // sigverify packet
             // we don't use solana_packet here, so we don't need to call set_discard()
             //if !verify_packet(&mut (&mut solana_packet).into(), false) {
