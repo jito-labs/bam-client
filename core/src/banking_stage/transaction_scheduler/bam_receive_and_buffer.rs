@@ -373,9 +373,15 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
     ) -> Result<usize, DisconnectedError> {
         let mut result = 0;
         let is_bam_enabled = self.bam_enabled.load(Ordering::Relaxed);
+        let start = Instant::now();
+        const MAX_RECV_TIME: Duration = Duration::from_millis(5);
 
         match decision {
             BufferedPacketsDecision::Consume(_) | BufferedPacketsDecision::Hold => loop {
+                if start.elapsed() > MAX_RECV_TIME {
+                    return Ok(result);
+                }
+
                 let batch = match self.bundle_receiver.try_recv() {
                     Ok(batch) => batch,
                     Err(TryRecvError::Disconnected) => return Err(DisconnectedError),
