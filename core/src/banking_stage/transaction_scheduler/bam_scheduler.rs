@@ -488,8 +488,6 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             self.send_no_leader_slot_bundle_result(seq_id);
             container.remove_by_id(next_batch_id.id);
         }
-
-        self.prio_graph.clear();
     }
 }
 
