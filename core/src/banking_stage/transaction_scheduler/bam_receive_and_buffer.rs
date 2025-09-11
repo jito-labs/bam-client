@@ -107,12 +107,12 @@ impl BamReceiveAndBuffer {
             let mut solana_packet = proto_packet_to_packet(p);
             // sigverify packet
             // we don't use solana_packet here, so we don't need to call set_discard()
-            //if !verify_packet(&mut (&mut solana_packet).into(), false) {
-            //    return Err((
-            //        i,
-            //        DeserializedPacketError::SanitizeError(SanitizeError::InvalidValue),
-            //    ));
-            //}
+            if !verify_packet(&mut (&mut solana_packet).into(), false) {
+                return Err((
+                    i,
+                    DeserializedPacketError::SanitizeError(SanitizeError::InvalidValue),
+                ));
+            }
 
             result.push(
                 ImmutableDeserializedPacket::new((&solana_packet).into()).map_err(|e| (i, e))?,
