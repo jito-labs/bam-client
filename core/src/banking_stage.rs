@@ -4,6 +4,8 @@
 
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
+use crate::banking_stage::transaction_scheduler::bam_scheduler;
+
 use {
     self::{
         committer::Committer, consumer::Consumer, decision_maker::DecisionMaker,
@@ -737,7 +739,8 @@ impl BankingStage {
         if let Some(bam_dependencies) = bam_dependencies {
             // Spawn BAM workers
             // Create channels for communication between scheduler and workers
-            let num_workers = num_threads;
+            const NUM_BAM_WORKERS: u32 = 12;
+            let num_workers = NUM_BAM_WORKERS;
             let (work_senders, work_receivers): (Vec<Sender<_>>, Vec<Receiver<_>>) =
                 (0..num_workers).map(|_| unbounded()).unzip();
             let (finished_work_sender, finished_work_receiver) = unbounded();
@@ -784,6 +787,8 @@ impl BankingStage {
                                 work_senders,
                                 finished_work_receiver,
                                 bam_dependencies.outbound_sender.clone(),
+                                bam_scheduler::MAX_SCHEDULED_PER_WORKER,
+                                bam_scheduler::MAX_TXN_PER_BATCH,
                             );
                         let receive_and_buffer = BamReceiveAndBuffer::new(
                             bam_dependencies.bam_enabled.clone(),

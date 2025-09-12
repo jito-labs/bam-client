@@ -3,7 +3,6 @@
 
 use {
     crate::bam_dependencies::{v0_to_versioned_proto, BamOutboundMessage},
-    futures::{channel::mpsc, SinkExt, StreamExt},
     jito_protos::proto::{
         bam_api::{
             bam_node_api_client::BamNodeApiClient, scheduler_message_v0::Msg,
@@ -24,7 +23,11 @@ use {
         time::SystemTime,
     },
     thiserror::Error,
-    tokio::time::{interval, timeout},
+    tokio::{
+        sync::mpsc,
+        time::{interval, timeout},
+    },
+    tokio_stream::wrappers::ReceiverStream,
 };
 
 pub struct BamConnection {
@@ -53,8 +56,7 @@ impl BamConnection {
         let mut validator_client = BamNodeApiClient::new(channel);
 
         let (outbound_sender, outbound_receiver_internal) = mpsc::channel(100_000);
-        let outbound_stream =
-            tonic::Request::new(outbound_receiver_internal.map(|req: SchedulerMessage| req));
+        let outbound_stream = tonic::Request::new(ReceiverStream::new(outbound_receiver_internal));
         let inbound_stream = validator_client
             .init_scheduler_stream(outbound_stream)
             .await
@@ -95,7 +97,7 @@ impl BamConnection {
     async fn connection_task(
         exit: Arc<AtomicBool>,
         mut inbound_stream: tonic::Streaming<SchedulerResponse>,
-        mut outbound_sender: mpsc::Sender<SchedulerMessage>,
+        outbound_sender: mpsc::Sender<SchedulerMessage>,
         mut validator_client: BamNodeApiClient<tonic::transport::channel::Channel>,
         config: Arc<Mutex<Option<ConfigResponse>>>,
         batch_sender: crossbeam_channel::Sender<AtomicTxnBatch>,
@@ -110,8 +112,6 @@ impl BamConnection {
         let mut metrics_and_health_check_interval = interval(std::time::Duration::from_millis(25));
         metrics_and_health_check_interval
             .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut outbound_tick_interval = interval(std::time::Duration::from_millis(1));
-        outbound_tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Burst);
 
         // Create auth proof
         let Some(auth_proof) = Self::prepare_auth_proof(&mut validator_client, cluster_info).await
@@ -143,7 +143,14 @@ impl BamConnection {
             validator_client.clone(),
             metrics.clone(),
         ));
-        let mut waiting_results = Vec::new();
+
+        let outbound_task = tokio::spawn(Self::outbound_task(
+            exit.clone(),
+            outbound_sender.clone(),
+            outbound_receiver,
+            metrics.clone(),
+        ));
+
         while !exit.load(Relaxed) {
             tokio::select! {
                 _ = heartbeat_interval.tick() => {
@@ -194,44 +201,20 @@ impl BamConnection {
                         }
                         SchedulerResponseV0 { resp: Some(Resp::MultipleAtomicTxnBatch(batches)), .. } => {
                             for batch in batches.batches {
+                                metrics.bundle_received.fetch_add(1, Relaxed);
                                 let _ = batch_sender.try_send(batch).inspect_err(|_| {
                                     error!("Failed to send bundle to receiver");
                                 });
                             }
-                            metrics.bundle_received.fetch_add(1, Relaxed);
                         }
                         _ => {}
                     }
-                }
-                _ = outbound_tick_interval.tick() => {
-                    while let Ok(outbound) = outbound_receiver.try_recv() {
-                        match outbound {
-                            BamOutboundMessage::LeaderState(leader_state) => {
-                                metrics.leaderstate_sent.fetch_add(1, Relaxed);
-                                let outbound = SchedulerMessageV0 {
-                                    msg: Some(Msg::LeaderState(leader_state)),
-                                };
-                                let _ = outbound_sender.try_send(v0_to_versioned_proto(outbound)).inspect_err(|_| {
-                                    error!("Failed to send outbound message");
-                                });
-                            }
-                            BamOutboundMessage::AtomicTxnBatchResult(result) => {
-                                metrics.bundleresult_sent.fetch_add(1, Relaxed);
-                                waiting_results.push(result);
-                                const MAX_WAITING_RESULTS: usize = 24;
-                                if waiting_results.len() >= MAX_WAITING_RESULTS {
-                                    Self::send_batch_results(&mut outbound_sender, std::mem::take(&mut waiting_results));
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    Self::send_batch_results(&mut outbound_sender, std::mem::take(&mut waiting_results));
                 }
             }
         }
         is_healthy.store(false, Relaxed);
         let _ = builder_config_task.await.ok();
+        let _ = outbound_task.await.ok();
     }
 
     fn send_batch_results(
@@ -273,6 +256,48 @@ impl BamConnection {
                             error!("Failed to get config: {:?}", e);
                         }
                     }
+                }
+            }
+        }
+    }
+
+    async fn outbound_task(
+        exit: Arc<AtomicBool>,
+        mut outbound_sender: mpsc::Sender<SchedulerMessage>,
+        outbound_receiver: crossbeam_channel::Receiver<BamOutboundMessage>,
+        metrics: Arc<BamConnectionMetrics>,
+    ) {
+        let mut outbound_tick_interval = interval(std::time::Duration::from_millis(1));
+        outbound_tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Burst);
+
+        let mut waiting_results = Vec::new();
+
+        while !exit.load(Relaxed) {
+            tokio::select! {
+                _ = outbound_tick_interval.tick() => {
+                    while let Ok(outbound) = outbound_receiver.try_recv() {
+                        match outbound {
+                            BamOutboundMessage::LeaderState(leader_state) => {
+                                metrics.leaderstate_sent.fetch_add(1, Relaxed);
+                                let outbound = SchedulerMessageV0 {
+                                    msg: Some(Msg::LeaderState(leader_state)),
+                                };
+                                let _ = outbound_sender.try_send(v0_to_versioned_proto(outbound)).inspect_err(|_| {
+                                    error!("Failed to send outbound message");
+                                });
+                            }
+                            BamOutboundMessage::AtomicTxnBatchResult(result) => {
+                                metrics.bundleresult_sent.fetch_add(1, Relaxed);
+                                waiting_results.push(result);
+                                const MAX_WAITING_RESULTS: usize = 24;
+                                if waiting_results.len() >= MAX_WAITING_RESULTS {
+                                    Self::send_batch_results(&mut outbound_sender, std::mem::take(&mut waiting_results));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    Self::send_batch_results(&mut outbound_sender, std::mem::take(&mut waiting_results));
                 }
             }
         }
