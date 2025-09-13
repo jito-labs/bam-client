@@ -7,8 +7,13 @@ use crate::banking_stage::transaction_scheduler::scheduler::PreLockFilterAction;
 use crate::banking_stage::transaction_scheduler::scheduler_common::SchedulingCommon;
 use crate::banking_stage::transaction_scheduler::transaction_state::TransactionState;
 use histogram::Histogram;
-use solana_clock::Slot;
-use std::time::Instant;
+use itertools::Itertools;
+use std::borrow::Borrow;
+use solana_clock::{Slot, MAX_PROCESSING_AGE};
+use solana_runtime::bank_forks::BankForks;
+use solana_svm::transaction_error_metrics::TransactionErrorMetrics;
+use std::{sync::{Arc, RwLock}, time::Instant};
+use crate::bam_dependencies::BamOutboundMessage;
 
 use {
     super::{
@@ -75,6 +80,8 @@ pub struct BamScheduler<Tx: TransactionWithMeta> {
     reusable_consume_work: Vec<ConsumeWork<Tx>>,
     reusable_priority_ids: Vec<Vec<TransactionPriorityId>>,
     reusable_batches_for_scheduling: Vec<(Vec<TransactionPriorityId>, bool)>,
+
+    bank_forks: Arc<RwLock<BankForks>>,
 }
 
 // A structure to hold information about inflight batches.
@@ -93,6 +100,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         response_sender: Sender<BamOutboundMessage>,
         max_scheduled_per_worker: usize,
         max_txn_per_batch: usize,
+        bank_forks: Arc<RwLock<BankForks>>,
     ) -> Self {
         Self {
             workers_scheduled_count: vec![0; consume_work_senders.len()],
@@ -110,6 +118,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             reusable_consume_work: Vec::new(),
             reusable_priority_ids: Vec::new(),
             reusable_batches_for_scheduling: Vec::new(),
+            bank_forks,
         }
     }
 
@@ -211,12 +220,48 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         container: &mut impl StateContainer<Tx>,
         current_slot: Slot,
     ) {
+        let working_bank = self.bank_forks.read().unwrap().working_bank();
+
         let now = Instant::now();
         let mut current_batch_ids = self.get_or_create_priority_ids();
         while let Some(next_batch_id) = self.prio_graph.pop() {
-            let Some((_, revert_on_error, slot)) = container.get_batch(next_batch_id.id) else {
+            let Some((_, _, slot)) = container.get_batch(next_batch_id.id) else {
                 continue;
             };
+            
+            let Some((transaction_ids, revert_on_error, _)) = container.get_batch(next_batch_id.id) else {
+                error!("Batch {} not found in container", next_batch_id.id);
+                continue;
+            };
+
+            let sanitized_txs = transaction_ids.iter()
+                .filter_map(|txn_id| container.get_transaction(*txn_id))
+                .map(|txn| txn.borrow())
+                .collect::<Vec<_>>();
+            let lock_results = (0..sanitized_txs.len()).map(|_| Ok(())).collect::<Vec<solana_transaction_error::TransactionResult<()>>>();
+            let check_result = working_bank.check_transactions::<Tx>(
+                &sanitized_txs,
+                lock_results.as_slice(),
+                MAX_PROCESSING_AGE,
+                &mut TransactionErrorMetrics::default());
+            if let Some((index, err)) = check_result
+                .iter()
+                .find_position(|res| res.is_err())
+                .map(|(i, res)| (i, res.as_ref().err().unwrap().clone()))
+            {
+                container.remove_by_id(next_batch_id.id);
+                self.prio_graph.unblock(&next_batch_id);
+
+                let seq_id = priority_to_seq_id(next_batch_id.priority);
+                let result = atomic_txn_batch_result::Result::NotCommitted(
+                    jito_protos::proto::bam_types::NotCommitted {
+                        reason: Some(Self::convert_reason_to_proto(index, NotCommittedReason::Error(err))),
+                    },
+                );
+                self.send_back_result(seq_id, result);
+                continue;
+            };
+
 
             if let Some(insertion_time) = self.insertion_to_prio_graph_time
                 .remove(&priority_to_seq_id(next_batch_id.priority))
