@@ -447,6 +447,7 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
                 };
 
                 result = result.saturating_add(1);
+                return Ok(result);
             },
             BufferedPacketsDecision::ForwardAndHold | BufferedPacketsDecision::Forward => {
                 // Send back any batches that were received while in Forward/Hold state
