@@ -533,6 +533,9 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
                     self.send_container_full_txn_batch_result(batch.seq_id);
                     continue;
                 };
+
+                result = result.saturating_add(1);
+                return Ok(result);
             },
             BufferedPacketsDecision::ForwardAndHold | BufferedPacketsDecision::Forward => {
                 // Send back any batches that were received while in Forward/Hold state
