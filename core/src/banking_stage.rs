@@ -4,8 +4,6 @@
 
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
-use crate::banking_stage::transaction_scheduler::bam_scheduler;
-
 use {
     self::{
         committer::Committer, consumer::Consumer, decision_maker::DecisionMaker,
@@ -17,7 +15,7 @@ use {
             consume_worker::ConsumeWorker,
             packet_deserializer::PacketDeserializer,
             transaction_scheduler::{
-                prio_graph_scheduler::PrioGraphScheduler,
+                bam_scheduler, prio_graph_scheduler::PrioGraphScheduler,
                 scheduler_controller::SchedulerController, scheduler_error::SchedulerError,
             },
         },
@@ -789,6 +787,7 @@ impl BankingStage {
                                 bam_dependencies.outbound_sender.clone(),
                                 bam_scheduler::MAX_SCHEDULED_PER_WORKER,
                                 bam_scheduler::MAX_TXN_PER_BATCH,
+                                bank_forks.clone(),
                             );
                         let receive_and_buffer = BamReceiveAndBuffer::new(
                             bam_dependencies.bam_enabled.clone(),
