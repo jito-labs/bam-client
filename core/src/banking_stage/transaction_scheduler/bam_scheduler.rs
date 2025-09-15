@@ -138,11 +138,25 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
 
     /// Insert all incoming transactions into the `PrioGraph`.
     fn pull_into_prio_graph<S: StateContainer<Tx>>(&mut self, container: &mut S) {
+        let Some(slot) = self.slot else {
+            warn!("Slot is not set, cannot pull transactions into prio-graph");
+            return;
+        };
+
         while let Some(next_batch_id) = container.pop() {
-            let Some((batch_ids, _, _)) = container.get_batch(next_batch_id.id) else {
+            let Some((batch_ids, _, batch_slot)) = container.get_batch(next_batch_id.id) else {
                 error!("Batch {} not found in container", next_batch_id.id);
                 continue;
             };
+
+            if batch_slot != slot {
+                // If the slot has changed, we cannot schedule this batch
+                let seq_id = priority_to_seq_id(next_batch_id.priority);
+                self.send_no_leader_slot_bundle_result(seq_id);
+                container.remove_by_id(next_batch_id.id);
+                continue;
+            }
+
             let txns = batch_ids
                 .iter()
                 .filter_map(|txn_id| container.get_transaction(*txn_id));
