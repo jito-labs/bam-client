@@ -137,9 +137,9 @@ impl BamPaymentSender {
                 }
             }
 
-            for (slot, state) in bank_payment_states.iter_mut() {
+            for (payment_slot, state) in bank_payment_states.iter_mut() {
                 let maybe_new_state = Self::update_slot_state(
-                    *slot,
+                    *payment_slot,
                     state,
                     &bank_forks,
                     &cluster_info,
@@ -147,7 +147,7 @@ impl BamPaymentSender {
                     &bam_node_pubkey,
                 );
                 if let Some(new_state) = maybe_new_state {
-                    Self::emit_slot_state_transition(*slot, &new_state, Some(state));
+                    Self::emit_slot_state_transition(*payment_slot, &new_state, Some(state));
                     *state = new_state;
                 }
             }
@@ -161,7 +161,7 @@ impl BamPaymentSender {
     }
 
     fn update_slot_state(
-        slot: u64,
+        payment_slot: u64,
         state: &BankPaymentState,
         bank_forks: &Arc<RwLock<BankForks>>,
         cluster_info: &Arc<ClusterInfo>,
@@ -172,7 +172,8 @@ impl BamPaymentSender {
             BankPaymentState::Dropped => {
                 return None;
             }
-            BankPaymentState::WaitingToFreeze => match bank_forks.read().unwrap().get(slot) {
+            BankPaymentState::WaitingToFreeze => match bank_forks.read().unwrap().get(payment_slot)
+            {
                 Some(bank) => {
                     if bank.is_frozen() {
                         return Some(BankPaymentState::WaitingForSlotConfirmation {
@@ -183,7 +184,7 @@ impl BamPaymentSender {
                     }
                 }
                 None => {
-                    warn!("Bank not found for payment (slot={})", slot);
+                    warn!("Bank not found for payment (slot={})", payment_slot);
                     return Some(BankPaymentState::Dropped);
                 }
             },
@@ -194,14 +195,14 @@ impl BamPaymentSender {
                     .commitment_slots()
                     .highest_confirmed_slot;
                 if let Some(confirmed_bank) = bank_forks.read().unwrap().get(confirmed_slot) {
-                    match slot.cmp(&confirmed_slot) {
+                    match confirmed_slot.cmp(&payment_slot) {
                         // if the slot the payment is for is greater than the confirmed slot, we need to check if it's an ancestor
                         // of the highest confirmed slot. if it's not, the payment slot never was confirmed and the payment should be dropped.
                         Ordering::Greater => {
                             let ancestors = confirmed_bank.proper_ancestors_set();
-                            if ancestors.contains(&slot) {
+                            if ancestors.contains(&payment_slot) {
                                 let transaction = Self::get_payment_tx(
-                                    slot,
+                                    payment_slot,
                                     *payment_amount,
                                     bank_forks,
                                     cluster_info,
@@ -213,7 +214,7 @@ impl BamPaymentSender {
                                         transaction.message.recent_blockhash(),
                                     )
                                 else {
-                                    warn!("Last valid block height not found for blockhash (slot={}, blockhash={})", slot, transaction.message.recent_blockhash());
+                                    warn!("Last valid block height not found for blockhash (slot={}, blockhash={})", payment_slot, transaction.message.recent_blockhash());
                                     return Some(BankPaymentState::Dropped);
                                 };
 
@@ -223,14 +224,14 @@ impl BamPaymentSender {
                                     last_valid_block_height,
                                 });
                             } else {
-                                warn!("Slot was not confirmed and not an ancestor (slot={}, ancestors={:?})", slot, ancestors);
+                                warn!("Slot was not confirmed and not an ancestor (slot={}, ancestors={:?})", payment_slot, ancestors);
                                 return Some(BankPaymentState::Dropped);
                             }
                         }
                         // if the slot the payment is for is equal to the confirmed slot, we're good to pay
                         Ordering::Equal => {
                             let transaction = Self::get_payment_tx(
-                                slot,
+                                payment_slot,
                                 *payment_amount,
                                 bank_forks,
                                 cluster_info,
@@ -242,7 +243,7 @@ impl BamPaymentSender {
                                     transaction.message.recent_blockhash(),
                                 )
                             else {
-                                warn!("Last valid block height not found for blockhash (slot={}, blockhash={})", slot, transaction.message.recent_blockhash());
+                                warn!("Last valid block height not found for blockhash (slot={}, blockhash={})", payment_slot, transaction.message.recent_blockhash());
                                 return Some(BankPaymentState::Dropped);
                             };
 
@@ -285,7 +286,7 @@ impl BamPaymentSender {
                             Some(Err(e)) => {
                                 datapoint_error!(
                                     "bam_payment-error_processing_payment",
-                                    ("slot", slot, i64),
+                                    ("slot", payment_slot, i64),
                                     ("amount", *payment_amount, i64),
                                     ("error", e.to_string(), String)
                                 );
@@ -297,7 +298,7 @@ impl BamPaymentSender {
                                 let working_bank = bank_forks.read().unwrap().working_bank();
                                 if working_bank.block_height() > *last_valid_block_height {
                                     let transaction = Self::get_payment_tx(
-                                        slot,
+                                        payment_slot,
                                         *payment_amount,
                                         bank_forks,
                                         cluster_info,
@@ -309,7 +310,7 @@ impl BamPaymentSender {
                                             transaction.message.recent_blockhash(),
                                         )
                                     else {
-                                        warn!("Last valid block height not found for blockhash (slot={}, blockhash={})", slot, transaction.message.recent_blockhash());
+                                        warn!("Last valid block height not found for blockhash (slot={}, blockhash={})", payment_slot, transaction.message.recent_blockhash());
                                         return Some(BankPaymentState::Dropped);
                                     };
 
