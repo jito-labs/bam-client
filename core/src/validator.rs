@@ -1550,7 +1550,7 @@ impl Validator {
             config.tower_storage.clone(),
             &leader_schedule_cache,
             exit.clone(),
-            block_commitment_cache,
+            block_commitment_cache.clone(),
             config.turbine_disabled.clone(),
             transaction_status_sender.clone(),
             entry_notification_sender.clone(),
@@ -1692,6 +1692,7 @@ impl Validator {
             config.shred_receiver_address.clone(),
             config.preallocated_bundle_cost,
             config.bam_url.clone(),
+            block_commitment_cache,
         );
 
         datapoint_info!(

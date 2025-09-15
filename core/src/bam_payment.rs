@@ -1,146 +1,293 @@
-/// Simple payment sender for BAM. Will send payments to the BAM node
-/// for the slots it was connected to as a leader.
-/// It will calculate the payment amount based on the fees collected in that slot.
-/// The payment is sent as a transfer transaction with a memo indicating the slot.
-/// The payment is sent with a 1% commission.
+//! Simple payment sender for BAM. Will send payments to the BAM node
+//! for the slots it was connected to as a leader.
+//! It will calculate the payment amount based on the fees collected in that slot.
+//! The payment is sent as a transfer transaction with a memo indicating the slot.
+//! The payment is sent with a 1% commission.
+
+use std::sync::Mutex;
+
+use solana_runtime::bank::Bank;
+use solana_signature::Signature;
+use strum::AsRefStr;
 use {
-    crate::bam_dependencies::BamDependencies,
-    solana_client::rpc_client::RpcClient,
+    crossbeam_channel::{Receiver, RecvTimeoutError, Sender},
+    solana_clock::Slot,
+    solana_compute_budget_interface::ComputeBudgetInstruction,
+    solana_gossip::cluster_info::ClusterInfo,
+    solana_hash::Hash,
+    solana_keypair::Keypair,
     solana_poh::poh_recorder::PohRecorder,
     solana_pubkey::Pubkey,
-    std::{
-        collections::BTreeSet,
-        sync::{Arc, RwLock},
-        time::Instant,
-    },
-};
-use {
-    solana_clock::Slot, solana_commitment_config::CommitmentConfig,
-    solana_compute_budget_interface::ComputeBudgetInstruction, solana_keypair::Keypair,
-    solana_runtime::bank_forks::BankForks, solana_signer::Signer,
+    solana_runtime::{bank_forks::BankForks, commitment::BlockCommitmentCache},
+    solana_signer::Signer,
     solana_system_interface::instruction::transfer,
     solana_transaction::versioned::VersionedTransaction,
+    std::{
+        collections::HashMap,
+        sync::{atomic::AtomicBool, Arc, RwLock},
+        thread::{spawn, JoinHandle},
+        time::Duration,
+    },
 };
 
 pub const COMMISSION_PERCENTAGE: u64 = 3; // 3% commission
-const LOCALHOST: &str = "http://localhost:8899";
+
+/// Represents the state of a bank's payment
+#[derive(Debug, AsRefStr)]
+pub enum BankPaymentState {
+    // The bank has been dropped, useful for metrics
+    #[strum(serialize = "Dropped")]
+    Dropped,
+
+    // Waiting for the bank to freeze since the slot message may have been received mid-slot
+    #[strum(serialize = "WaitingToFreeze")]
+    WaitingToFreeze,
+    // Waiting for the bank to confirm
+    #[strum(serialize = "WaitingForSlotConfirmation")]
+    WaitingForSlotConfirmation { payment_amount: u64 },
+    /// Waiting for the transaction to be confirmed
+    #[strum(serialize = "WaitingForPaymentConfirmation")]
+    WaitingForPaymentConfirmation {
+        payment_amount: u64,
+        transaction: VersionedTransaction,
+        last_valid_block_height: u64,
+    },
+    // The payment has been confirmed
+    #[strum(serialize = "PaymentConfirmed")]
+    PaymentConfirmed {
+        payment_amount: u64,
+        signature: Signature,
+    },
+}
 
 pub struct BamPaymentSender {
-    thread: std::thread::JoinHandle<()>,
-    slot_sender: crossbeam_channel::Sender<u64>,
+    thread: JoinHandle<()>,
+    slot_sender: Sender<u64>,
     previous_slot: u64,
 }
 
 impl BamPaymentSender {
     pub fn new(
-        exit: Arc<std::sync::atomic::AtomicBool>,
+        exit: Arc<AtomicBool>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
-        dependencies: BamDependencies,
+        bank_forks: Arc<RwLock<BankForks>>,
+        cluster_info: Arc<ClusterInfo>,
+        block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
+        bam_node_pubkey: Arc<Mutex<Pubkey>>,
     ) -> Self {
         let (slot_sender, slot_receiver) = crossbeam_channel::bounded(10_000);
+
         Self {
-            thread: std::thread::spawn(move || {
-                Self::run(exit, slot_receiver, poh_recorder, dependencies);
+            thread: spawn(move || {
+                Self::run(
+                    exit,
+                    slot_receiver,
+                    poh_recorder,
+                    bank_forks,
+                    cluster_info,
+                    block_commitment_cache,
+                    bam_node_pubkey,
+                );
             }),
             slot_sender,
             previous_slot: 0,
         }
     }
 
-    fn run(
-        exit: Arc<std::sync::atomic::AtomicBool>,
-        slot_receiver: crossbeam_channel::Receiver<u64>,
-        poh_recorder: Arc<RwLock<PohRecorder>>,
-        dependencies: BamDependencies,
+    fn emit_slot_state_transition(
+        slot: u64,
+        state: &BankPaymentState,
+        old_state: Option<&BankPaymentState>,
     ) {
-        let mut leader_slots_for_payment = BTreeSet::new();
-
-        const DURATION_BETWEEN_PAYMENTS: std::time::Duration = std::time::Duration::from_secs(30);
-        let mut last_payment_time = Instant::now();
-
-        while !exit.load(std::sync::atomic::Ordering::Relaxed) {
-            // Receive new potentially new slots
-            while let Ok(slot) = slot_receiver.try_recv() {
-                leader_slots_for_payment.insert(slot); // Will dedup
-            }
-
-            let now = Instant::now();
-            if now.duration_since(last_payment_time).as_secs() < DURATION_BETWEEN_PAYMENTS.as_secs()
-            {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                continue;
-            }
-            last_payment_time = now;
-
-            // Create batch
-            let current_slot = poh_recorder.read().unwrap().current_poh_slot();
-            let batch = Self::create_batch(
-                &leader_slots_for_payment,
-                current_slot,
-                &dependencies.bank_forks,
-            );
-            if batch.is_empty() {
-                continue;
-            }
-
-            // Try to send
-            if Self::send_batch(&batch, &dependencies) {
-                for (slot, _) in batch.iter() {
-                    leader_slots_for_payment.remove(slot);
-                }
-                info!("Payment sent successfully for slots: {:?}", batch);
-            }
-            info!("slots_unpaid={:?}", leader_slots_for_payment);
-        }
-
-        let final_batch = Self::create_batch(
-            &leader_slots_for_payment,
-            poh_recorder.read().unwrap().current_poh_slot(),
-            &dependencies.bank_forks,
-        );
-        Self::send_batch(&final_batch, &dependencies);
-        warn!(
-            "BamPaymentSender thread exiting, final batch: {:?} remaining slots: {:?}",
-            final_batch, leader_slots_for_payment
+        datapoint_info!(
+            "bam_payment-slot_state",
+            ("slot", slot, i64),
+            ("state", state.as_ref(), String),
+            (
+                "old_state",
+                old_state
+                    .map(|s| s.as_ref().to_string())
+                    .unwrap_or("None".to_string()),
+                String
+            )
         );
     }
 
-    pub fn send_batch(batch: &[(u64, u64)], dependencies: &BamDependencies) -> bool {
-        let total_payment = batch.iter().map(|(_, amount)| *amount).sum::<u64>();
-        if total_payment == 0 {
-            return true;
+    fn run(
+        exit: Arc<AtomicBool>,
+        slot_receiver: Receiver<u64>,
+        _poh_recorder: Arc<RwLock<PohRecorder>>,
+        bank_forks: Arc<RwLock<BankForks>>,
+        cluster_info: Arc<ClusterInfo>,
+        block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
+        bam_node_pubkey: Arc<Mutex<Pubkey>>,
+    ) {
+        let mut bank_payment_states = HashMap::new();
+
+        while !exit.load(std::sync::atomic::Ordering::Relaxed) {
+            match slot_receiver.recv_timeout(Duration::from_millis(100)) {
+                Ok(slot) => {
+                    bank_payment_states.insert(slot, BankPaymentState::WaitingToFreeze);
+                    Self::emit_slot_state_transition(
+                        slot,
+                        bank_payment_states.get(&slot).unwrap(),
+                        None,
+                    );
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    error!("Frozen slot receiver disconnected - exiting");
+                    return;
+                }
+            }
+
+            for (slot, state) in bank_payment_states.iter_mut() {
+                let maybe_new_state = Self::update_slot_state(
+                    *slot,
+                    state,
+                    &bank_forks,
+                    &cluster_info,
+                    &block_commitment_cache,
+                    &bam_node_pubkey,
+                );
+                if let Some(new_state) = maybe_new_state {
+                    Self::emit_slot_state_transition(*slot, &new_state, Some(state));
+                    *state = new_state;
+                }
+            }
+
+            // Remove states that are confirmed or dropped
+            bank_payment_states.retain(|_, state| match state {
+                BankPaymentState::PaymentConfirmed { .. } | BankPaymentState::Dropped => false,
+                _ => true,
+            });
         }
+    }
 
-        let payment_pubkey = *dependencies.bam_node_pubkey.lock().unwrap();
-        let rpc_url = dependencies
-            .cluster_info
-            .my_contact_info()
-            .rpc()
-            .map_or_else(|| LOCALHOST.to_string(), |rpc| rpc.to_string());
+    fn update_slot_state(
+        slot: u64,
+        state: &BankPaymentState,
+        bank_forks: &Arc<RwLock<BankForks>>,
+        cluster_info: &Arc<ClusterInfo>,
+        block_commitment_cache: &Arc<RwLock<BlockCommitmentCache>>,
+        bam_node_pubkey: &Arc<Mutex<Pubkey>>,
+    ) -> Option<BankPaymentState> {
+        match state {
+            BankPaymentState::Dropped => {
+                return None;
+            }
+            BankPaymentState::WaitingToFreeze => match bank_forks.read().unwrap().get(slot) {
+                Some(bank) => {
+                    if bank.is_frozen() {
+                        return Some(BankPaymentState::WaitingForSlotConfirmation {
+                            payment_amount: Self::calculate_payment_amount(&bank),
+                        });
+                    } else {
+                        return None;
+                    }
+                }
+                None => {
+                    warn!("Bank not found for payment (slot={})", slot);
+                    return Some(BankPaymentState::Dropped);
+                }
+            },
+            BankPaymentState::WaitingForSlotConfirmation { payment_amount } => {
+                // TODO (LB): need to wait for confirmation here
 
-        let ((lowest_slot, _), (highest_slot, _)) = (batch.first().unwrap(), batch.last().unwrap());
+                let my_keypair = cluster_info.keypair();
+                let blockhash = bank_forks.read().unwrap().root_bank().last_blockhash();
 
-        info!(
-            "Sending payment for {} slots, range: ({}, {}), total payment: {}",
-            batch.len(),
-            lowest_slot,
-            highest_slot,
-            total_payment
-        );
-        let Some(blockhash) = Self::get_latest_blockhash(&rpc_url) else {
-            error!("Failed to get latest blockhash, skipping payment");
-            return false;
+                let transaction = Self::create_transfer_transaction(
+                    my_keypair.as_ref(),
+                    blockhash,
+                    bam_node_pubkey.lock().unwrap().clone(),
+                    *payment_amount,
+                    slot,
+                );
+                drop(my_keypair);
+                let last_valid_block_height = bank_forks
+                    .read()
+                    .unwrap()
+                    .working_bank()
+                    .get_blockhash_last_valid_block_height(blockhash);
+
+                return Some(BankPaymentState::WaitingForPaymentConfirmation {
+                    payment_amount: *payment_amount,
+                    transaction,
+                    last_valid_block_height: last_valid_block_height,
+                });
+            }
+            BankPaymentState::WaitingForPaymentConfirmation {
+                payment_amount: _,
+                transaction,
+                last_valid_block_height,
+            } => {
+                // check to see if landed. if not, retry it.
+                // if blockhash expired, get a new one and retry it.
+                let confirmed_slot = block_commitment_cache
+                    .read()
+                    .unwrap()
+                    .commitment_slots()
+                    .highest_confirmed_slot;
+                match bank_forks.read().unwrap().get(confirmed_slot) {
+                    Some(bank) => {
+                        if bank.has_signature(transaction.signatures.get(0).unwrap()) {
+                            // processed and landed
+                            return Some(BankPaymentState::PaymentConfirmed {
+                                payment_amount: *payment_amount,
+                                signature: transaction.signatures.get(0).unwrap().clone(),
+                            });
+                        } else if bank.block_height() > *last_valid_block_height {
+                            // blockhash expired and didn't land; need to re-generate and re-send
+                            warn!(
+                                "Re-generating and re-sending payment transaction for slot={}",
+                                slot
+                            );
+                            let blockhash = bank_forks.read().unwrap().root_bank().last_blockhash();
+                            let my_keypair = cluster_info.keypair();
+                            let transaction = Self::create_transfer_transaction(
+                                my_keypair.as_ref(),
+                                blockhash,
+                                bam_node_pubkey.lock().unwrap().clone(),
+                                *payment_amount,
+                                slot,
+                            );
+                            drop(my_keypair);
+                            let last_valid_block_height = bank_forks
+                                .read()
+                                .unwrap()
+                                .working_bank()
+                                .get_blockhash_last_valid_block_height(blockhash);
+
+                            // TODO (LB): send the transactions
+
+                            return Some(BankPaymentState::WaitingForPaymentConfirmation {
+                                payment_amount: *payment_amount,
+                                transaction,
+                                last_valid_block_height: last_valid_block_height,
+                            });
+                        } else {
+                            // TODO (LB): Still waiting for confirmation; re-send the transaction
+                            return None;
+                        }
+                    }
+                    None => {
+                        // unclear why this would happen...
+                        warn!(
+                            "Confirmed slot not found in bank forks (slot={})",
+                            confirmed_slot
+                        );
+                        return None;
+                    }
+                }
+
+                return None;
+            }
+            BankPaymentState::PaymentConfirmed {
+                payment_amount,
+                signature,
+            } => return None,
         };
-        let batch_txn = Self::create_transfer_transaction(
-            dependencies.cluster_info.keypair().as_ref(),
-            blockhash,
-            payment_pubkey,
-            total_payment,
-            *lowest_slot,
-            *highest_slot,
-        );
-
-        Self::payment_successful(&rpc_url, &batch_txn, *lowest_slot, *highest_slot)
     }
 
     pub fn send_slot(&mut self, slot: Slot) -> bool {
@@ -155,101 +302,56 @@ impl BamPaymentSender {
         self.thread.join()
     }
 
-    fn create_batch(
-        leader_slots_for_payment: &BTreeSet<u64>,
-        current_slot: u64,
-        bank_forks: &Arc<RwLock<BankForks>>,
-    ) -> Vec<(u64, u64)> {
-        let mut batch = vec![];
+    // fn create_batch(
+    //     leader_slots_for_payment: &BTreeSet<u64>,
+    //     current_slot: u64,
+    //     bank_forks: &Arc<RwLock<BankForks>>,
+    // ) -> Vec<(u64, u64)> {
+    //     let mut batch = vec![];
 
-        for slot in leader_slots_for_payment.iter().copied() {
-            let bank_forks = bank_forks.read().unwrap();
-            let root = bank_forks.root();
+    //     for slot in leader_slots_for_payment.iter().copied() {
+    //         let bank_forks = bank_forks.read().unwrap();
+    //         let root = bank_forks.root();
 
-            // must be >= 32 slots older than tip and rooted to access bank
-            if current_slot.saturating_sub(slot) < 32 || slot > root {
-                continue;
-            }
+    //         // must be >= 32 slots older than tip and rooted to access bank
+    //         if current_slot.saturating_sub(slot) < 32 || slot > root {
+    //             continue;
+    //         }
 
-            let Some(payment_amount) = Self::calculate_payment_amount(&bank_forks, slot) else {
-                break;
-            };
+    //         let Some(payment_amount) = Self::calculate_payment_amount(&bank_forks, slot) else {
+    //             break;
+    //         };
 
-            batch.push((slot, payment_amount));
-        }
-        batch
-    }
+    //         batch.push((slot, payment_amount));
+    //     }
+    //     batch
+    // }
 
-    fn get_latest_blockhash(rpc_url: &str) -> Option<solana_hash::Hash> {
-        let rpc_client = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
-        rpc_client.get_latest_blockhash().ok()
-    }
-
-    fn payment_successful(
-        rpc_url: &str,
-        txn: &VersionedTransaction,
-        lowest_slot: Slot,
-        highest_slot: Slot,
-    ) -> bool {
-        // Send it via RpcClient (loopback to the same node)
-        let rpc_client = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
-        if let Err(err) = rpc_client.send_and_confirm_transaction(txn) {
-            error!(
-                "Failed to send payment transaction for slot range ({}, {}): {}",
-                lowest_slot, highest_slot, err
-            );
-            false
-        } else {
-            info!(
-                "Payment for slot range ({}, {}) sent successfully; signature: {:?}",
-                lowest_slot,
-                highest_slot,
-                txn.signatures.first()
-            );
-            true
-        }
-    }
-
-    pub fn calculate_payment_amount(bank_forks: &BankForks, slot: u64) -> Option<u64> {
-        let Some(bank) = bank_forks.get(slot) else {
-            error!(
-                "Bank not found for slot {} in calculate_payment_amount",
-                slot
-            );
-            return None;
-        };
-
-        Some(
-            bank.priority_fee_total()
-                .saturating_mul(COMMISSION_PERCENTAGE)
-                .saturating_div(100),
-        )
+    pub fn calculate_payment_amount(bank: &Arc<Bank>) -> u64 {
+        (bank.priority_fee_total() as f32 * COMMISSION_PERCENTAGE as f32 / 100.0) as u64
     }
 
     pub fn create_transfer_transaction(
         keypair: &Keypair,
-        blockhash: solana_hash::Hash,
+        blockhash: Hash,
         destination_pubkey: Pubkey,
         lamports: u64,
-        lowest_slot: u64,
-        highest_slot: u64,
+        slot: u64,
     ) -> VersionedTransaction {
         // Create transfer instruction
         let transfer_ix = transfer(&keypair.pubkey(), &destination_pubkey, lamports);
 
         // Create memo instruction
-        let memo = format!("bam_pay=({}, {})", lowest_slot, highest_slot);
+        let memo = format!("bam_payment,slot={},amount={}", slot, lamports);
         let memo_ix = spl_memo_interface::instruction::build_memo(
             &spl_memo_interface::v3::id(),
             memo.as_bytes(),
             &[&keypair.pubkey()],
         );
 
-        // Set compute unit price
+        // Set compute unit price (TODO: make this configurable)
         let compute_unit_price_ix = ComputeBudgetInstruction::set_compute_unit_price(10_000);
         let compute_unit_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(50_000);
-
-        let payer = keypair;
 
         let tx = solana_transaction::Transaction::new_signed_with_payer(
             &[
@@ -258,8 +360,8 @@ impl BamPaymentSender {
                 transfer_ix,
                 memo_ix,
             ],
-            Some(&payer.pubkey()),
-            &[payer],
+            Some(&keypair.pubkey()),
+            &[keypair],
             blockhash,
         );
         VersionedTransaction::from(tx)

@@ -26,7 +26,7 @@ use {
     solana_gossip::cluster_info::ClusterInfo,
     solana_poh::poh_recorder::PohRecorder,
     solana_pubkey::Pubkey,
-    solana_runtime::bank::Bank,
+    solana_runtime::{bank::Bank, commitment::BlockCommitmentCache},
 };
 
 pub struct BamManager {
@@ -39,10 +39,26 @@ impl BamManager {
         bam_url: Arc<Mutex<Option<String>>>,
         dependencies: BamDependencies,
         poh_recorder: Arc<RwLock<PohRecorder>>,
+        block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
     ) -> Self {
+        let bam_payment_sender = BamPaymentSender::new(
+            exit.clone(),
+            poh_recorder.clone(),
+            dependencies.bank_forks.clone(),
+            dependencies.cluster_info.clone(),
+            block_commitment_cache,
+            dependencies.bam_node_pubkey.clone(),
+        );
+
         Self {
             thread: std::thread::spawn(move || {
-                Self::run(exit, bam_url, dependencies, poh_recorder)
+                Self::run(
+                    exit,
+                    bam_url,
+                    dependencies,
+                    poh_recorder,
+                    bam_payment_sender,
+                )
             }),
         }
     }
@@ -52,6 +68,7 @@ impl BamManager {
         bam_url: Arc<Mutex<Option<String>>>,
         dependencies: BamDependencies,
         poh_recorder: Arc<RwLock<PohRecorder>>,
+        mut bam_payment_sender: BamPaymentSender,
     ) {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(8)
@@ -61,8 +78,6 @@ impl BamManager {
 
         let mut current_connection = None;
         let mut cached_builder_config = None;
-        let mut payment_sender =
-            BamPaymentSender::new(exit.clone(), poh_recorder.clone(), dependencies.clone());
 
         while !exit.load(Ordering::Relaxed) {
             // Update if bam is enabled
@@ -138,7 +153,7 @@ impl BamManager {
             if let Some(bank) = maybe_bank_start.load() {
                 if !bank.is_frozen() {
                     let leader_state = Self::generate_leader_state(&bank);
-                    payment_sender.send_slot(leader_state.slot);
+                    bam_payment_sender.send_slot(leader_state.slot);
                     let _ = dependencies.outbound_sender.try_send(
                         crate::bam_dependencies::BamOutboundMessage::LeaderState(leader_state),
                     );
@@ -149,7 +164,7 @@ impl BamManager {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
 
-        payment_sender
+        bam_payment_sender
             .join()
             .expect("Failed to join payment sender thread");
     }

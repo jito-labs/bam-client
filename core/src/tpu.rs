@@ -55,6 +55,7 @@ use {
     solana_runtime::{
         bank::Bank,
         bank_forks::BankForks,
+        commitment::BlockCommitmentCache,
         prioritization_fee_cache::PrioritizationFeeCache,
         vote_sender_types::{ReplayVoteReceiver, ReplayVoteSender},
     },
@@ -192,6 +193,7 @@ impl Tpu {
         shred_receiver_address: Arc<RwLock<Option<SocketAddr>>>,
         preallocated_bundle_cost: u64,
         bam_url: Arc<Mutex<Option<String>>>,
+        block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
     ) -> Self {
         let TpuSockets {
             transactions: transactions_sockets,
@@ -502,6 +504,7 @@ impl Tpu {
             bam_url,
             bam_dependencies,
             poh_recorder.clone(),
+            block_commitment_cache.clone(),
         );
 
         let (entry_receiver, tpu_entry_notifier) =
