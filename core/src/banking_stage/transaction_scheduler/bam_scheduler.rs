@@ -242,6 +242,20 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             let Some((_, _, slot)) = container.get_batch(next_batch_id.id) else {
                 continue;
             };
+
+            if let Some(insertion_time) = self.insertion_to_prio_graph_time
+                .remove(&priority_to_seq_id(next_batch_id.priority))
+            {
+                let _ = self.time_in_priograph_us.increment(now.duration_since(insertion_time).as_micros() as u64);
+            };
+
+            // These should be cleared out earlier; but if not, we remove them here
+            if slot != current_slot {
+                container.remove_by_id(next_batch_id.id);
+                self.prio_graph.unblock(&next_batch_id);
+                self.send_no_leader_slot_bundle_result(priority_to_seq_id(next_batch_id.priority));
+                continue;
+            }
             
             let Some((transaction_ids, revert_on_error, _)) = container.get_batch(next_batch_id.id) else {
                 error!("Batch {} not found in container", next_batch_id.id);
@@ -275,21 +289,6 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 self.send_back_result(seq_id, result);
                 continue;
             };
-
-
-            if let Some(insertion_time) = self.insertion_to_prio_graph_time
-                .remove(&priority_to_seq_id(next_batch_id.priority))
-            {
-                let _ = self.time_in_priograph_us.increment(now.duration_since(insertion_time).as_micros() as u64);
-            };
-
-            // These should be cleared out earlier; but if not, we remove them here
-            if slot != current_slot {
-                container.remove_by_id(next_batch_id.id);
-                self.prio_graph.unblock(&next_batch_id);
-                self.send_no_leader_slot_bundle_result(priority_to_seq_id(next_batch_id.priority));
-                continue;
-            }
 
             if revert_on_error {
                 if !current_batch_ids.is_empty() {
