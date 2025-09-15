@@ -528,9 +528,9 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                 batch_slot,
             );
             self.send_to_worker(worker_index, priority_ids, work, write_account_locks, read_account_locks);
-            if self.workers_scheduled_count[worker_index] >= MAX_TXN_PER_BATCH {
-                self.allowed_threads.remove(worker_index);
-            }
+            //if self.workers_scheduled_count[worker_index] >= MAX_TXN_PER_BATCH {
+            //    self.allowed_threads.remove(worker_index);
+            //}
             num_scheduled += 1;
         }
 
@@ -574,9 +574,9 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
             };
             let worker_index = inflight_batch_info.worker_index;
             self.workers_scheduled_count[worker_index] -= 1;
-            if self.workers_scheduled_count[worker_index] < MAX_TXN_PER_BATCH {
-                self.allowed_threads.insert(worker_index);
-            }
+            //if self.workers_scheduled_count[worker_index] < MAX_TXN_PER_BATCH {
+            //    self.allowed_threads.insert(worker_index);
+            //}
             self.thread_locks.unlock_accounts(
                 inflight_batch_info.write_account_locks.iter(),
                 inflight_batch_info.read_account_locks.iter(),
