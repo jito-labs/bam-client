@@ -253,7 +253,7 @@ impl BamPaymentSender {
                                 last_valid_block_height,
                             });
                         }
-                        // no-op if the slot the payment is for is less than the confirmed slot. still waiting for payment to be confirmed.
+                        // no-op if the slot the payment is for is less than the confirmed slot. still waiting for the slot that needs to get paid out to be confirmed.
                         Ordering::Less => {
                             return None;
                         }
