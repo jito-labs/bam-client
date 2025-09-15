@@ -2,7 +2,6 @@
 //! for the slots it was connected to as a leader.
 //! It will calculate the payment amount based on the fees collected in that slot.
 //! The payment is sent as a transfer transaction with a memo indicating the slot.
-//! The payment is sent with a 1% commission.
 
 use {
     crossbeam_channel::{Receiver, RecvTimeoutError, Sender},
