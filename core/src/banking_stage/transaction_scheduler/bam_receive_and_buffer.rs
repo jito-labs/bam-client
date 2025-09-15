@@ -404,6 +404,11 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
                     return Ok(result);
                 }
 
+                if result > 100 {
+                    // Prevent spending too much time here
+                    return Ok(result);
+                }
+
                 let batch = match self.bundle_receiver.try_recv() {
                     Ok(batch) => batch,
                     Err(TryRecvError::Disconnected) => return Err(DisconnectedError),
@@ -448,7 +453,6 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
                 };
 
                 result = result.saturating_add(1);
-                return Ok(result);
             },
             BufferedPacketsDecision::ForwardAndHold | BufferedPacketsDecision::Forward => {
                 // Send back any batches that were received while in Forward/Hold state
