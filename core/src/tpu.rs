@@ -432,8 +432,12 @@ impl Tpu {
             outbound_sender: bam_outbound_sender,
             outbound_receiver: bam_outbound_receiver,
             cluster_info: cluster_info.clone(),
-            block_builder_fee_info: Arc::new(Mutex::new(BlockBuilderFeeInfo::default())),
-            bam_node_pubkey: Arc::new(Mutex::new(Pubkey::default())),
+            // set to the keypair of the validator by default to avoid sending money somewhere it shouldn't go
+            block_builder_fee_info: Arc::new(Mutex::new(BlockBuilderFeeInfo {
+                block_builder: cluster_info.keypair().pubkey(),
+                block_builder_commission: 0,
+            })),
+            bam_node_pubkey: Arc::new(Mutex::new(cluster_info.keypair().pubkey())),
             bank_forks: bank_forks.clone(),
         };
 

@@ -4,11 +4,6 @@
 //! The payment is sent as a transfer transaction with a memo indicating the slot.
 //! The payment is sent with a 1% commission.
 
-use std::sync::Mutex;
-
-use solana_runtime::bank::Bank;
-use solana_signature::Signature;
-use strum::AsRefStr;
 use {
     crossbeam_channel::{Receiver, RecvTimeoutError, Sender},
     solana_clock::Slot,
@@ -18,16 +13,19 @@ use {
     solana_keypair::Keypair,
     solana_poh::poh_recorder::PohRecorder,
     solana_pubkey::Pubkey,
-    solana_runtime::{bank_forks::BankForks, commitment::BlockCommitmentCache},
+    solana_runtime::{bank::Bank, bank_forks::BankForks, commitment::BlockCommitmentCache},
+    solana_signature::Signature,
     solana_signer::Signer,
     solana_system_interface::instruction::transfer,
     solana_transaction::versioned::VersionedTransaction,
     std::{
+        cmp::Ordering,
         collections::HashMap,
-        sync::{atomic::AtomicBool, Arc, RwLock},
+        sync::{atomic::AtomicBool, Arc, Mutex, RwLock},
         thread::{spawn, JoinHandle},
         time::Duration,
     },
+    strum::AsRefStr,
 };
 
 pub const COMMISSION_PERCENTAGE: u64 = 3; // 3% commission
@@ -38,7 +36,6 @@ pub enum BankPaymentState {
     // The bank has been dropped, useful for metrics
     #[strum(serialize = "Dropped")]
     Dropped,
-
     // Waiting for the bank to freeze since the slot message may have been received mid-slot
     #[strum(serialize = "WaitingToFreeze")]
     WaitingToFreeze,
@@ -192,38 +189,84 @@ impl BamPaymentSender {
                 }
             },
             BankPaymentState::WaitingForSlotConfirmation { payment_amount } => {
-                // TODO (LB): need to wait for confirmation here
-
-                let my_keypair = cluster_info.keypair();
-                let blockhash = bank_forks.read().unwrap().root_bank().last_blockhash();
-
-                let transaction = Self::create_transfer_transaction(
-                    my_keypair.as_ref(),
-                    blockhash,
-                    bam_node_pubkey.lock().unwrap().clone(),
-                    *payment_amount,
-                    slot,
-                );
-                drop(my_keypair);
-                let last_valid_block_height = bank_forks
+                let confirmed_slot = block_commitment_cache
                     .read()
                     .unwrap()
-                    .working_bank()
-                    .get_blockhash_last_valid_block_height(blockhash);
+                    .commitment_slots()
+                    .highest_confirmed_slot;
+                if let Some(confirmed_bank) = bank_forks.read().unwrap().get(confirmed_slot) {
+                    match slot.cmp(&confirmed_slot) {
+                        // if the slot the payment is for is greater than the confirmed slot, we need to check if it's an ancestor
+                        // of the highest confirmed slot. if it's not, the payment slot never was confirmed and the payment should be dropped.
+                        Ordering::Greater => {
+                            let ancestors = confirmed_bank.proper_ancestors_set();
+                            if ancestors.contains(&slot) {
+                                let transaction = Self::get_payment_tx(
+                                    slot,
+                                    *payment_amount,
+                                    bank_forks,
+                                    cluster_info,
+                                    bam_node_pubkey,
+                                );
 
-                return Some(BankPaymentState::WaitingForPaymentConfirmation {
-                    payment_amount: *payment_amount,
-                    transaction,
-                    last_valid_block_height: last_valid_block_height,
-                });
+                                let Some(last_valid_block_height) = confirmed_bank
+                                    .get_blockhash_last_valid_block_height(
+                                        transaction.message.recent_blockhash(),
+                                    )
+                                else {
+                                    warn!("Last valid block height not found for blockhash (slot={}, blockhash={})", slot, transaction.message.recent_blockhash());
+                                    return Some(BankPaymentState::Dropped);
+                                };
+
+                                return Some(BankPaymentState::WaitingForPaymentConfirmation {
+                                    payment_amount: *payment_amount,
+                                    transaction,
+                                    last_valid_block_height,
+                                });
+                            } else {
+                                warn!("Slot was not confirmed and not an ancestor (slot={}, ancestors={:?})", slot, ancestors);
+                                return Some(BankPaymentState::Dropped);
+                            }
+                        }
+                        // if the slot the payment is for is equal to the confirmed slot, we're good to pay
+                        Ordering::Equal => {
+                            let transaction = Self::get_payment_tx(
+                                slot,
+                                *payment_amount,
+                                bank_forks,
+                                cluster_info,
+                                bam_node_pubkey,
+                            );
+
+                            let Some(last_valid_block_height) = confirmed_bank
+                                .get_blockhash_last_valid_block_height(
+                                    transaction.message.recent_blockhash(),
+                                )
+                            else {
+                                warn!("Last valid block height not found for blockhash (slot={}, blockhash={})", slot, transaction.message.recent_blockhash());
+                                return Some(BankPaymentState::Dropped);
+                            };
+
+                            return Some(BankPaymentState::WaitingForPaymentConfirmation {
+                                payment_amount: *payment_amount,
+                                transaction,
+                                last_valid_block_height,
+                            });
+                        }
+                        // no-op if the slot the payment is for is less than the confirmed slot. still waiting for payment to be confirmed.
+                        Ordering::Less => {
+                            return None;
+                        }
+                    }
+                } else {
+                    return None;
+                }
             }
             BankPaymentState::WaitingForPaymentConfirmation {
-                payment_amount: _,
+                payment_amount,
                 transaction,
                 last_valid_block_height,
             } => {
-                // check to see if landed. if not, retry it.
-                // if blockhash expired, get a new one and retry it.
                 let confirmed_slot = block_commitment_cache
                     .read()
                     .unwrap()
@@ -231,44 +274,56 @@ impl BamPaymentSender {
                     .highest_confirmed_slot;
                 match bank_forks.read().unwrap().get(confirmed_slot) {
                     Some(bank) => {
-                        if bank.has_signature(transaction.signatures.get(0).unwrap()) {
-                            // processed and landed
-                            return Some(BankPaymentState::PaymentConfirmed {
-                                payment_amount: *payment_amount,
-                                signature: transaction.signatures.get(0).unwrap().clone(),
-                            });
-                        } else if bank.block_height() > *last_valid_block_height {
-                            // blockhash expired and didn't land; need to re-generate and re-send
-                            warn!(
-                                "Re-generating and re-sending payment transaction for slot={}",
-                                slot
-                            );
-                            let blockhash = bank_forks.read().unwrap().root_bank().last_blockhash();
-                            let my_keypair = cluster_info.keypair();
-                            let transaction = Self::create_transfer_transaction(
-                                my_keypair.as_ref(),
-                                blockhash,
-                                bam_node_pubkey.lock().unwrap().clone(),
-                                *payment_amount,
-                                slot,
-                            );
-                            drop(my_keypair);
-                            let last_valid_block_height = bank_forks
-                                .read()
-                                .unwrap()
-                                .working_bank()
-                                .get_blockhash_last_valid_block_height(blockhash);
+                        match bank.get_signature_status(transaction.signatures.get(0).unwrap()) {
+                            // if the payment is confirmed and was succesfully processed, good to close this payment out
+                            Some(Ok(())) => {
+                                return Some(BankPaymentState::PaymentConfirmed {
+                                    payment_amount: *payment_amount,
+                                    signature: transaction.signatures.get(0).unwrap().clone(),
+                                });
+                            }
+                            // if the payment is confirmed but was not succesfully processed, drop it
+                            Some(Err(e)) => {
+                                datapoint_error!(
+                                    "bam_payment-error_processing_payment",
+                                    ("slot", slot, i64),
+                                    ("amount", *payment_amount, i64),
+                                    ("error", e.to_string(), String)
+                                );
 
-                            // TODO (LB): send the transactions
+                                return Some(BankPaymentState::Dropped);
+                            }
+                            // payment hasn't been confirmed yet. check the blockhash, resign if old, and re-send
+                            None => {
+                                let working_bank = bank_forks.read().unwrap().working_bank();
+                                if working_bank.block_height() > *last_valid_block_height {
+                                    let transaction = Self::get_payment_tx(
+                                        slot,
+                                        *payment_amount,
+                                        bank_forks,
+                                        cluster_info,
+                                        bam_node_pubkey,
+                                    );
 
-                            return Some(BankPaymentState::WaitingForPaymentConfirmation {
-                                payment_amount: *payment_amount,
-                                transaction,
-                                last_valid_block_height: last_valid_block_height,
-                            });
-                        } else {
-                            // TODO (LB): Still waiting for confirmation; re-send the transaction
-                            return None;
+                                    let Some(last_valid_block_height) = working_bank
+                                        .get_blockhash_last_valid_block_height(
+                                            transaction.message.recent_blockhash(),
+                                        )
+                                    else {
+                                        warn!("Last valid block height not found for blockhash (slot={}, blockhash={})", slot, transaction.message.recent_blockhash());
+                                        return Some(BankPaymentState::Dropped);
+                                    };
+
+                                    return Some(BankPaymentState::WaitingForPaymentConfirmation {
+                                        payment_amount: *payment_amount,
+                                        transaction,
+                                        last_valid_block_height,
+                                    });
+                                } else {
+                                    // TODO (LB): send the transaction!
+                                    return None;
+                                }
+                            }
                         }
                     }
                     None => {
@@ -280,13 +335,8 @@ impl BamPaymentSender {
                         return None;
                     }
                 }
-
-                return None;
             }
-            BankPaymentState::PaymentConfirmed {
-                payment_amount,
-                signature,
-            } => return None,
+            BankPaymentState::PaymentConfirmed { .. } => return None,
         };
     }
 
@@ -302,30 +352,23 @@ impl BamPaymentSender {
         self.thread.join()
     }
 
-    // fn create_batch(
-    //     leader_slots_for_payment: &BTreeSet<u64>,
-    //     current_slot: u64,
-    //     bank_forks: &Arc<RwLock<BankForks>>,
-    // ) -> Vec<(u64, u64)> {
-    //     let mut batch = vec![];
-
-    //     for slot in leader_slots_for_payment.iter().copied() {
-    //         let bank_forks = bank_forks.read().unwrap();
-    //         let root = bank_forks.root();
-
-    //         // must be >= 32 slots older than tip and rooted to access bank
-    //         if current_slot.saturating_sub(slot) < 32 || slot > root {
-    //             continue;
-    //         }
-
-    //         let Some(payment_amount) = Self::calculate_payment_amount(&bank_forks, slot) else {
-    //             break;
-    //         };
-
-    //         batch.push((slot, payment_amount));
-    //     }
-    //     batch
-    // }
+    fn get_payment_tx(
+        slot: u64,
+        payment_amount: u64,
+        bank_forks: &Arc<RwLock<BankForks>>,
+        cluster_info: &Arc<ClusterInfo>,
+        bam_node_pubkey: &Arc<Mutex<Pubkey>>,
+    ) -> VersionedTransaction {
+        let my_keypair = cluster_info.keypair();
+        let blockhash = bank_forks.read().unwrap().root_bank().last_blockhash();
+        Self::create_transfer_transaction(
+            my_keypair.as_ref(),
+            blockhash,
+            bam_node_pubkey.lock().unwrap().clone(),
+            payment_amount,
+            slot,
+        )
+    }
 
     pub fn calculate_payment_amount(bank: &Arc<Bank>) -> u64 {
         (bank.priority_fee_total() as f32 * COMMISSION_PERCENTAGE as f32 / 100.0) as u64
