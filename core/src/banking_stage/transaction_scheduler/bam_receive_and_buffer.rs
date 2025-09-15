@@ -264,6 +264,7 @@ impl BamReceiveAndBuffer {
             metrics.increment_sanitization_us(duration_us);
 
             // Check 2: Ensure no duplicates and valid number of account locks
+            let start = Instant::now();
             if let Err(err) =
                 validate_account_locks(tx.message().account_keys(), transaction_account_lock_limit)
             {
@@ -275,7 +276,7 @@ impl BamReceiveAndBuffer {
                     },
                 ));
             }
-            metrics.increment_lock_validation_us(duration_us);
+            metrics.increment_lock_validation_us(start.elapsed().as_micros() as u64);
 
             // Check 3: Ensure the compute budget limits are valid
             let (result, duration_us) = measure_us!(tx
