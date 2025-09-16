@@ -425,7 +425,8 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
                     continue;
                 }
 
-                let (parse_result, duration_us) = measure_us!(Self::parse_batch(&batch, &self.bank_forks, &self.blacklisted_accounts, &mut self.metrics));
+                let (parse_result, duration_us) = measure_us!(
+                    Self::parse_batch(&batch, &self.bank_forks, &self.blacklisted_accounts, &mut self.metrics));
                 self.metrics.increment_total_us(duration_us);
 
                 let ParsedBatch {
