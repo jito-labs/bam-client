@@ -89,7 +89,7 @@ pub struct BamScheduler<Tx: TransactionWithMeta> {
 // 'non-revert_on_error' batches that are scheduled together.
 struct InflightBatchInfo {
     pub schedule_time: Instant,
-    pub priority_ids: Vec<TransactionPriorityId>,
+    pub batch_priority_ids: Vec<TransactionPriorityId>,
     pub worker_index: usize,
     pub slot: Slot,
 }
@@ -326,7 +326,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             batch_id,
             InflightBatchInfo {
                 schedule_time: Instant::now(),
-                priority_ids,
+                batch_priority_ids: priority_ids,
                 worker_index,
                 slot,
             },
@@ -561,7 +561,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         // Unblock all transactions blocked by inflight batches
         // and then drain the prio-graph
         for (_, inflight_info) in self.inflight_batch_info.iter() {
-            for priority_id in &inflight_info.priority_ids {
+            for priority_id in &inflight_info.batch_priority_ids {
                 if prev_slot == Some(inflight_info.slot) {
                     self.prio_graph.unblock(priority_id);
                 }
@@ -667,10 +667,10 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
             let len = if revert_on_error {
                 1
             } else {
-                inflight_batch_info.priority_ids.len()
+                inflight_batch_info.batch_priority_ids.len()
             };
             for (i, priority_id) in inflight_batch_info
-                .priority_ids
+                .batch_priority_ids
                 .iter()
                 .enumerate()
                 .take(len)
@@ -700,7 +700,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                 // Remove the transaction from the container
                 container.remove_by_id(priority_id.id);
             }
-            self.recycle_priority_ids(inflight_batch_info.priority_ids);
+            self.recycle_priority_ids(inflight_batch_info.batch_priority_ids);
         }
 
         Ok((num_transactions, 0))
