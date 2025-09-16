@@ -62,7 +62,7 @@ const REPORT_INTERVAL: u64 = 2; // seconds
 const SIGVERIFY_STATS_NAME: &str = "jito-bam-receive-and-buffer_sigverify-stats";
 
 //const VERIFY_CHUNK_THRESHOLD: usize = 1000;
-const MAX_RECEIVE_PACKETS: usize = 5_000;
+const MAX_RECEIVE_PACKETS: usize = 1_000;
 const MAX_PACKET_RECEIVE_TIME: Duration = Duration::from_millis(10);
 
 pub struct BamReceiveAndBuffer {
