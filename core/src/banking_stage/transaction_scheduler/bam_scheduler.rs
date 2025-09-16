@@ -745,17 +745,22 @@ mod tests {
         response_receiver: crossbeam_channel::Receiver<BamOutboundMessage>,
     }
 
-    fn create_test_scheduler(num_threads: usize) -> TestScheduler {
+    fn create_test_scheduler(
+        num_threads: usize,
+        bank_forks: &Arc<RwLock<BankForks>>,
+    ) -> TestScheduler {
         let (consume_work_senders, consume_work_receivers) =
             (0..num_threads).map(|_| unbounded()).unzip();
         let (finished_consume_work_sender, finished_consume_work_receiver) = unbounded();
         let (response_sender, response_receiver) = unbounded();
+        test_bank_forks();
         let scheduler = BamScheduler::new(
             consume_work_senders,
             finished_consume_work_receiver,
             response_sender,
             5,
             16,
+            bank_forks.clone(),
         );
         TestScheduler {
             scheduler,
@@ -828,12 +833,13 @@ mod tests {
 
     #[test]
     fn test_scheduler_empty() {
+        let (bank_forks, _) = test_bank_forks();
         let TestScheduler {
             mut scheduler,
             consume_work_receivers: _,
             finished_consume_work_sender: _,
             response_receiver: _,
-        } = create_test_scheduler(4);
+        } = create_test_scheduler(4, &bank_forks);
 
         let mut container = TransactionStateContainer::with_capacity(100);
         let result = scheduler
@@ -848,12 +854,13 @@ mod tests {
 
     #[test]
     fn test_scheduler_basic() {
+        let (bank_forks, _) = test_bank_forks();
         let TestScheduler {
             mut scheduler,
             consume_work_receivers,
             finished_consume_work_sender,
             response_receiver,
-        } = create_test_scheduler(4);
+        } = create_test_scheduler(4, &bank_forks);
 
         let keypair_a = Keypair::new();
 
@@ -890,8 +897,6 @@ mod tests {
             scheduler.slot.is_none(),
             "Scheduler slot should be None initially"
         );
-
-        let (bank_forks, _) = test_bank_forks();
 
         let decision = BufferedPacketsDecision::Consume(bank_forks.read().unwrap().working_bank());
 
@@ -1147,12 +1152,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "node must exist")]
     fn test_prio_graph_clears_on_slot_boundary() {
+        let (bank_forks, _) = test_bank_forks();
         let TestScheduler {
             mut scheduler,
             consume_work_receivers: _,
             finished_consume_work_sender: _,
             response_receiver: _,
-        } = create_test_scheduler(4);
+        } = create_test_scheduler(4, &bank_forks);
 
         let keypair_a = Keypair::new();
         let keypair_b = Keypair::new();
@@ -1173,7 +1179,6 @@ mod tests {
             ),
         ]);
 
-        let (bank_forks, _) = test_bank_forks();
         let bank = bank_forks.read().unwrap().working_bank();
 
         // Set initial slot with bank start
