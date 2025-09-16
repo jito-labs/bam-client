@@ -83,6 +83,7 @@ pub struct BamScheduler<Tx: TransactionWithMeta> {
     reusable_priority_ids: Vec<Vec<TransactionPriorityId>>,
     reusable_batches_for_scheduling: Vec<(Vec<TransactionPriorityId>, bool)>,
 
+    extra_checks_enabled: bool,
     bank_forks: Arc<RwLock<BankForks>>,
 }
 
@@ -124,6 +125,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             reusable_consume_work: Vec::new(),
             reusable_priority_ids: Vec::new(),
             reusable_batches_for_scheduling: Vec::new(),
+            extra_checks_enabled: true,
             bank_forks,
         }
     }
@@ -171,30 +173,32 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 .filter_map(|txn_id| container.get_transaction(*txn_id))
                 .collect_vec();
 
-            let lock_results = (0..txns.len())
-                .map(|_| Ok(()))
-                .collect::<Vec<solana_transaction_error::TransactionResult<()>>>();
-            let check_result = working_bank.check_transactions::<Tx>(
-                &txns,
-                lock_results.as_slice(),
-                MAX_PROCESSING_AGE,
-                &mut TransactionErrorMetrics::default());
-                        if let Some((index, err)) = check_result
-                .iter()
-                .find_position(|res| res.is_err())
-                .map(|(i, res)| (i, res.as_ref().err().unwrap().clone()))
-            {
-                container.remove_by_id(next_batch_id.id);
+            if self.extra_checks_enabled {
+                let lock_results = (0..txns.len())
+                    .map(|_| Ok(()))
+                    .collect::<Vec<solana_transaction_error::TransactionResult<()>>>();
+                let check_result = working_bank.check_transactions::<Tx>(
+                    &txns,
+                    lock_results.as_slice(),
+                    MAX_PROCESSING_AGE,
+                    &mut TransactionErrorMetrics::default());
+                            if let Some((index, err)) = check_result
+                    .iter()
+                    .find_position(|res| res.is_err())
+                    .map(|(i, res)| (i, res.as_ref().err().unwrap().clone()))
+                {
+                    container.remove_by_id(next_batch_id.id);
 
-                let seq_id = priority_to_seq_id(next_batch_id.priority);
-                let result = atomic_txn_batch_result::Result::NotCommitted(
-                    jito_protos::proto::bam_types::NotCommitted {
-                        reason: Some(Self::convert_reason_to_proto(index, NotCommittedReason::Error(err))),
-                    },
-                );
-                self.send_back_result(seq_id, result);
-                continue;
-            };
+                    let seq_id = priority_to_seq_id(next_batch_id.priority);
+                    let result = atomic_txn_batch_result::Result::NotCommitted(
+                        jito_protos::proto::bam_types::NotCommitted {
+                            reason: Some(Self::convert_reason_to_proto(index, NotCommittedReason::Error(err))),
+                        },
+                    );
+                    self.send_back_result(seq_id, result);
+                    continue;
+                };
+            }
 
             self.insertion_to_prio_graph_time
                 .insert(priority_to_seq_id(next_batch_id.priority), Instant::now());
@@ -233,7 +237,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         // Schedule any available transactions in prio-graph
         let mut batches_for_scheduling = std::mem::take(&mut self.reusable_batches_for_scheduling);
         while let Some(worker_index) = self.get_best_available_worker() {
-            self.get_batches_for_scheduling(&mut batches_for_scheduling, container, slot);
+            self.get_batches_for_scheduling(&mut batches_for_scheduling, container, slot, self.extra_checks_enabled);
             if batches_for_scheduling.is_empty() {
                 break;
             }
@@ -268,6 +272,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         result: &mut Vec<(Vec<TransactionPriorityId>, bool)>,
         container: &mut impl StateContainer<Tx>,
         current_slot: Slot,
+        extra_checks_enabled: bool,
     ) {
         let working_bank = self.bank_forks.read().unwrap().working_bank();
 
@@ -297,33 +302,35 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 continue;
             };
 
-            let sanitized_txs = transaction_ids.iter()
-                .filter_map(|txn_id| container.get_transaction(*txn_id))
-                .map(|txn| txn.borrow())
-                .collect::<Vec<_>>();
-            let lock_results = (0..sanitized_txs.len()).map(|_| Ok(())).collect::<Vec<solana_transaction_error::TransactionResult<()>>>();
-            let check_result = working_bank.check_transactions::<Tx>(
-                &sanitized_txs,
-                lock_results.as_slice(),
-                MAX_PROCESSING_AGE,
-                &mut TransactionErrorMetrics::default());
-            if let Some((index, err)) = check_result
-                .iter()
-                .find_position(|res| res.is_err())
-                .map(|(i, res)| (i, res.as_ref().err().unwrap().clone()))
-            {
-                container.remove_by_id(next_batch_id.id);
-                self.prio_graph.unblock(&next_batch_id);
+            if extra_checks_enabled {
+                let sanitized_txs = transaction_ids.iter()
+                    .filter_map(|txn_id| container.get_transaction(*txn_id))
+                    .map(|txn| txn.borrow())
+                    .collect::<Vec<_>>();
+                let lock_results = (0..sanitized_txs.len()).map(|_| Ok(())).collect::<Vec<solana_transaction_error::TransactionResult<()>>>();
+                let check_result = working_bank.check_transactions::<Tx>(
+                    &sanitized_txs,
+                    lock_results.as_slice(),
+                    MAX_PROCESSING_AGE,
+                    &mut TransactionErrorMetrics::default());
+                if let Some((index, err)) = check_result
+                    .iter()
+                    .find_position(|res| res.is_err())
+                    .map(|(i, res)| (i, res.as_ref().err().unwrap().clone()))
+                {
+                    container.remove_by_id(next_batch_id.id);
+                    self.prio_graph.unblock(&next_batch_id);
 
-                let seq_id = priority_to_seq_id(next_batch_id.priority);
-                let result = atomic_txn_batch_result::Result::NotCommitted(
-                    jito_protos::proto::bam_types::NotCommitted {
-                        reason: Some(Self::convert_reason_to_proto(index, NotCommittedReason::Error(err))),
-                    },
-                );
-                self.send_back_result(seq_id, result);
-                continue;
-            };
+                    let seq_id = priority_to_seq_id(next_batch_id.priority);
+                    let result = atomic_txn_batch_result::Result::NotCommitted(
+                        jito_protos::proto::bam_types::NotCommitted {
+                            reason: Some(Self::convert_reason_to_proto(index, NotCommittedReason::Error(err))),
+                        },
+                    );
+                    self.send_back_result(seq_id, result);
+                    continue;
+                };
+            }
 
             if revert_on_error {
                 if !current_batch_ids.is_empty() {
@@ -923,7 +930,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Disabled for now
     fn test_scheduler_basic() {
         let (bank_forks, _) = test_bank_forks();
         let TestScheduler {
@@ -932,6 +938,7 @@ mod tests {
             finished_consume_work_sender,
             response_receiver,
         } = create_test_scheduler(4, &bank_forks);
+        scheduler.extra_checks_enabled = false;
 
         let keypair_a = Keypair::new();
 
