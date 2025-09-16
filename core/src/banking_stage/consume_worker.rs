@@ -394,12 +394,9 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         self.metrics.has_data.store(true, Ordering::Relaxed);
         let extra_info = if work.respond_with_extra_info {
             Some(FinishedConsumeWorkExtraInfo {
-                processed_results: vec![
-                    TransactionResult::NotCommitted(
-                        NotCommittedReason::PohTimeout,
-                    );
-                    num_retryable
-                ],
+                processed_results: (0..work.transactions.len()).map(|_| {
+                    TransactionResult::NotCommitted(NotCommittedReason::PohTimeout)
+                }).collect(),
             })
         } else {
             None
