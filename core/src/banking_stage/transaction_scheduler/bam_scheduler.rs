@@ -70,6 +70,7 @@ pub struct BamScheduler<Tx: TransactionWithMeta> {
     prio_graph: SchedulerPrioGraph,
     insertion_to_prio_graph_time: HashMap<u32, Instant>,
     time_in_priograph_us: Histogram,
+    time_in_worker_us: Histogram,
     slot: Option<Slot>,
 
     max_scheduled_per_worker: usize,
@@ -87,6 +88,7 @@ pub struct BamScheduler<Tx: TransactionWithMeta> {
 // A batch can either be one 'revert_on_error' batch or multiple
 // 'non-revert_on_error' batches that are scheduled together.
 struct InflightBatchInfo {
+    pub schedule_time: Instant,
     pub priority_ids: Vec<TransactionPriorityId>,
     pub worker_index: usize,
     pub slot: Slot,
@@ -111,6 +113,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             prio_graph: PrioGraph::new(passthrough_priority),
             insertion_to_prio_graph_time: HashMap::default(),
             time_in_priograph_us: Histogram::new(),
+            time_in_worker_us: Histogram::new(),
             slot: None,
             max_scheduled_per_worker,
             max_txn_per_batch,
@@ -322,6 +325,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         self.inflight_batch_info.insert(
             batch_id,
             InflightBatchInfo {
+                schedule_time: Instant::now(),
                 priority_ids,
                 worker_index,
                 slot,
@@ -587,6 +591,16 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             ("time_in_priograph_us_max", self.time_in_priograph_us.maximum().unwrap_or_default(), i64),
         );
         self.time_in_priograph_us.clear();
+
+        datapoint_info!(
+            "bam_scheduler_worker_time_metrics",
+            ("time_in_worker_us_p50", self.time_in_worker_us.percentile(50.0).unwrap_or_default(), i64),
+            ("time_in_worker_us_p75", self.time_in_worker_us.percentile(75.0).unwrap_or_default(), i64),
+            ("time_in_worker_us_p90", self.time_in_worker_us.percentile(90.0).unwrap_or_default(), i64),
+            ("time_in_worker_us_p99", self.time_in_worker_us.percentile(99.0).unwrap_or_default(), i64),
+            ("time_in_worker_us_max", self.time_in_worker_us.maximum().unwrap_or_default(), i64),
+        );
+        self.time_in_worker_us.clear();
     }
 }
 
@@ -632,6 +646,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
         self.maybe_bank_boundary_actions(decision, container);
 
         let mut num_transactions = 0;
+        let now = Instant::now();
         while let Ok(result) = self.finished_consume_work_receiver.try_recv() {
             num_transactions += result.work.ids.len();
             let batch_id = result.work.batch_id;
@@ -642,6 +657,11 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                 continue;
             };
             self.workers_scheduled_count[inflight_batch_info.worker_index] -= 1;
+
+            let _ = self.time_in_worker_us.increment(
+                now.duration_since(inflight_batch_info.schedule_time)
+                    .as_micros() as u64,
+            );
 
             // Should never not be 1; but just in case
             let len = if revert_on_error {

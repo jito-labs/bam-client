@@ -482,11 +482,7 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
 
         match decision {
             BufferedPacketsDecision::Consume(_) | BufferedPacketsDecision::Hold => loop {
-                if start.elapsed() > MAX_RECV_TIME {
-                    break;
-                }
-
-                if stats.num_received > MAX_PER_RECV {
+                if start.elapsed() > MAX_RECV_TIME || stats.num_received >= MAX_PER_RECV {
                     break;
                 }
 
