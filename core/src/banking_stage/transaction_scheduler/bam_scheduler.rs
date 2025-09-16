@@ -71,6 +71,8 @@ pub struct BamScheduler<Tx: TransactionWithMeta> {
     insertion_to_prio_graph_time: HashMap<u32, Instant>,
     time_in_priograph_us: Histogram,
     time_in_worker_us: Histogram,
+    time_between_schedule_us: Histogram,
+    last_schedule_time: Instant,
     slot: Option<Slot>,
 
     max_scheduled_per_worker: usize,
@@ -114,6 +116,8 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             insertion_to_prio_graph_time: HashMap::default(),
             time_in_priograph_us: Histogram::new(),
             time_in_worker_us: Histogram::new(),
+            time_between_schedule_us: Histogram::new(),
+            last_schedule_time: Instant::now(),
             slot: None,
             max_scheduled_per_worker,
             max_txn_per_batch,
@@ -631,6 +635,17 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             ("time_in_worker_us_max", self.time_in_worker_us.maximum().unwrap_or_default(), i64),
         );
         self.time_in_worker_us.clear();
+
+        datapoint_info!(
+            "bam_scheduler_time_between_schedules_metrics",
+            ("time_between_schedule_us_p50", self.time_between_schedule_us.percentile(50.0).unwrap_or_default(), i64),
+            ("time_between_schedule_us_p75", self.time_between_schedule_us.percentile(75.0).unwrap_or_default(), i64),
+            ("time_between_schedule_us_p90", self.time_between_schedule_us.percentile(90.0).unwrap_or_default(), i64),
+            ("time_between_schedule_us_p99", self.time_between_schedule_us.percentile(99.0).unwrap_or_default(), i64),
+            ("time_between_schedule_us_max", self.time_between_schedule_us.maximum().unwrap_or_default(), i64),
+        );
+        self.time_between_schedule_us.clear();
+        self.last_schedule_time = Instant::now();
     }
 }
 
@@ -645,6 +660,12 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
         let starting_buffer_size = container.buffer_size();
 
         let start_time = Instant::now();
+        let time_since_last_schedule = start_time.duration_since(self.last_schedule_time);
+        self.last_schedule_time = start_time;
+        let _ = self
+            .time_between_schedule_us
+            .increment(time_since_last_schedule.as_micros() as u64);
+
         let mut num_scheduled = 0;
 
         self.pull_into_prio_graph(container);
