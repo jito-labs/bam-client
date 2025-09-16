@@ -521,6 +521,9 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
                         continue;
                     }
                 };
+                stats.num_buffered = stats
+                    .num_buffered
+                    .saturating_add(txns_max_age.len());
 
                 if container
                     .insert_new_batch(
