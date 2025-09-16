@@ -258,8 +258,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
             return true;
         }
 
-        let keypair = cluster_info.keypair();
-
+        let keypair = cluster_info.keypair().clone();
         let initialize_tip_programs_bundle =
             tip_manager.get_initialize_tip_programs_bundle(bank, &keypair);
         if let Some(init_bundle) = initialize_tip_programs_bundle {
