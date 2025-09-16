@@ -171,7 +171,6 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 .filter_map(|txn_id| container.get_transaction(*txn_id))
                 .collect_vec();
 
-
             let lock_results = (0..txns.len())
                 .map(|_| Ok(()))
                 .collect::<Vec<solana_transaction_error::TransactionResult<()>>>();
