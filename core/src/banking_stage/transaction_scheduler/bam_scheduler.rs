@@ -146,6 +146,8 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             return;
         };
 
+        let working_bank = self.bank_forks.read().unwrap().working_bank();
+
         while let Some(next_batch_id) = container.pop() {
             let Some((batch_ids, _, batch_slot)) = container.get_batch(next_batch_id.id) else {
                 error!("Batch {} not found in container", next_batch_id.id);
@@ -162,7 +164,35 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
 
             let txns = batch_ids
                 .iter()
-                .filter_map(|txn_id| container.get_transaction(*txn_id));
+                .filter_map(|txn_id| container.get_transaction(*txn_id))
+                .collect_vec();
+
+
+            let lock_results = (0..txns.len())
+                .map(|_| Ok(()))
+                .collect::<Vec<solana_transaction_error::TransactionResult<()>>>();
+            let check_result = working_bank.check_transactions::<Tx>(
+                &txns,
+                lock_results.as_slice(),
+                MAX_PROCESSING_AGE,
+                &mut TransactionErrorMetrics::default());
+                        if let Some((index, err)) = check_result
+                .iter()
+                .find_position(|res| res.is_err())
+                .map(|(i, res)| (i, res.as_ref().err().unwrap().clone()))
+            {
+                container.remove_by_id(next_batch_id.id);
+
+                let seq_id = priority_to_seq_id(next_batch_id.priority);
+                let result = atomic_txn_batch_result::Result::NotCommitted(
+                    jito_protos::proto::bam_types::NotCommitted {
+                        reason: Some(Self::convert_reason_to_proto(index, NotCommittedReason::Error(err))),
+                    },
+                );
+                self.send_back_result(seq_id, result);
+                continue;
+            };
+
             self.insertion_to_prio_graph_time
                 .insert(priority_to_seq_id(next_batch_id.priority), Instant::now());
             self.prio_graph.insert_transaction(
