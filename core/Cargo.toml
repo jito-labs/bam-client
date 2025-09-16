@@ -65,6 +65,7 @@ derive_more = { workspace = true }
 etcd-client = { workspace = true, features = ["tls"] }
 futures = { workspace = true }
 histogram = { workspace = true }
+histogram_011 = { workspace = true }
 itertools = { workspace = true }
 jito-protos = { workspace = true }
 jito-tip-distribution = { workspace = true }
