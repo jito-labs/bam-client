@@ -709,7 +709,7 @@ impl BankingStage {
                                 bam_dependencies.outbound_sender.clone(),
                                 bam_scheduler::MAX_SCHEDULED_PER_WORKER,
                                 bam_scheduler::MAX_TXN_PER_BATCH,
-                                bank_forks.clone(),
+                                context.bank_forks.clone(),
                             );
                         let receive_and_buffer = BamReceiveAndBuffer::new(
                             bam_dependencies.bam_enabled.clone(),

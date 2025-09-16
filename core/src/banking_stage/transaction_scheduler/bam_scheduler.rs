@@ -13,7 +13,6 @@ use solana_clock::{Slot, MAX_PROCESSING_AGE};
 use solana_runtime::bank_forks::BankForks;
 use solana_svm::transaction_error_metrics::TransactionErrorMetrics;
 use std::{sync::{Arc, RwLock}, time::Instant};
-use crate::bam_dependencies::BamOutboundMessage;
 
 use {
     super::{
