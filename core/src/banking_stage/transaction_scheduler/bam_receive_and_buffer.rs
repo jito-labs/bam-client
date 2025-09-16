@@ -8,7 +8,7 @@ use crate::{
     bam_dependencies::BamOutboundMessage,
     banking_stage::transaction_scheduler::receive_and_buffer::ReceivingStats,
 };
-use crossbeam_channel::{RecvTimeoutError, TryRecvError};
+use crossbeam_channel::RecvTimeoutError;
 use solana_clock::MAX_PROCESSING_AGE;
 use solana_measure::{measure::Measure, measure_us};
 use solana_packet::{PacketFlags, PACKET_DATA_SIZE};
@@ -338,11 +338,12 @@ impl BamReceiveAndBuffer {
             ));
     }
 
-    fn parse_batch(
-        batch: &AtomicTxnBatch,
+    fn parse_deserialized_batch(
+        deserialized_batch: Vec<ImmutableDeserializedPacket>,
+        seq_id: u32,
+        revert_on_error: bool,
         bank_forks: &Arc<RwLock<BankForks>>,
         blacklisted_accounts: &HashSet<Pubkey>,
-        sigverify_stats: &Arc<SigverifyStats>,
     ) -> (Result<ParsedBatch, Reason>, ReceivingStats) {
         let mut stats = ReceivingStats {
             num_received: 0,
@@ -359,69 +360,6 @@ impl BamReceiveAndBuffer {
             receive_time_us: 0,
             buffer_time_us: 0,
         };
-
-        if batch.packets.is_empty() {
-            stats.num_dropped_without_parsing += 1;
-            return (
-                Err(Reason::DeserializationError(
-                    jito_protos::proto::bam_types::DeserializationError {
-                        index: 0,
-                        reason: DeserializationErrorReason::Empty as i32,
-                    },
-                )),
-                stats,
-            );
-        }
-
-        if batch.packets.len() > 5 {
-            stats.num_dropped_without_parsing += 1;
-            return (
-                Err(Reason::DeserializationError(
-                    jito_protos::proto::bam_types::DeserializationError {
-                        index: 0,
-                        reason: DeserializationErrorReason::SanitizeError as i32,
-                    },
-                )),
-                stats,
-            );
-        }
-
-        let Ok(revert_on_error) = batch
-            .packets
-            .iter()
-            .map(|p| {
-                p.meta
-                    .as_ref()
-                    .and_then(|meta| meta.flags.as_ref())
-                    .is_some_and(|flags| flags.revert_on_error)
-            })
-            .all_equal_value()
-        else {
-            stats.num_dropped_without_parsing += 1;
-            return (
-                Err(Reason::DeserializationError(
-                    jito_protos::proto::bam_types::DeserializationError {
-                        index: 0,
-                        reason: DeserializationErrorReason::InconsistentBundle as i32,
-                    },
-                )),
-                stats,
-            );
-        };
-
-        let parsed_packets =
-            Self::deserialize_packets(batch.packets.iter(), sigverify_stats).map_err(|(index, err)| {
-                let reason = convert_deserialize_error_to_proto(&err);
-                stats.num_dropped_on_parsing_and_sanitization += 1;
-                Reason::DeserializationError(jito_protos::proto::bam_types::DeserializationError {
-                    index: index as u32,
-                    reason: reason as i32,
-                })
-            });
-        if let Err(reason) = parsed_packets {
-            return (Err(reason), stats);
-        }
-        let parsed_packets = parsed_packets.unwrap();
 
         let (root_bank, working_bank) = {
             let bank_forks = bank_forks.read().unwrap();
@@ -440,7 +378,7 @@ impl BamReceiveAndBuffer {
 
         // Checks are taken from receive_and_buffer.rs:
         // SanitizedTransactionReceiveAndBuffer::buffer_packets
-        for (index, parsed_packet) in parsed_packets.into_iter().enumerate() {
+        for (index, parsed_packet) in deserialized_batch.into_iter().enumerate() {
             // Check 0: Reject vote transactions
             if parsed_packet.is_simple_vote() {
                 stats.num_dropped_on_parsing_and_sanitization += 1;
@@ -580,7 +518,7 @@ impl BamReceiveAndBuffer {
             packets.push(Arc::new(parsed_packet));
         }
 
-        let priority = seq_id_to_priority(batch.seq_id);
+        let priority = seq_id_to_priority(seq_id);
 
         (
             Ok(ParsedBatch {
@@ -593,7 +531,7 @@ impl BamReceiveAndBuffer {
         )
     }
 
-    fn batch_receive_until(&self, recv_timeout: Duration, packet_count_upperbound: usize) -> Result<(usize, Vec<AtomicTxnBatch>), ReceiveTimeoutError> {
+    fn batch_receive_until(&self, recv_timeout: Duration, packet_count_upperbound: usize) -> Result<(usize, Vec<AtomicTxnBatch>), RecvTimeoutError> {
         let start = Instant::now();
 
         let batch = self.bundle_receiver.recv_timeout(recv_timeout)?;
@@ -614,7 +552,7 @@ impl BamReceiveAndBuffer {
         Ok((num_packets_received, atomic_txn_batches))
     }
 
-    fn batch_deserialize_and_verify(&self, atomic_txn_batches: Vec<AtomicTxnBatch>) -> (Vec<Result<(Vec<ImmutableDeserializedPacket>, bool), Reason>>, ReceivingStats) {
+    fn batch_deserialize_and_verify(&self, atomic_txn_batches: Vec<AtomicTxnBatch>) -> (Vec<Result<(Vec<ImmutableDeserializedPacket>, bool, u32), (Reason, u32)>>, ReceivingStats) {
         fn proto_packet_to_packet(from_packet: &Packet) -> solana_packet::Packet {
             let mut to_packet = solana_packet::Packet::default();
             to_packet.meta_mut().size = from_packet.data.len();
@@ -654,27 +592,27 @@ impl BamReceiveAndBuffer {
         };
 
         // check basic constraints and extract revert_on_error flags
-        let pre_validated: Vec<Result<(&AtomicTxnBatch, bool), Reason>> = atomic_txn_batches
+        let pre_validated: Vec<Result<(&AtomicTxnBatch, bool, u32), (Reason, u32)>> = atomic_txn_batches
             .iter()
             .map(|atomic_txn_batch| {
                 if atomic_txn_batch.packets.is_empty() {
                     stats.num_dropped_without_parsing += 1;
-                    return Err(Reason::DeserializationError(
+                    return Err((Reason::DeserializationError(
                         jito_protos::proto::bam_types::DeserializationError {
                             index: 0,
                             reason: DeserializationErrorReason::Empty as i32,
                         },
-                    ));
+                    ), atomic_txn_batch.seq_id));
                 }
 
                 if atomic_txn_batch.packets.len() > 5 {
                     stats.num_dropped_without_parsing += 1;
-                    return Err(Reason::DeserializationError(
+                    return Err((Reason::DeserializationError(
                         jito_protos::proto::bam_types::DeserializationError {
                             index: 0,
                             reason: DeserializationErrorReason::SanitizeError as i32,
                         },
-                    ));
+                    ), atomic_txn_batch.seq_id));
                 }
 
                 let Ok(revert_on_error) = atomic_txn_batch
@@ -689,29 +627,27 @@ impl BamReceiveAndBuffer {
                     .all_equal_value()
                 else {
                     stats.num_dropped_without_parsing += 1;
-                    return Err(Reason::DeserializationError(
+                    return Err((Reason::DeserializationError(
                         jito_protos::proto::bam_types::DeserializationError {
                             index: 0,
                             reason: DeserializationErrorReason::InconsistentBundle as i32,
                         },
-                    ));
+                    ), atomic_txn_batch.seq_id));
                 };
 
-                Ok((atomic_txn_batch, revert_on_error))
+                Ok((atomic_txn_batch, revert_on_error, atomic_txn_batch.seq_id))
             })
             .collect();
 
         let mut packet_batches: Vec<solana_perf::packet::PacketBatch> = Vec::new();
-        for result in &pre_validated {
-            if let Ok((atomic_txn_batch, _)) = result {
-                let solana_packet_batch: Vec<solana_packet::Packet> = atomic_txn_batch
-                    .packets
-                    .iter()
-                    .map(proto_packet_to_packet)
-                    .collect();
-                packet_batches.push(solana_perf::packet::PinnedPacketBatch::new(solana_packet_batch).into());
-            }
-        }
+        pre_validated.iter().flatten().for_each(|result| {
+            let solana_packet_batch: Vec<solana_packet::Packet> = result.0
+                .packets
+                .iter()
+                .map(proto_packet_to_packet)
+                .collect();
+            packet_batches.push(solana_perf::packet::PinnedPacketBatch::new(solana_packet_batch).into());
+        });
 
         ed25519_verify_disabled(&mut packet_batches);
 
@@ -721,38 +657,39 @@ impl BamReceiveAndBuffer {
             .into_iter()
             .map(|pre_result| {
                 match pre_result {
-                    Err(reason) => Err(reason),
-                    Ok((_, revert_on_error)) => {
+                    Err((reason, seq_id)) => Err((reason, seq_id)),
+                    Ok((_, revert_on_error, seq_id)) => {
                         let batch = packet_batch_iter.next().unwrap();
 
                         // deserialize packets in batch
                         let mut deserialized_packets = Vec::with_capacity(batch.len());
                         for (i, packet) in batch.iter().enumerate() {
                             if packet.meta().discard() {
+                                let reason = convert_deserialize_error_to_proto(&DeserializedPacketError::SanitizeError(SanitizeError::InvalidValue));
                                 stats.num_dropped_on_parsing_and_sanitization += 1;
-                                return Err(Reason::DeserializationError(
+                                return Err((Reason::DeserializationError(
                                     jito_protos::proto::bam_types::DeserializationError {
                                         index: i as u32,
-                                        reason: DeserializationErrorReason::SanitizeError as i32,
+                                        reason: reason as i32,
                                     },
-                                ));
+                                ), seq_id));
                             }
                             
                             match ImmutableDeserializedPacket::new((&packet.to_bytes_packet()).into()) {
                                 Ok(deserialized) => deserialized_packets.push(deserialized),
                                 Err(_) => {
                                     stats.num_dropped_on_parsing_and_sanitization += 1;
-                                    return Err(Reason::DeserializationError(
+                                    return Err((Reason::DeserializationError(
                                         jito_protos::proto::bam_types::DeserializationError {
                                             index: i as u32,
                                             reason: DeserializationErrorReason::SanitizeError as i32,
                                         },
-                                    ));
+                                    ), seq_id));
                                 }
                             }
                         }
                         
-                        Ok((deserialized_packets, revert_on_error))
+                        Ok((deserialized_packets, revert_on_error, seq_id))
                     }
                 }
             })
@@ -798,66 +735,80 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
 
         match decision {
             BufferedPacketsDecision::Consume(_) | BufferedPacketsDecision::Hold => loop {
-                let (batches, receive_time_us) = measure_us!(self.receive_in_batches_with_timeout(
-                    MAX_RECEIVE_PACKETS,
-                    MAX_PACKET_RECEIVE_TIME
+                let (batches, receive_time_us) = measure_us!(self.batch_receive_until(
+                    MAX_PACKET_RECEIVE_TIME,
+                    MAX_RECEIVE_PACKETS
                 ));
                 stats.receive_time_us += receive_time_us;
 
-                if batches.is_empty() {
-                    // No more work to do
-                    break;
-                }
-
-                for batch in batches {
-                    match batch {
-                        Ok(batch) => {
-                            stats.num_received += 1;
-
-                        }
-                        Err(TryRecvError::Disconnected) => return Err(DisconnectedError),
+                let batches = match batches {
+                    Ok((_, batches)) => {
+                        stats.num_received += batches.len();
+                        batches
+                    },
+                    Err(RecvTimeoutError::Disconnected) => return Err(DisconnectedError),
+                    Err(RecvTimeoutError::Timeout) => {
+                        // No more work to do
+                        break;
                     }
-                }
+                };
 
                 // If BAM is not enabled, drain the channel
                 if !is_bam_enabled {
                     stats.num_dropped_without_parsing += stats.num_received;
                     continue;
                 }
-                
 
+                let (deserialized_batches_results, deserialize_stats) =
+                    self.batch_deserialize_and_verify(batches);
+                stats.accumulate(deserialize_stats);
 
-                let (parse_result, parse_stats) =
-                    Self::parse_batch(&batch, &self.bank_forks, &self.blacklisted_accounts, &self.stats);
-                stats.accumulate(parse_stats);
+                for result in deserialized_batches_results {
+                    match result {
+                        Ok((deserialized_batch, revert_on_error, seq_id)) => {
+                            let (parse_result, parse_stats) = Self::parse_deserialized_batch(
+                                deserialized_batch,
+                                seq_id,
+                                revert_on_error,
+                                &self.bank_forks,
+                                &self.blacklisted_accounts,
+                            );
+                            stats.accumulate(parse_stats);
 
-                let ParsedBatch {
-                    txns_max_age,
-                    cost,
-                    priority,
-                    revert_on_error,
-                } = match parse_result {
-                    Ok(parsed) => parsed,
-                    Err(reason) => {
-                        self.send_bundle_not_committed_result(batch.seq_id, reason);
-                        continue;
+                            let ParsedBatch {
+                                txns_max_age,
+                                cost,
+                                priority,
+                                revert_on_error,
+                            } = match parse_result {
+                                Ok(parsed) => parsed,
+                                Err(reason) => {
+                                    self.send_bundle_not_committed_result(seq_id, reason);
+                                    continue;
+                                }
+                            };
+
+                            if container
+                                .insert_new_batch(
+                                    txns_max_age,
+                                    priority,
+                                    cost,
+                                    revert_on_error,
+                                    u64::MAX, // max_schedule_slot is not used in BAM mode
+                                )
+                                .is_none()
+                            {
+                                stats.num_dropped_on_capacity += 1;
+                                self.send_container_full_txn_batch_result(seq_id);
+                                continue;
+                            };
+                        }
+                        Err((reason, seq_id)) => {
+                            self.send_bundle_not_committed_result(seq_id, reason);
+                            continue;
                     }
-                };
-
-                if container
-                    .insert_new_batch(
-                        txns_max_age,
-                        priority,
-                        cost,
-                        revert_on_error,
-                        batch.max_schedule_slot,
-                    )
-                    .is_none()
-                {
-                    stats.num_dropped_on_capacity += 1;
-                    self.send_container_full_txn_batch_result(batch.seq_id);
-                    continue;
-                };
+                }
+            }
             },
             BufferedPacketsDecision::ForwardAndHold | BufferedPacketsDecision::Forward => {
                 // Send back any batches that were received while in Forward/Hold state
