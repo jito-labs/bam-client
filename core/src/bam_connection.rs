@@ -203,7 +203,7 @@ impl BamConnection {
                             for batch in batches.batches {
                                 metrics.bundle_received.fetch_add(1, Relaxed);
                                 let _ = batch_sender.try_send(batch).inspect_err(|_| {
-                                    error!("Failed to send bundle to receiver");
+                                    metrics.bundle_forward_to_scheduler_fail.fetch_add(1, Relaxed);
                                 });
                             }
                         }
@@ -220,6 +220,7 @@ impl BamConnection {
     fn send_batch_results(
         outbound_sender: &mut mpsc::Sender<SchedulerMessage>,
         results: Vec<jito_protos::proto::bam_types::AtomicTxnBatchResult>,
+        metrics: &BamConnectionMetrics,
     ) {
         if !results.is_empty() {
             let outbound = SchedulerMessageV0 {
@@ -227,8 +228,10 @@ impl BamConnection {
                     jito_protos::proto::bam_types::MultipleAtomicTxnBatchResult { results },
                 )),
             };
-            if let Err(e) = outbound_sender.try_send(v0_to_versioned_proto(outbound)) {
-                error!("Failed to send outbound message with results: {:?}", e);
+            if let Err(_) = outbound_sender.try_send(v0_to_versioned_proto(outbound)) {
+                metrics.outbound_fail.fetch_add(1, Relaxed);
+            } else {
+                metrics.outbound_sent.fetch_add(1, Relaxed);
             }
         }
     }
@@ -282,22 +285,24 @@ impl BamConnection {
                                 let outbound = SchedulerMessageV0 {
                                     msg: Some(Msg::LeaderState(leader_state)),
                                 };
-                                let _ = outbound_sender.try_send(v0_to_versioned_proto(outbound)).inspect_err(|_| {
-                                    error!("Failed to send outbound message");
-                                });
+                                if let Err(_) = outbound_sender.try_send(v0_to_versioned_proto(outbound)) {
+                                    metrics.outbound_fail.fetch_add(1, Relaxed);
+                                } else {
+                                    metrics.outbound_sent.fetch_add(1, Relaxed);
+                                }
                             }
                             BamOutboundMessage::AtomicTxnBatchResult(result) => {
                                 metrics.bundleresult_sent.fetch_add(1, Relaxed);
                                 waiting_results.push(result);
                                 const MAX_WAITING_RESULTS: usize = 24;
                                 if waiting_results.len() >= MAX_WAITING_RESULTS {
-                                    Self::send_batch_results(&mut outbound_sender, std::mem::take(&mut waiting_results));
+                                    Self::send_batch_results(&mut outbound_sender, std::mem::take(&mut waiting_results), metrics.as_ref());
                                 }
                             }
                             _ => {}
                         }
                     }
-                    Self::send_batch_results(&mut outbound_sender, std::mem::take(&mut waiting_results));
+                    Self::send_batch_results(&mut outbound_sender, std::mem::take(&mut waiting_results), metrics.as_ref());
                 }
             }
         }
@@ -366,6 +371,7 @@ impl Drop for BamConnection {
 #[derive(Default)]
 struct BamConnectionMetrics {
     bundle_received: AtomicU64,
+    bundle_forward_to_scheduler_fail: AtomicU64,
     heartbeat_received: AtomicU64,
     builder_config_received: AtomicU64,
 
@@ -375,6 +381,7 @@ struct BamConnectionMetrics {
     bundleresult_sent: AtomicU64,
     heartbeat_sent: AtomicU64,
     outbound_sent: AtomicU64,
+    outbound_fail: AtomicU64,
 }
 
 impl BamConnectionMetrics {
@@ -384,6 +391,11 @@ impl BamConnectionMetrics {
             (
                 "bundle_received",
                 self.bundle_received.swap(0, Relaxed) as i64,
+                i64
+            ),
+            (
+                "bundle_forward_to_scheduler_fail",
+                self.bundle_forward_to_scheduler_fail.swap(0, Relaxed) as i64,
                 i64
             ),
             (
@@ -419,6 +431,11 @@ impl BamConnectionMetrics {
             (
                 "outbound_sent",
                 self.outbound_sent.swap(0, Relaxed) as i64,
+                i64
+            ),
+            (
+                "outbound_fail",
+                self.outbound_fail.swap(0, Relaxed) as i64,
                 i64
             ),
         );
