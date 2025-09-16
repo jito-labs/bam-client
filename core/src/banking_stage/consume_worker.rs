@@ -270,7 +270,10 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
             );
             if result
                 .execute_and_commit_transactions_output
-                .error_counters.total.0 > 0
+                .error_counters
+                .total
+                .0
+                > 0
             {
                 return false;
             }
@@ -290,7 +293,10 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
                 );
                 if result
                     .execute_and_commit_transactions_output
-                    .error_counters.total.0 > 0
+                    .error_counters
+                    .total
+                    .0
+                    > 0
                 {
                     return false;
                 }
