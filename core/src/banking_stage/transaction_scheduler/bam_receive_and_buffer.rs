@@ -437,6 +437,8 @@ impl BamReceiveAndBuffer {
     }
 }
 
+const MAX_PER_RECV: usize = 1000;
+
 struct ParsedBatch {
     pub txns_max_age: Vec<(RuntimeTransaction<SanitizedTransaction>, MaxAge)>,
     pub cost: u64,
@@ -481,6 +483,10 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
         match decision {
             BufferedPacketsDecision::Consume(_) | BufferedPacketsDecision::Hold => loop {
                 if start.elapsed() > MAX_RECV_TIME {
+                    break;
+                }
+
+                if stats.num_received > MAX_PER_RECV {
                     break;
                 }
 
@@ -535,8 +541,7 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
                     continue;
                 };
 
-                result = result.saturating_add(1);
-                return Ok(result);
+                stats.num_buffered += 1;
             },
             BufferedPacketsDecision::ForwardAndHold | BufferedPacketsDecision::Forward => {
                 // Send back any batches that were received while in Forward/Hold state
