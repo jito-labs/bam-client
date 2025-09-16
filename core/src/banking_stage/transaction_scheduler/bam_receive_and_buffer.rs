@@ -172,7 +172,7 @@ impl SigverifyStats {
     pub fn increment_verify_batches_pp_us(&self, us: u64, packet_count: usize) {
         if packet_count > 0 {
             self.verify_batches_pp_us_hist
-                .increment((us as u64) / (packet_count as u64)).unwrap();
+                .increment(us / (packet_count as u64)).unwrap();
         }
     }
 
@@ -280,7 +280,7 @@ impl BamReceiveAndBuffer {
         }
 
         verify_packet_batch_time_us.stop();
-        stats.increment_verify_batches_pp_us(verify_packet_batch_time_us.as_us() as u64, packet_count);
+        stats.increment_verify_batches_pp_us(verify_packet_batch_time_us.as_us(), packet_count);
         stats.increment_batch_packets_len(packet_count);
         stats.increment_total_verify_time(verify_packet_batch_time_us.as_us());
         stats.increment_total_packets_verified(packet_count);
@@ -549,10 +549,10 @@ impl BamReceiveAndBuffer {
             }
         }
 
-        Ok((num_packets_received, atomic_txn_batches))
+        Ok((num_packets_received, atomic_txn_batches)) 
     }
 
-    fn batch_deserialize_and_verify(&self, atomic_txn_batches: Vec<AtomicTxnBatch>) -> (Vec<Result<(Vec<ImmutableDeserializedPacket>, bool, u32), (Reason, u32)>>, ReceivingStats) {
+    fn batch_deserialize_and_verify(&self, atomic_txn_batches: Vec<AtomicTxnBatch>, sigverify_stats: &Arc<SigverifyStats>) -> (Vec<Result<(Vec<ImmutableDeserializedPacket>, bool, u32), (Reason, u32)>>, ReceivingStats) {
         fn proto_packet_to_packet(from_packet: &Packet) -> solana_packet::Packet {
             let mut to_packet = solana_packet::Packet::default();
             to_packet.meta_mut().size = from_packet.data.len();
@@ -640,16 +640,26 @@ impl BamReceiveAndBuffer {
             .collect();
 
         let mut packet_batches: Vec<solana_perf::packet::PacketBatch> = Vec::new();
+        let mut packet_count = 0;
         pre_validated.iter().flatten().for_each(|result| {
             let solana_packet_batch: Vec<solana_packet::Packet> = result.0
                 .packets
                 .iter()
                 .map(proto_packet_to_packet)
                 .collect();
+            packet_count += solana_packet_batch.len();
             packet_batches.push(solana_perf::packet::PinnedPacketBatch::new(solana_packet_batch).into());
         });
 
+        let mut verify_packet_batch_time_us = Measure::start("verify_packet_batch_time_us");
         ed25519_verify_disabled(&mut packet_batches);
+        verify_packet_batch_time_us.stop();
+        
+        sigverify_stats.increment_verify_batches_pp_us(verify_packet_batch_time_us.as_us(), packet_count);
+        sigverify_stats.increment_batch_packets_len(packet_count);
+        sigverify_stats.increment_total_verify_time(verify_packet_batch_time_us.as_us());
+        sigverify_stats.increment_total_packets_verified(packet_count);
+        sigverify_stats.increment_total_batches_verified(packet_batches.len());
 
         // process post sigverify results
         let mut packet_batch_iter = packet_batches.iter();
@@ -760,7 +770,7 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
                 }
 
                 let (deserialized_batches_results, deserialize_stats) =
-                    self.batch_deserialize_and_verify(batches);
+                    self.batch_deserialize_and_verify(batches, &self.stats);
                 stats.accumulate(deserialize_stats);
 
                 for result in deserialized_batches_results {
