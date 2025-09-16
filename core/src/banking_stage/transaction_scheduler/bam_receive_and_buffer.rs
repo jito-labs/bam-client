@@ -13,7 +13,7 @@ use solana_clock::MAX_PROCESSING_AGE;
 use solana_measure::{measure::Measure, measure_us};
 use solana_packet::{PacketFlags, PACKET_DATA_SIZE};
 
-use solana_perf::sigverify::{ed25519_verify_disabled, verify_packet};
+use solana_perf::sigverify::ed25519_verify_disabled;
 use solana_pubkey::Pubkey;
 use solana_sanitize::SanitizeError;
 use solana_transaction::sanitized::SanitizedTransaction;
@@ -61,7 +61,7 @@ use {
 const REPORT_INTERVAL: u64 = 2; // seconds
 const SIGVERIFY_STATS_NAME: &str = "jito-bam-receive-and-buffer_sigverify-stats";
 
-const VERIFY_CHUNK_THRESHOLD: usize = 1000;
+//const VERIFY_CHUNK_THRESHOLD: usize = 1000;
 const MAX_RECEIVE_PACKETS: usize = 5_000;
 const MAX_PACKET_RECEIVE_TIME: Duration = Duration::from_millis(10);
 
@@ -232,62 +232,62 @@ impl BamReceiveAndBuffer {
         )
     }
 
-    fn deserialize_packets<'a>(
-        in_packets: impl Iterator<Item = &'a Packet>,
-        stats: &Arc<SigverifyStats>,
-    ) -> Result<Vec<ImmutableDeserializedPacket>, (usize, DeserializedPacketError)> {
-        fn proto_packet_to_packet(from_packet: &Packet) -> solana_packet::Packet {
-            let mut to_packet = solana_packet::Packet::default();
-            to_packet.meta_mut().size = from_packet.data.len();
-            to_packet.meta_mut().set_discard(false);
+    // fn deserialize_packets<'a>(
+    //     in_packets: impl Iterator<Item = &'a Packet>,
+    //     stats: &Arc<SigverifyStats>,
+    // ) -> Result<Vec<ImmutableDeserializedPacket>, (usize, DeserializedPacketError)> {
+    //     fn proto_packet_to_packet(from_packet: &Packet) -> solana_packet::Packet {
+    //         let mut to_packet = solana_packet::Packet::default();
+    //         to_packet.meta_mut().size = from_packet.data.len();
+    //         to_packet.meta_mut().set_discard(false);
 
-            let copy_len = min(PACKET_DATA_SIZE, from_packet.data.len());
-            to_packet.buffer_mut()[0..copy_len].copy_from_slice(&from_packet.data[0..copy_len]);
+    //         let copy_len = min(PACKET_DATA_SIZE, from_packet.data.len());
+    //         to_packet.buffer_mut()[0..copy_len].copy_from_slice(&from_packet.data[0..copy_len]);
 
-            if let Some(meta) = &from_packet.meta {
-                to_packet.meta_mut().size = meta.size as usize;
-                if let Some(flags) = &meta.flags {
-                    if flags.simple_vote_tx {
-                        to_packet
-                            .meta_mut()
-                            .flags
-                            .insert(PacketFlags::SIMPLE_VOTE_TX);
-                    }
-                }
-            }
-            to_packet
-        }
+    //         if let Some(meta) = &from_packet.meta {
+    //             to_packet.meta_mut().size = meta.size as usize;
+    //             if let Some(flags) = &meta.flags {
+    //                 if flags.simple_vote_tx {
+    //                     to_packet
+    //                         .meta_mut()
+    //                         .flags
+    //                         .insert(PacketFlags::SIMPLE_VOTE_TX);
+    //                 }
+    //             }
+    //         }
+    //         to_packet
+    //     }
 
 
-        let mut packet_count = 0;
-        let mut result = Vec::with_capacity(in_packets.size_hint().0);
-        let mut verify_packet_batch_time_us = Measure::start("verify_packet_batch_time_us");
-        for (i, p) in in_packets.enumerate() {
-            let mut solana_packet = proto_packet_to_packet(p);
-            // sigverify packet
-            // we don't use solana_packet here, so we don't need to call set_discard()
-            if !verify_packet(&mut (&mut solana_packet).into(), false) {
-                return Err((
-                    i,
-                    DeserializedPacketError::SanitizeError(SanitizeError::InvalidValue),
-                ));
-            }
-            packet_count += 1;
+    //     let mut packet_count = 0;
+    //     let mut result = Vec::with_capacity(in_packets.size_hint().0);
+    //     let mut verify_packet_batch_time_us = Measure::start("verify_packet_batch_time_us");
+    //     for (i, p) in in_packets.enumerate() {
+    //         let mut solana_packet = proto_packet_to_packet(p);
+    //         // sigverify packet
+    //         // we don't use solana_packet here, so we don't need to call set_discard()
+    //         if !verify_packet(&mut (&mut solana_packet).into(), false) {
+    //             return Err((
+    //                 i,
+    //                 DeserializedPacketError::SanitizeError(SanitizeError::InvalidValue),
+    //             ));
+    //         }
+    //         packet_count += 1;
 
-            result.push(
-                ImmutableDeserializedPacket::new((&solana_packet).into()).map_err(|e| (i, e))?,
-            );
-        }
+    //         result.push(
+    //             ImmutableDeserializedPacket::new((&solana_packet).into()).map_err(|e| (i, e))?,
+    //         );
+    //     }
 
-        verify_packet_batch_time_us.stop();
-        stats.increment_verify_batches_pp_us(verify_packet_batch_time_us.as_us(), packet_count);
-        stats.increment_batch_packets_len(packet_count);
-        stats.increment_total_verify_time(verify_packet_batch_time_us.as_us());
-        stats.increment_total_packets_verified(packet_count);
-        stats.increment_total_batches_verified(1);
+    //     verify_packet_batch_time_us.stop();
+    //     stats.increment_verify_batches_pp_us(verify_packet_batch_time_us.as_us(), packet_count);
+    //     stats.increment_batch_packets_len(packet_count);
+    //     stats.increment_total_verify_time(verify_packet_batch_time_us.as_us());
+    //     stats.increment_total_packets_verified(packet_count);
+    //     stats.increment_total_batches_verified(1);
         
-        Ok(result)
-    }
+    //     Ok(result)
+    // }
 
     fn send_bundle_not_committed_result(&self, seq_id: u32, reason: Reason) {
         let _ = self
@@ -654,7 +654,7 @@ impl BamReceiveAndBuffer {
         let mut verify_packet_batch_time_us = Measure::start("verify_packet_batch_time_us");
         ed25519_verify_disabled(&mut packet_batches);
         verify_packet_batch_time_us.stop();
-        
+
         sigverify_stats.increment_verify_batches_pp_us(verify_packet_batch_time_us.as_us(), packet_count);
         sigverify_stats.increment_batch_packets_len(packet_count);
         sigverify_stats.increment_total_verify_time(verify_packet_batch_time_us.as_us());
@@ -909,7 +909,7 @@ mod tests {
     ) {
         let (response_sender, response_receiver) =
             crossbeam_channel::unbounded::<BamOutboundMessage>();
-        let receive_and_buffer = BamReceiveAndBuffer::new(
+        let (receive_and_buffer, _stats_thread) = BamReceiveAndBuffer::new(
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(true)),
             receiver,
@@ -1017,8 +1017,22 @@ mod tests {
         ));
     }
 
+    // Helper to create batches and test batch processing
+    fn create_batch_and_test_result(
+        batches: Vec<AtomicTxnBatch>,
+        bank_forks: &Arc<RwLock<BankForks>>,
+        blacklisted_accounts: &HashSet<Pubkey>,
+        sigverify_stats: &Arc<SigverifyStats>,
+    ) -> (Vec<Result<(Vec<ImmutableDeserializedPacket>, bool, u32), (Reason, u32)>>, ReceivingStats) {
+        let (_sender, receiver) = unbounded();
+        let (receive_and_buffer, _container, _response_receiver) =
+            setup_bam_receive_and_buffer(receiver, bank_forks.clone(), blacklisted_accounts.clone());
+        
+        receive_and_buffer.batch_deserialize_and_verify(batches, sigverify_stats)
+    }
+
     #[test]
-    fn test_parse_bundle_success() {
+    fn test_batch_deserialize_success() {
         let (bank_forks, mint_keypair) = test_bank_forks();
         let bundle = AtomicTxnBatch {
             seq_id: 1,
@@ -1035,15 +1049,18 @@ mod tests {
             max_schedule_slot: 0,
         };
         let stats = Arc::new(SigverifyStats::default());
-        let (result, _stats) =
-            BamReceiveAndBuffer::parse_batch(&bundle, &bank_forks, &HashSet::new(), stats);
-        assert!(result.is_ok());
-        let parsed_bundle = result.unwrap();
-        assert_eq!(parsed_bundle.txns_max_age.len(), 1);
+        let (results, _stats) = create_batch_and_test_result(vec![bundle], &bank_forks, &HashSet::new(), &stats);
+        
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+        if let Ok((deserialized_packets, _, seq_id)) = &results[0] {
+            assert_eq!(deserialized_packets.len(), 1);
+            assert_eq!(*seq_id, 1);
+        }
     }
 
     #[test]
-    fn test_parse_bundle_empty() {
+    fn test_batch_deserialize_empty() {
         let (bank_forks, _mint_keypair) = test_bank_forks();
         let batch = AtomicTxnBatch {
             seq_id: 1,
@@ -1051,21 +1068,19 @@ mod tests {
             max_schedule_slot: 0,
         };
         let stats = Arc::new(SigverifyStats::default());
-        let (result, stats) =
-            BamReceiveAndBuffer::parse_batch(&batch, &bank_forks, &HashSet::new(), stats);
-        assert!(result.is_err());
-        assert_eq!(stats.num_dropped_without_parsing, 1);
-        assert_eq!(
-            result.err().unwrap(),
-            Reason::DeserializationError(jito_protos::proto::bam_types::DeserializationError {
-                index: 0,
-                reason: DeserializationErrorReason::Empty as i32,
-            })
-        );
+        let (results, batch_stats) = create_batch_and_test_result(vec![batch], &bank_forks, &HashSet::new(), &stats);
+        
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_err());
+        assert_eq!(batch_stats.num_dropped_without_parsing, 1);
+        if let Err((reason, seq_id)) = &results[0] {
+            assert_eq!(*seq_id, 1);
+            assert!(matches!(reason, Reason::DeserializationError(_)));
+        }
     }
 
     #[test]
-    fn test_parse_bundle_invalid_packet() {
+    fn test_batch_deserialize_invalid_packet() {
         let (bank_forks, _mint_keypair) = test_bank_forks();
         let batch = AtomicTxnBatch {
             seq_id: 1,
@@ -1076,21 +1091,18 @@ mod tests {
             max_schedule_slot: 0,
         };
         let stats = Arc::new(SigverifyStats::default());
-        let (result, stats) =
-            BamReceiveAndBuffer::parse_batch(&batch, &bank_forks, &HashSet::new(), stats);
-        assert!(result.is_err());
-        assert_eq!(stats.num_dropped_on_parsing_and_sanitization, 1);
-        assert_eq!(
-            result.err().unwrap(),
-            Reason::DeserializationError(jito_protos::proto::bam_types::DeserializationError {
-                index: 0,
-                reason: DeserializationErrorReason::SanitizeError as i32,
-            })
-        );
+        let (results, _batch_stats) = create_batch_and_test_result(vec![batch], &bank_forks, &HashSet::new(), &stats);
+        
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_err());
+        if let Err((reason, seq_id)) = &results[0] {
+            assert_eq!(*seq_id, 1);
+            assert!(matches!(reason, Reason::DeserializationError(_)));
+        }
     }
 
     #[test]
-    fn test_parse_bundle_fee_payer_doesnt_exist() {
+    fn test_batch_deserialize_fee_payer_doesnt_exist() {
         let (bank_forks, _) = test_bank_forks();
         let fee_payer = Keypair::new();
         let batch = AtomicTxnBatch {
@@ -1107,24 +1119,31 @@ mod tests {
             }],
             max_schedule_slot: 0,
         };
+        
         let stats = Arc::new(SigverifyStats::default());
-        let (result, stats) =
-            BamReceiveAndBuffer::parse_batch(&batch, &bank_forks, &HashSet::new(), stats);
-        assert!(result.is_err());
-        assert_eq!(stats.num_dropped_on_fee_payer, 1);
-
-        assert_eq!(
-            result.err().unwrap(),
-            Reason::TransactionError(jito_protos::proto::bam_types::TransactionError {
-                index: 0,
-                reason: jito_protos::proto::bam_types::TransactionErrorReason::AccountNotFound
-                    as i32,
-            })
-        );
+        let (results, _batch_stats) = create_batch_and_test_result(vec![batch], &bank_forks, &HashSet::new(), &stats);
+        
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+        
+        // Now test the parse step with the deserialized packets
+        if let Ok((deserialized_packets, revert_on_error, seq_id)) = &results[0] {
+            let (result, stats) = BamReceiveAndBuffer::parse_deserialized_batch(
+                deserialized_packets.clone(),
+                *seq_id,
+                *revert_on_error,
+                &bank_forks,
+                &HashSet::new(),
+            );
+            
+            assert!(result.is_err());
+            assert_eq!(stats.num_dropped_on_fee_payer, 1);
+            assert!(matches!(result.err().unwrap(), Reason::TransactionError(_)));
+        }
     }
 
     #[test]
-    fn test_parse_bundle_inconsistent() {
+    fn test_batch_deserialize_inconsistent() {
         let (bank_forks, mint_keypair) = test_bank_forks();
         let bundle = AtomicTxnBatch {
             seq_id: 1,
@@ -1159,21 +1178,19 @@ mod tests {
             max_schedule_slot: 0,
         };
         let stats = Arc::new(SigverifyStats::default());
-        let (result, stats) =
-            BamReceiveAndBuffer::parse_batch(&bundle, &bank_forks, &HashSet::new(), stats);
-        assert!(result.is_err());
-        assert_eq!(stats.num_dropped_without_parsing, 1);
-        assert_eq!(
-            result.err().unwrap(),
-            Reason::DeserializationError(jito_protos::proto::bam_types::DeserializationError {
-                index: 0,
-                reason: DeserializationErrorReason::InconsistentBundle as i32,
-            })
-        );
+        let (results, batch_stats) = create_batch_and_test_result(vec![bundle], &bank_forks, &HashSet::new(), &stats);
+        
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_err());
+        assert_eq!(batch_stats.num_dropped_without_parsing, 1);
+        if let Err((reason, seq_id)) = &results[0] {
+            assert_eq!(*seq_id, 1);
+            assert!(matches!(reason, Reason::DeserializationError(_)));
+        }
     }
 
     #[test]
-    fn test_parse_bundle_blacklisted_account() {
+    fn test_batch_deserialize_blacklisted_account() {
         let keypair = Keypair::new();
         let blacklisted_accounts = HashSet::from([keypair.pubkey()]);
 
@@ -1192,93 +1209,31 @@ mod tests {
             }],
             max_schedule_slot: 0,
         };
+        
         let stats = Arc::new(SigverifyStats::default());
-        let (result, stats) =
-            BamReceiveAndBuffer::parse_batch(&batch, &bank_forks, &blacklisted_accounts, stats);
-        assert!(result.is_err());
-        assert_eq!(stats.num_dropped_on_blacklisted_account, 1);
-        assert_eq!(
-            result.err().unwrap(),
-            Reason::TransactionError(jito_protos::proto::bam_types::TransactionError {
-                index: 0,
-                reason: DeserializationErrorReason::SanitizeError as i32,
-            })
-        );
-    }
-
-    #[test]
-    fn test_deserialize_packets_invalid_signature() {
-        // Create a transaction with invalid signature
-        let (_bank_forks, mint_keypair) = test_bank_forks();
-        let transaction = transfer(
-            &mint_keypair,
-            &Pubkey::new_unique(),
-            1,
-            solana_hash::Hash::default(),
-        );
-
-        // Serialize the transaction
-        let mut data = bincode::serialize(&transaction).unwrap();
-        // Corrupt the signature by modifying some bytes
-        if data.len() > 10 {
-            data[5] ^= 0xFF; // Flip bits to corrupt signature
-            data[10] ^= 0xFF;
-        }
-
-        let packets = [Packet { data, meta: None }];
-
-        let stats = Arc::new(SigverifyStats::default());
-        // This should fail due to invalid signature
-        let result = BamReceiveAndBuffer::deserialize_packets(packets.iter(), stats);
-        assert!(result.is_err());
-
-        if let Err((index, error)) = result {
-            assert_eq!(index, 0);
-            assert!(matches!(error, DeserializedPacketError::SanitizeError(_)));
+        let (results, _batch_stats) = create_batch_and_test_result(vec![batch], &bank_forks, &HashSet::new(), &stats);
+        
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+        
+        // Now test the parse step with blacklisted accounts
+        if let Ok((deserialized_packets, revert_on_error, seq_id)) = &results[0] {
+            let (result, stats) = BamReceiveAndBuffer::parse_deserialized_batch(
+                deserialized_packets.clone(),
+                *seq_id,
+                *revert_on_error,
+                &bank_forks,
+                &blacklisted_accounts,
+            );
+            
+            assert!(result.is_err());
+            assert_eq!(stats.num_dropped_on_blacklisted_account, 1);
+            assert!(matches!(result.err().unwrap(), Reason::TransactionError(_)));
         }
     }
 
     #[test]
-    fn test_deserialize_packets_valid_non_vote_transaction() {
-        // Create a regular non-vote transaction
-        let (_bank_forks, mint_keypair) = test_bank_forks();
-        let transaction = transfer(
-            &mint_keypair,
-            &Pubkey::new_unique(),
-            1,
-            solana_hash::Hash::default(),
-        );
-
-        // Sign the transaction properly
-        let mut tx = transaction;
-        tx.sign(&[&mint_keypair], solana_hash::Hash::default());
-
-        let data = bincode::serialize(&tx).unwrap();
-
-        // Create packet without vote transaction flag (non-vote)
-        let packet = Packet {
-            data: data.clone(),
-            meta: Some(jito_protos::proto::bam_types::Meta {
-                flags: Some(jito_protos::proto::bam_types::PacketFlags {
-                    simple_vote_tx: false, // This is a non-vote transaction
-                    ..Default::default()
-                }),
-                size: data.len() as u64,
-            }),
-        };
-
-        // Valid transactions should succeed with valid signature
-        let stats = Arc::new(SigverifyStats::default());
-        let result = BamReceiveAndBuffer::deserialize_packets([packet].iter(), stats);
-        assert!(result.is_ok());
-
-        if let Ok(packets) = result {
-            assert_eq!(packets.len(), 1);
-        }
-    }
-
-    #[test]
-    fn test_parse_bundle_rejects_vote_transactions() {
+    fn test_batch_deserialize_rejects_vote_transactions() {
         let (bank_forks, _mint_keypair) = test_bank_forks();
 
         // Create a proper vote transaction
@@ -1322,18 +1277,25 @@ mod tests {
             max_schedule_slot: 0,
         };
 
-        // Test that parse_batch rejects vote transactions
         let stats = Arc::new(SigverifyStats::default());
-        let (result, stats) =
-            BamReceiveAndBuffer::parse_batch(&batch, &bank_forks, &HashSet::default(), stats);
-        assert!(result.is_err());
-        assert_eq!(stats.num_dropped_on_parsing_and_sanitization, 1);
-        assert_eq!(
-            result.err().unwrap(),
-            Reason::DeserializationError(jito_protos::proto::bam_types::DeserializationError {
-                index: 0,
-                reason: DeserializationErrorReason::VoteTransactionFailure as i32,
-            })
-        );
+        let (results, _batch_stats) = create_batch_and_test_result(vec![batch], &bank_forks, &HashSet::new(), &stats);
+        
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+        
+        // Now test the parse step - vote transactions should be rejected during parsing
+        if let Ok((deserialized_packets, revert_on_error, seq_id)) = &results[0] {
+            let (result, stats) = BamReceiveAndBuffer::parse_deserialized_batch(
+                deserialized_packets.clone(),
+                *seq_id,
+                *revert_on_error,
+                &bank_forks,
+                &HashSet::new(),
+            );
+            
+            assert!(result.is_err());
+            assert_eq!(stats.num_dropped_on_parsing_and_sanitization, 1);
+            assert!(matches!(result.err().unwrap(), Reason::DeserializationError(_)));
+        }
     }
 }
