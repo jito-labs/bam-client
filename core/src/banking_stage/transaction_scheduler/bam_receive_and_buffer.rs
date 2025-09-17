@@ -57,7 +57,7 @@ use {
 };
 
 // Report interval for sigverify stats
-const REPORT_INTERVAL: u128 = 500; // half a second
+const REPORT_INTERVAL: u128 = 2_000; // two seconds
 const SIGVERIFY_STATS_NAME: &str = "jito-bam-receive-and-buffer_sigverify-stats";
 
 pub struct BamReceiveAndBuffer {
