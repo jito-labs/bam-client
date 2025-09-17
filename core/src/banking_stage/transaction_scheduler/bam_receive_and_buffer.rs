@@ -21,7 +21,7 @@ use std::{
     cmp::min,
     collections::HashSet,
     sync::{
-        atomic::{AtomicBool, Ordering, AtomicU64, AtomicUsize},
+        atomic::{AtomicBool, Ordering},
         Arc, RwLock,
     },
     time::{Duration, Instant},
@@ -43,7 +43,7 @@ use {
     },
     crossbeam_channel::Sender,
     itertools::Itertools,
-    histogram_011::AtomicHistogram,
+    histogram::Histogram,
     jito_protos::proto::bam_types::{
         atomic_txn_batch_result, not_committed::Reason, AtomicTxnBatch, DeserializationErrorReason,
         Packet, SchedulingError,
@@ -56,142 +56,81 @@ use {
     solana_svm::transaction_error_metrics::TransactionErrorMetrics,
 };
 
-// Report interval for sigverify stats
-const REPORT_INTERVAL: u128 = 2_000; // milliseconds
-const SIGVERIFY_STATS_NAME: &str = "jito-bam-receive-and-buffer_sigverify-stats";
-
-//const VERIFY_CHUNK_THRESHOLD: usize = 1000;
-const MAX_RECEIVE_PACKETS: usize = 1_000;
-const MAX_PACKET_RECEIVE_TIME: Duration = Duration::from_millis(10);
-
 pub struct BamReceiveAndBuffer {
     bam_enabled: Arc<AtomicBool>,
     bundle_receiver: crossbeam_channel::Receiver<AtomicTxnBatch>,
     response_sender: Sender<BamOutboundMessage>,
     bank_forks: Arc<RwLock<BankForks>>,
     blacklisted_accounts: HashSet<Pubkey>,
-    stats: Arc<SigverifyStats>,
+    stats: SigverifyStats,
     last_report: Instant,
 }
 
-
 pub struct SigverifyStats {
-    pub verify_batches_pp_us_hist: AtomicHistogram,
-    pub batch_packets_len_hist: AtomicHistogram,
-    pub total_verify_time_us: AtomicU64,
-    pub total_packets_verified: AtomicUsize,
-    pub total_batches_verified: AtomicUsize,
+    pub verify_batches_pp_us_hist: Histogram,
+    pub batch_packets_len_hist: Histogram,
+    pub total_verify_time_us: u64,
+    pub total_packets_verified: usize,
+    pub total_batches_verified: usize,
 }
 
 impl Default for SigverifyStats {
     fn default() -> Self {
         Self {
-            verify_batches_pp_us_hist: AtomicHistogram::new(7, 64).unwrap(),
-            batch_packets_len_hist: AtomicHistogram::new(7, 64).unwrap(),
-            total_verify_time_us: AtomicU64::new(0),
-            total_packets_verified: AtomicUsize::new(0),
-            total_batches_verified: AtomicUsize::new(0),
+            verify_batches_pp_us_hist: Histogram::new(),
+            batch_packets_len_hist: Histogram::new(),
+            total_verify_time_us: 0,
+            total_packets_verified: 0,
+            total_batches_verified: 0,
         }
     }
 }
 
 impl SigverifyStats {
-    pub fn maybe_report(&self, name: &'static str) {
-        if self.total_packets_verified.load(Ordering::Relaxed) == 0 {
+    pub fn maybe_report(&self) {
+        if self.total_packets_verified == 0 {
             return;
         }
 
-        let verify_time_us = &self.verify_batches_pp_us_hist.drain();
-        let verify_time_us = verify_time_us
-            .percentiles(&[50.0, 75.0, 90.0, 99.0])
-            .unwrap_or_default()
-            .unwrap_or_default();
-
-        let packet_len = &self.batch_packets_len_hist.drain();
-        let packet_len = packet_len
-            .percentiles(&[50.0, 75.0, 90.0, 99.0])
-            .unwrap_or_default()
-            .unwrap_or_default();
-
         datapoint_info!(
-            name,
-            ("total_verify_time_us", self.total_verify_time_us.swap(0, Ordering::Relaxed), i64),
-            (
-                "total_packets_verified",
-                self.total_packets_verified.swap(0, Ordering::Relaxed),
-                i64
-            ),
-            (
-                "total_batches_verified",
-                self.total_batches_verified.swap(0, Ordering::Relaxed),
-                i64
-            ),
-            (
-                "verify_batches_pp_us_p50",
-                verify_time_us.first().map(|x| x.1.end()).unwrap_or_default(),
-                i64
-            ),
-            (
-                "verify_batches_pp_us_p75",
-                verify_time_us.get(1).map(|x| x.1.end()).unwrap_or_default(),
-                i64
-            ),
-            (
-                "verify_batches_pp_us_p90",
-                verify_time_us.get(2).map(|x| x.1.end()).unwrap_or_default(),
-                i64
-            ),
-            (
-                "verify_batches_pp_us_p99",
-                verify_time_us.get(3).map(|x| x.1.end()).unwrap_or_default(),
-                i64
-            ),
-            (
-                "batch_packets_len_p50",
-                packet_len.first().map(|x| x.1.end()).unwrap_or_default(),
-                i64
-            ),
-            (
-                "batch_packets_len_p75",
-                packet_len.get(1).map(|x| x.1.end()).unwrap_or_default(),
-                i64
-            ),
-            (
-                "batch_packets_len_p90",
-                packet_len.get(2).map(|x| x.1.end()).unwrap_or_default(),
-                i64
-            ),
-            (
-                "batch_packets_len_p99",
-                packet_len.get(3).map(|x| x.1.end()).unwrap_or_default(),
-                i64
-            ),
+            "jito-bam-receive-and-buffer_sigverify-stats",
+            ("total_verify_time_us", self.total_verify_time_us, i64),
+            ("total_packets_verified", self.total_packets_verified, i64),
+            ("total_batches_verified", self.total_batches_verified, i64),
+            ("verify_batches_pp_us_p50", self.verify_batches_pp_us_hist.percentile(50.0).unwrap_or(0), i64),
+            ("verify_batches_pp_us_p75", self.verify_batches_pp_us_hist.percentile(75.0).unwrap_or(0), i64),
+            ("verify_batches_pp_us_p90", self.verify_batches_pp_us_hist.percentile(90.0).unwrap_or(0), i64),
+            ("verify_batches_pp_us_p99", self.verify_batches_pp_us_hist.percentile(99.0).unwrap_or(0), i64),
+            ("batch_packets_len_p50", self.batch_packets_len_hist.percentile(50.0).unwrap_or(0), i64),
+            ("batch_packets_len_p75", self.batch_packets_len_hist.percentile(75.0).unwrap_or(0), i64),
+            ("batch_packets_len_p90", self.batch_packets_len_hist.percentile(90.0).unwrap_or(0), i64),
+            ("batch_packets_len_p99", self.batch_packets_len_hist.percentile(99.0).unwrap_or(0), i64),
         );
     }
 
-    pub fn increment_verify_batches_pp_us(&self, us: u64, packet_count: usize) {
+    pub fn increment_verify_batches_pp_us(&mut self, us: u64, packet_count: usize) {
         if packet_count > 0 {
-            self.verify_batches_pp_us_hist
-                .increment(us / (packet_count as u64)).unwrap();
+            let per_packet_us = (us as f64 / packet_count as f64).round() as u64;
+            self.verify_batches_pp_us_hist.increment(per_packet_us).unwrap();
         }
     }
 
-    pub fn increment_batch_packets_len(&self, packet_count: usize) {
+    pub fn increment_batch_packets_len(&mut self, packet_count: usize) {
         if packet_count > 0 {
             self.batch_packets_len_hist.increment(packet_count as u64).unwrap();
         }
     }
     
-    pub fn increment_total_verify_time(&self, us: u64) {
-        self.total_verify_time_us.fetch_add(us, Ordering::Relaxed);
+    pub fn increment_total_verify_time(&mut self, us: u64) {
+        self.total_verify_time_us += us;
     }
 
-    pub fn increment_total_packets_verified(&self, count: usize) {
-        self.total_packets_verified.fetch_add(count, Ordering::Relaxed);
+    pub fn increment_total_packets_verified(&mut self, count: usize) {
+        self.total_packets_verified += count;
     }
 
-    pub fn increment_total_batches_verified(&self, count: usize) {
-        self.total_batches_verified.fetch_add(count, Ordering::Relaxed);
+    pub fn increment_total_batches_verified(&mut self, count: usize) {
+        self.total_batches_verified += count;
     }
 }
 
@@ -209,67 +148,10 @@ impl BamReceiveAndBuffer {
             response_sender,
             bank_forks,
             blacklisted_accounts,
-            stats: Arc::new(SigverifyStats::default()),
+            stats: SigverifyStats::default(),
             last_report: Instant::now(),
         }
     }
-
-    // fn deserialize_packets<'a>(
-    //     in_packets: impl Iterator<Item = &'a Packet>,
-    //     stats: &Arc<SigverifyStats>,
-    // ) -> Result<Vec<ImmutableDeserializedPacket>, (usize, DeserializedPacketError)> {
-    //     fn proto_packet_to_packet(from_packet: &Packet) -> solana_packet::Packet {
-    //         let mut to_packet = solana_packet::Packet::default();
-    //         to_packet.meta_mut().size = from_packet.data.len();
-    //         to_packet.meta_mut().set_discard(false);
-
-    //         let copy_len = min(PACKET_DATA_SIZE, from_packet.data.len());
-    //         to_packet.buffer_mut()[0..copy_len].copy_from_slice(&from_packet.data[0..copy_len]);
-
-    //         if let Some(meta) = &from_packet.meta {
-    //             to_packet.meta_mut().size = meta.size as usize;
-    //             if let Some(flags) = &meta.flags {
-    //                 if flags.simple_vote_tx {
-    //                     to_packet
-    //                         .meta_mut()
-    //                         .flags
-    //                         .insert(PacketFlags::SIMPLE_VOTE_TX);
-    //                 }
-    //             }
-    //         }
-    //         to_packet
-    //     }
-
-
-    //     let mut packet_count = 0;
-    //     let mut result = Vec::with_capacity(in_packets.size_hint().0);
-    //     let mut verify_packet_batch_time_us = Measure::start("verify_packet_batch_time_us");
-    //     for (i, p) in in_packets.enumerate() {
-    //         let mut solana_packet = proto_packet_to_packet(p);
-    //         // sigverify packet
-    //         // we don't use solana_packet here, so we don't need to call set_discard()
-    //         if !verify_packet(&mut (&mut solana_packet).into(), false) {
-    //             return Err((
-    //                 i,
-    //                 DeserializedPacketError::SanitizeError(SanitizeError::InvalidValue),
-    //             ));
-    //         }
-    //         packet_count += 1;
-
-    //         result.push(
-    //             ImmutableDeserializedPacket::new((&solana_packet).into()).map_err(|e| (i, e))?,
-    //         );
-    //     }
-
-    //     verify_packet_batch_time_us.stop();
-    //     stats.increment_verify_batches_pp_us(verify_packet_batch_time_us.as_us(), packet_count);
-    //     stats.increment_batch_packets_len(packet_count);
-    //     stats.increment_total_verify_time(verify_packet_batch_time_us.as_us());
-    //     stats.increment_total_packets_verified(packet_count);
-    //     stats.increment_total_batches_verified(1);
-        
-    //     Ok(result)
-    // }
 
     fn send_bundle_not_committed_result(&self, seq_id: u32, reason: Reason) {
         let _ = self
@@ -534,29 +416,10 @@ impl BamReceiveAndBuffer {
         Ok((num_packets_received, atomic_txn_batches)) 
     }
 
-    fn batch_deserialize_and_verify(&self, atomic_txn_batches: Vec<AtomicTxnBatch>, sigverify_stats: &Arc<SigverifyStats>) -> (Vec<Result<(Vec<ImmutableDeserializedPacket>, bool, u32), (Reason, u32)>>, ReceivingStats) {
-        fn proto_packet_to_packet(from_packet: &Packet) -> solana_packet::Packet {
-            let mut to_packet = solana_packet::Packet::default();
-            to_packet.meta_mut().size = from_packet.data.len();
-            to_packet.meta_mut().set_discard(false);
-
-            let copy_len = min(PACKET_DATA_SIZE, from_packet.data.len());
-            to_packet.buffer_mut()[0..copy_len].copy_from_slice(&from_packet.data[0..copy_len]);
-
-            if let Some(meta) = &from_packet.meta {
-                to_packet.meta_mut().size = meta.size as usize;
-                if let Some(flags) = &meta.flags {
-                    if flags.simple_vote_tx {
-                        to_packet
-                            .meta_mut()
-                            .flags
-                            .insert(PacketFlags::SIMPLE_VOTE_TX);
-                    }
-                }
-            }
-            to_packet
-        }
-
+    /// Check basic constraints and extract revert_on_error flags
+    fn prevalidate_batches<'a>(
+        atomic_txn_batches: &'a [AtomicTxnBatch]
+    ) -> (Vec<Result<(&'a AtomicTxnBatch, bool, u32), (Reason, u32)>>, ReceivingStats) {
         let mut stats = ReceivingStats {
             num_received: 0,
             num_dropped_without_parsing: 0,
@@ -573,8 +436,7 @@ impl BamReceiveAndBuffer {
             buffer_time_us: 0,
         };
 
-        // check basic constraints and extract revert_on_error flags
-        let pre_validated: Vec<Result<(&AtomicTxnBatch, bool, u32), (Reason, u32)>> = atomic_txn_batches
+        let prevalidated = atomic_txn_batches
             .iter()
             .map(|atomic_txn_batch| {
                 if atomic_txn_batch.packets.is_empty() {
@@ -620,6 +482,51 @@ impl BamReceiveAndBuffer {
                 Ok((atomic_txn_batch, revert_on_error, atomic_txn_batch.seq_id))
             })
             .collect();
+
+        (prevalidated, stats)
+    }
+
+    fn batch_deserialize_and_verify(atomic_txn_batches: Vec<AtomicTxnBatch>, sigverify_stats: &mut SigverifyStats) -> (Vec<Result<(Vec<ImmutableDeserializedPacket>, bool, u32), (Reason, u32)>>, ReceivingStats) {
+        fn proto_packet_to_packet(from_packet: &Packet) -> solana_packet::Packet {
+            let mut to_packet = solana_packet::Packet::default();
+            to_packet.meta_mut().size = from_packet.data.len();
+            to_packet.meta_mut().set_discard(false);
+
+            let copy_len = min(PACKET_DATA_SIZE, from_packet.data.len());
+            to_packet.buffer_mut()[0..copy_len].copy_from_slice(&from_packet.data[0..copy_len]);
+
+            if let Some(meta) = &from_packet.meta {
+                to_packet.meta_mut().size = meta.size as usize;
+                if let Some(flags) = &meta.flags {
+                    if flags.simple_vote_tx {
+                        to_packet
+                            .meta_mut()
+                            .flags
+                            .insert(PacketFlags::SIMPLE_VOTE_TX);
+                    }
+                }
+            }
+            to_packet
+        }
+
+        let mut stats = ReceivingStats {
+            num_received: 0,
+            num_dropped_without_parsing: 0,
+            num_dropped_on_parsing_and_sanitization: 0,
+            num_dropped_on_lock_validation: 0,
+            num_dropped_on_compute_budget: 0,
+            num_dropped_on_age: 0,
+            num_dropped_on_already_processed: 0,
+            num_dropped_on_fee_payer: 0,
+            num_dropped_on_capacity: 0,
+            num_buffered: 0,
+            num_dropped_on_blacklisted_account: 0,
+            receive_time_us: 0,
+            buffer_time_us: 0,
+        };
+
+        let (pre_validated, preverify_stats) = Self::prevalidate_batches(&atomic_txn_batches);
+        stats.accumulate(preverify_stats);
 
         let mut packet_batches: Vec<solana_perf::packet::PacketBatch> = Vec::new();
         let mut packet_count = 0;
@@ -725,11 +632,15 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
             buffer_time_us: 0,
         };
 
+        const PACKET_BURST_LIMIT: usize = 1_000;
+        const TIMEOUT: Duration = Duration::from_millis(10);
+        const REPORT_INTERVAL: u128 = 2_000; // milliseconds, report every 2 seconds
+
         match decision {
             BufferedPacketsDecision::Consume(_) | BufferedPacketsDecision::Hold => loop {
                 let (batches, receive_time_us) = measure_us!(self.batch_receive_until(
-                    MAX_PACKET_RECEIVE_TIME,
-                    MAX_RECEIVE_PACKETS
+                    TIMEOUT,
+                    PACKET_BURST_LIMIT
                 ));
                 stats.receive_time_us += receive_time_us;
 
@@ -752,7 +663,7 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
                 }
 
                 let (deserialized_batches_results, deserialize_stats) =
-                    self.batch_deserialize_and_verify(batches, &self.stats);
+                    Self::batch_deserialize_and_verify(batches, &mut self.stats);
                 stats.accumulate(deserialize_stats);
 
                 for result in deserialized_batches_results {
@@ -824,8 +735,10 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
         }
 
         if self.last_report.elapsed().as_millis() > REPORT_INTERVAL {
-            self.stats.maybe_report(SIGVERIFY_STATS_NAME);
+            self.stats.maybe_report();
             self.last_report = Instant::now();
+            // reset stats after reporting
+            self.stats = SigverifyStats::default();
         }
 
         Ok(stats)
@@ -849,6 +762,7 @@ mod tests {
         crate::banking_stage::{
             tests::create_slow_genesis_config,
             transaction_scheduler::transaction_state_container::StateContainer,
+            BamReceiveAndBuffer,
         },
         crossbeam_channel::{unbounded, Receiver},
         solana_keypair::Keypair,
@@ -1008,13 +922,13 @@ mod tests {
         batches: Vec<AtomicTxnBatch>,
         bank_forks: &Arc<RwLock<BankForks>>,
         blacklisted_accounts: &HashSet<Pubkey>,
-        sigverify_stats: &Arc<SigverifyStats>,
     ) -> (Vec<Result<(Vec<ImmutableDeserializedPacket>, bool, u32), (Reason, u32)>>, ReceivingStats) {
         let (_sender, receiver) = unbounded();
-        let (receive_and_buffer, _container, _response_receiver) =
+        let (_receive_and_buffer, _container, _response_receiver) =
             setup_bam_receive_and_buffer(receiver, bank_forks.clone(), blacklisted_accounts.clone());
-        
-        receive_and_buffer.batch_deserialize_and_verify(batches, sigverify_stats)
+
+        let mut stats = SigverifyStats::default();
+        BamReceiveAndBuffer::batch_deserialize_and_verify(batches, &mut stats)
     }
 
     #[test]
@@ -1034,8 +948,7 @@ mod tests {
             }],
             max_schedule_slot: 0,
         };
-        let stats = Arc::new(SigverifyStats::default());
-        let (results, _stats) = create_batch_and_test_result(vec![bundle], &bank_forks, &HashSet::new(), &stats);
+        let (results, _stats) = create_batch_and_test_result(vec![bundle], &bank_forks, &HashSet::new());
         
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
@@ -1053,8 +966,7 @@ mod tests {
             packets: vec![],
             max_schedule_slot: 0,
         };
-        let stats = Arc::new(SigverifyStats::default());
-        let (results, batch_stats) = create_batch_and_test_result(vec![batch], &bank_forks, &HashSet::new(), &stats);
+        let (results, batch_stats) = create_batch_and_test_result(vec![batch], &bank_forks, &HashSet::new());
         
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err());
@@ -1076,8 +988,7 @@ mod tests {
             }],
             max_schedule_slot: 0,
         };
-        let stats = Arc::new(SigverifyStats::default());
-        let (results, _batch_stats) = create_batch_and_test_result(vec![batch], &bank_forks, &HashSet::new(), &stats);
+        let (results, _batch_stats) = create_batch_and_test_result(vec![batch], &bank_forks, &HashSet::new());
         
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err());
@@ -1105,9 +1016,7 @@ mod tests {
             }],
             max_schedule_slot: 0,
         };
-        
-        let stats = Arc::new(SigverifyStats::default());
-        let (results, _batch_stats) = create_batch_and_test_result(vec![batch], &bank_forks, &HashSet::new(), &stats);
+        let (results, _batch_stats) = create_batch_and_test_result(vec![batch], &bank_forks, &HashSet::new());
         
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
@@ -1163,8 +1072,7 @@ mod tests {
             ],
             max_schedule_slot: 0,
         };
-        let stats = Arc::new(SigverifyStats::default());
-        let (results, batch_stats) = create_batch_and_test_result(vec![bundle], &bank_forks, &HashSet::new(), &stats);
+        let (results, batch_stats) = create_batch_and_test_result(vec![bundle], &bank_forks, &HashSet::new());
         
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err());
@@ -1195,9 +1103,7 @@ mod tests {
             }],
             max_schedule_slot: 0,
         };
-        
-        let stats = Arc::new(SigverifyStats::default());
-        let (results, _batch_stats) = create_batch_and_test_result(vec![batch], &bank_forks, &HashSet::new(), &stats);
+        let (results, _batch_stats) = create_batch_and_test_result(vec![batch], &bank_forks, &HashSet::new());
         
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
@@ -1262,9 +1168,7 @@ mod tests {
             }],
             max_schedule_slot: 0,
         };
-
-        let stats = Arc::new(SigverifyStats::default());
-        let (results, _batch_stats) = create_batch_and_test_result(vec![batch], &bank_forks, &HashSet::new(), &stats);
+        let (results, _batch_stats) = create_batch_and_test_result(vec![batch], &bank_forks, &HashSet::new());
         
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
