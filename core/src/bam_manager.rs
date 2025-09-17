@@ -63,6 +63,7 @@ impl BamManager {
         let mut cached_builder_config = None;
         let mut payment_sender =
             BamPaymentSender::new(exit.clone(), poh_recorder.clone(), dependencies.clone());
+        let shared_working_bank = poh_recorder.read().unwrap().shared_working_bank();
 
         while !exit.load(Ordering::Relaxed) {
             // Update if bam is enabled
@@ -134,8 +135,7 @@ impl BamManager {
             }
 
             // Send leader state if we are in a leader slot
-            let maybe_bank_start = poh_recorder.read().unwrap().shared_working_bank();
-            if let Some(bank) = maybe_bank_start.load() {
+            if let Some(bank) = shared_working_bank.load() {
                 if !bank.is_frozen() {
                     let leader_state = Self::generate_leader_state(&bank);
                     payment_sender.send_slot(leader_state.slot);
