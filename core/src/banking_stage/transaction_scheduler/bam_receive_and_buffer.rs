@@ -550,47 +550,47 @@ impl BamReceiveAndBuffer {
         sigverify_stats.increment_total_packets_verified(packet_count);
         sigverify_stats.increment_total_batches_verified(packet_batches.len());
 
-        // process post sigverify results
         let mut packet_batch_iter = packet_batches.iter();
         let results = pre_validated
             .into_iter()
             .map(|pre_result| {
-                match pre_result {
-                    Err((reason, seq_id)) => Err((reason, seq_id)),
-                    Ok((_, revert_on_error, seq_id)) => {
-                        let batch = packet_batch_iter.next().unwrap();
-
-                        // deserialize packets in batch
-                        let mut deserialized_packets = Vec::with_capacity(batch.len());
-                        for (i, packet) in batch.iter().enumerate() {
-                            if packet.meta().discard() {
-                                let reason = convert_deserialize_error_to_proto(&DeserializedPacketError::SanitizeError(SanitizeError::InvalidValue));
-                                stats.num_dropped_on_parsing_and_sanitization += 1;
-                                return Err((Reason::DeserializationError(
-                                    jito_protos::proto::bam_types::DeserializationError {
-                                        index: i as u32,
-                                        reason: reason as i32,
-                                    },
-                                ), seq_id));
-                            }
-                            
-                            match ImmutableDeserializedPacket::new((&packet.to_bytes_packet()).into()) {
-                                Ok(deserialized) => deserialized_packets.push(deserialized),
-                                Err(_) => {
-                                    stats.num_dropped_on_parsing_and_sanitization += 1;
-                                    return Err((Reason::DeserializationError(
-                                        jito_protos::proto::bam_types::DeserializationError {
-                                            index: i as u32,
-                                            reason: DeserializationErrorReason::SanitizeError as i32,
-                                        },
-                                    ), seq_id));
-                                }
-                            }
+                pre_result.and_then(|(_, revert_on_error, seq_id)| {
+                    let batch = packet_batch_iter.next().unwrap();
+                    
+                    let mut pkt_to_idp = |packet: &solana_perf::packet::PacketRef, i: usize, seq_id: u32| -> Result<ImmutableDeserializedPacket, (Reason, u32)> {
+                        if packet.meta().discard() {
+                            let reason = convert_deserialize_error_to_proto(&DeserializedPacketError::SanitizeError(SanitizeError::InvalidValue));
+                            stats.num_dropped_on_parsing_and_sanitization += 1;
+                            return Err((Reason::DeserializationError(
+                                jito_protos::proto::bam_types::DeserializationError {
+                                    index: i as u32,
+                                    reason: reason as i32,
+                                },
+                            ), seq_id));
                         }
                         
-                        Ok((deserialized_packets, revert_on_error, seq_id))
-                    }
-                }
+                        match ImmutableDeserializedPacket::new((&packet.to_bytes_packet()).into()) {
+                            Ok(deserialized) => Ok(deserialized),
+                            Err(_) => {
+                                stats.num_dropped_on_parsing_and_sanitization += 1;
+                                Err((Reason::DeserializationError(
+                                    jito_protos::proto::bam_types::DeserializationError {
+                                        index: i as u32,
+                                        reason: DeserializationErrorReason::SanitizeError as i32,
+                                    },
+                                ), seq_id))
+                            }
+                        }
+                    };
+
+                    let deserialized = batch
+                        .iter()
+                        .enumerate()
+                        .map(|(i, pkt)| pkt_to_idp(&pkt, i, seq_id))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    
+                    Ok((deserialized, revert_on_error, seq_id))
+                })
             })
             .collect();
 
