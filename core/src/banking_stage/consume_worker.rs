@@ -271,7 +271,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
             if result
                 .execute_and_commit_transactions_output
                 .commit_transactions_result
-                .map_or(false, |results| {
+                .map_or(true, |results| {
                     results
                         .iter()
                         .any(|r| matches!(r, CommitTransactionDetails::NotCommitted(_)))
@@ -296,7 +296,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
                 if result
                     .execute_and_commit_transactions_output
                     .commit_transactions_result
-                    .map_or(false, |results| {
+                    .map_or(true, |results| {
                         results
                             .iter()
                             .any(|r| matches!(r, CommitTransactionDetails::NotCommitted(_)))
