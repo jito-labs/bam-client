@@ -15,7 +15,7 @@ use {
             consume_worker::ConsumeWorker,
             packet_deserializer::PacketDeserializer,
             transaction_scheduler::{
-                prio_graph_scheduler::PrioGraphScheduler,
+                bam_scheduler, prio_graph_scheduler::PrioGraphScheduler,
                 scheduler_controller::SchedulerController, scheduler_error::SchedulerError,
             },
         },
@@ -737,7 +737,8 @@ impl BankingStage {
         if let Some(bam_dependencies) = bam_dependencies {
             // Spawn BAM workers
             // Create channels for communication between scheduler and workers
-            let num_workers = num_threads;
+            const NUM_BAM_WORKERS: usize = 12;
+            let num_workers = NUM_BAM_WORKERS;
             let (work_senders, work_receivers): (Vec<Sender<_>>, Vec<Receiver<_>>) =
                 (0..num_workers).map(|_| unbounded()).unzip();
             let (finished_work_sender, finished_work_receiver) = unbounded();
@@ -747,7 +748,7 @@ impl BankingStage {
             for (index, work_receiver) in work_receivers.into_iter().enumerate() {
                 let id = (index as u32)
                     .saturating_add(NUM_VOTE_PROCESSING_THREADS)
-                    .saturating_add(num_workers);
+                    .saturating_add(num_workers as u32);
                 let consume_worker = ConsumeWorker::new_with_tip_processing_deps(
                     id,
                     work_receiver,
@@ -784,6 +785,9 @@ impl BankingStage {
                                 work_senders,
                                 finished_work_receiver,
                                 bam_dependencies.outbound_sender.clone(),
+                                bam_scheduler::MAX_SCHEDULED_PER_WORKER,
+                                bam_scheduler::MAX_TXN_PER_BATCH,
+                                bank_forks.clone(),
                             );
                         let receive_and_buffer = BamReceiveAndBuffer::new(
                             bam_dependencies.bam_enabled.clone(),
