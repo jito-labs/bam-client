@@ -11,6 +11,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, RwLock,
     },
+    time::Duration,
 };
 use {
     crate::{
@@ -63,6 +64,8 @@ impl BamManager {
         let mut cached_builder_config = None;
         let mut payment_sender =
             BamPaymentSender::new(exit.clone(), poh_recorder.clone(), dependencies.clone());
+
+        let shared_working_bank = poh_recorder.read().unwrap().new_leader_bank_notifier();
 
         while !exit.load(Ordering::Relaxed) {
             // Update if bam is enabled
@@ -134,9 +137,12 @@ impl BamManager {
             }
 
             // Send leader state if we are in a leader slot
-            if let Some(bank_start) = poh_recorder.read().unwrap().bank_start() {
-                if bank_start.should_working_bank_still_be_processing_txs() {
-                    let leader_state = Self::generate_leader_state(&bank_start.working_bank);
+            if let Some(bank) = shared_working_bank
+                .get_or_wait_for_in_progress(Duration::from_millis(1))
+                .upgrade()
+            {
+                if !bank.is_frozen() {
+                    let leader_state = Self::generate_leader_state(&bank);
                     payment_sender.send_slot(leader_state.slot);
                     let _ = dependencies.outbound_sender.try_send(
                         crate::bam_dependencies::BamOutboundMessage::LeaderState(leader_state),
@@ -154,8 +160,10 @@ impl BamManager {
     }
 
     fn generate_leader_state(bank: &Bank) -> LeaderState {
-        let max_block_cu = bank.read_cost_tracker().unwrap().block_cost_limit();
-        let consumed_block_cu = bank.read_cost_tracker().unwrap().block_cost();
+        let (max_block_cu, consumed_block_cu) = {
+            let cost_tracker = bank.read_cost_tracker().unwrap();
+            (cost_tracker.block_cost_limit(), cost_tracker.block_cost())
+        };
         let slot_cu_budget_remaining = max_block_cu.saturating_sub(consumed_block_cu) as u32;
         LeaderState {
             slot: bank.slot(),
