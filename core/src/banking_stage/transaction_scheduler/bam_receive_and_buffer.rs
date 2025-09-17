@@ -17,7 +17,6 @@ use solana_perf::sigverify::verify_packet;
 use solana_pubkey::Pubkey;
 use solana_sanitize::SanitizeError;
 use solana_transaction::sanitized::SanitizedTransaction;
-use std::thread::Builder;
 use std::{
     cmp::min,
     collections::HashSet,
@@ -58,7 +57,7 @@ use {
 };
 
 // Report interval for sigverify stats
-const REPORT_INTERVAL: u64 = 2; // seconds
+const REPORT_INTERVAL: u128 = 500; // half a second
 const SIGVERIFY_STATS_NAME: &str = "jito-bam-receive-and-buffer_sigverify-stats";
 
 pub struct BamReceiveAndBuffer {
@@ -68,6 +67,7 @@ pub struct BamReceiveAndBuffer {
     bank_forks: Arc<RwLock<BankForks>>,
     blacklisted_accounts: HashSet<Pubkey>,
     stats: Arc<SigverifyStats>,
+    last_report: Instant,
 }
 
 
@@ -168,7 +168,7 @@ impl SigverifyStats {
     pub fn increment_verify_batches_pp_us(&self, us: u64, packet_count: usize) {
         if packet_count > 0 {
             self.verify_batches_pp_us_hist
-                .increment((us as u64) / (packet_count as u64)).unwrap();
+                .increment(us / (packet_count as u64)).unwrap();
         }
     }
 
@@ -193,39 +193,21 @@ impl SigverifyStats {
 
 impl BamReceiveAndBuffer {
     pub fn new(
-        exit: Arc<AtomicBool>,
         bam_enabled: Arc<AtomicBool>,
         bundle_receiver: crossbeam_channel::Receiver<AtomicTxnBatch>,
         response_sender: Sender<BamOutboundMessage>,
         bank_forks: Arc<RwLock<BankForks>>,
         blacklisted_accounts: HashSet<Pubkey>,
-    ) -> (Self, std::thread::JoinHandle<()>) {
-        let stats = Arc::new(SigverifyStats::default());
-        let sigverify_stats = stats.clone();
-        let mut last_report = Instant::now();
-        let stats_reporter_thread_hdl = Builder::new()
-            .name(SIGVERIFY_STATS_NAME.to_string())
-            .spawn(move || {
-                while !exit.load(Ordering::Relaxed) {
-                    // Report stats every REPORT_INTERVAL
-                    if last_report.elapsed().as_secs() > REPORT_INTERVAL {
-                        sigverify_stats.maybe_report(SIGVERIFY_STATS_NAME);
-                        last_report = Instant::now();
-                    }
-                }
-            }).unwrap();
-
-        (
-            Self {
-                bam_enabled,
-                bundle_receiver,
-                response_sender,
-                bank_forks,
-                blacklisted_accounts,
-                stats
-            },
-            stats_reporter_thread_hdl
-        )
+    ) -> Self {
+        Self {
+            bam_enabled,
+            bundle_receiver,
+            response_sender,
+            bank_forks,
+            blacklisted_accounts,
+            stats: Arc::new(SigverifyStats::default()),
+            last_report: Instant::now(),
+        }
     }
 
     fn deserialize_packets<'a>(
@@ -276,7 +258,7 @@ impl BamReceiveAndBuffer {
         }
 
         verify_packet_batch_time_us.stop();
-        stats.increment_verify_batches_pp_us(verify_packet_batch_time_us.as_us() as u64, packet_count);
+        stats.increment_verify_batches_pp_us(verify_packet_batch_time_us.as_us(), packet_count);
         stats.increment_batch_packets_len(packet_count);
         stats.increment_total_verify_time(verify_packet_batch_time_us.as_us());
         stats.increment_total_packets_verified(packet_count);
@@ -698,6 +680,11 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
             }
         }
 
+        if self.last_report.elapsed().as_millis() >= REPORT_INTERVAL {
+            self.stats.maybe_report(SIGVERIFY_STATS_NAME);
+            self.last_report = Instant::now();
+        }
+
         Ok(stats)
     }
 }
@@ -767,7 +754,6 @@ mod tests {
         let (response_sender, response_receiver) =
             crossbeam_channel::unbounded::<BamOutboundMessage>();
         let receive_and_buffer = BamReceiveAndBuffer::new(
-            Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(true)),
             receiver,
             response_sender,
@@ -893,7 +879,7 @@ mod tests {
         };
         let stats = Arc::new(SigverifyStats::default());
         let (result, _stats) =
-            BamReceiveAndBuffer::parse_batch(&bundle, &bank_forks, &HashSet::new(), stats);
+            BamReceiveAndBuffer::parse_batch(&bundle, &bank_forks, &HashSet::new(), &stats);
         assert!(result.is_ok());
         let parsed_bundle = result.unwrap();
         assert_eq!(parsed_bundle.txns_max_age.len(), 1);
@@ -909,7 +895,7 @@ mod tests {
         };
         let stats = Arc::new(SigverifyStats::default());
         let (result, stats) =
-            BamReceiveAndBuffer::parse_batch(&batch, &bank_forks, &HashSet::new(), stats);
+            BamReceiveAndBuffer::parse_batch(&batch, &bank_forks, &HashSet::new(), &stats);
         assert!(result.is_err());
         assert_eq!(stats.num_dropped_without_parsing, 1);
         assert_eq!(
@@ -934,7 +920,7 @@ mod tests {
         };
         let stats = Arc::new(SigverifyStats::default());
         let (result, stats) =
-            BamReceiveAndBuffer::parse_batch(&batch, &bank_forks, &HashSet::new(), stats);
+            BamReceiveAndBuffer::parse_batch(&batch, &bank_forks, &HashSet::new(), &stats);
         assert!(result.is_err());
         assert_eq!(stats.num_dropped_on_parsing_and_sanitization, 1);
         assert_eq!(
@@ -966,7 +952,7 @@ mod tests {
         };
         let stats = Arc::new(SigverifyStats::default());
         let (result, stats) =
-            BamReceiveAndBuffer::parse_batch(&batch, &bank_forks, &HashSet::new(), stats);
+            BamReceiveAndBuffer::parse_batch(&batch, &bank_forks, &HashSet::new(), &stats);
         assert!(result.is_err());
         assert_eq!(stats.num_dropped_on_fee_payer, 1);
 
@@ -1017,7 +1003,7 @@ mod tests {
         };
         let stats = Arc::new(SigverifyStats::default());
         let (result, stats) =
-            BamReceiveAndBuffer::parse_batch(&bundle, &bank_forks, &HashSet::new(), stats);
+            BamReceiveAndBuffer::parse_batch(&bundle, &bank_forks, &HashSet::new(), &stats);
         assert!(result.is_err());
         assert_eq!(stats.num_dropped_without_parsing, 1);
         assert_eq!(
@@ -1051,7 +1037,7 @@ mod tests {
         };
         let stats = Arc::new(SigverifyStats::default());
         let (result, stats) =
-            BamReceiveAndBuffer::parse_batch(&batch, &bank_forks, &blacklisted_accounts, stats);
+            BamReceiveAndBuffer::parse_batch(&batch, &bank_forks, &blacklisted_accounts, &stats);
         assert!(result.is_err());
         assert_eq!(stats.num_dropped_on_blacklisted_account, 1);
         assert_eq!(
@@ -1086,7 +1072,7 @@ mod tests {
 
         let stats = Arc::new(SigverifyStats::default());
         // This should fail due to invalid signature
-        let result = BamReceiveAndBuffer::deserialize_packets(packets.iter(), stats);
+        let result = BamReceiveAndBuffer::deserialize_packets(packets.iter(), &stats);
         assert!(result.is_err());
 
         if let Err((index, error)) = result {
@@ -1126,7 +1112,7 @@ mod tests {
 
         // Valid transactions should succeed with valid signature
         let stats = Arc::new(SigverifyStats::default());
-        let result = BamReceiveAndBuffer::deserialize_packets([packet].iter(), stats);
+        let result = BamReceiveAndBuffer::deserialize_packets([packet].iter(), &stats);
         assert!(result.is_ok());
 
         if let Ok(packets) = result {

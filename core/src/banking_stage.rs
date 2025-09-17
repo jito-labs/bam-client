@@ -696,7 +696,6 @@ impl BankingStage {
 
             // Spawn the BAM scheduler thread
             let bam_scheduler_exit = exit.clone();
-            let sigverify_status_report_exit = exit.clone();
             thread_hdls.push(
                 Builder::new()
                     .name("solBamSched".to_string())
@@ -707,8 +706,7 @@ impl BankingStage {
                                 finished_work_receiver,
                                 bam_dependencies.outbound_sender.clone(),
                             );
-                        let (receive_and_buffer, stats_reporter_thread_hdl) = BamReceiveAndBuffer::new(
-                            sigverify_status_report_exit,
+                        let receive_and_buffer = BamReceiveAndBuffer::new(
                             bam_dependencies.bam_enabled.clone(),
                             bam_dependencies.batch_receiver.clone(),
                             bam_dependencies.outbound_sender.clone(),
@@ -734,7 +732,6 @@ impl BankingStage {
                                 warn!("Unexpected worker disconnect from scheduler")
                             }
                         }
-                        stats_reporter_thread_hdl.join().unwrap();
                     })
                     .unwrap(),
             );
