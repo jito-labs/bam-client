@@ -54,31 +54,91 @@ use {
 
 pub struct BamReceiveAndBuffer {
     bam_enabled: Arc<AtomicBool>,
-    bundle_receiver: crossbeam_channel::Receiver<AtomicTxnBatch>,
     response_sender: Sender<BamOutboundMessage>,
-    bank_forks: Arc<RwLock<BankForks>>,
-    blacklisted_accounts: HashSet<Pubkey>,
-
-    last_metrics_report: Instant,
-    metrics: BamReceiveAndBufferMetrics,
+    parsed_batch_receiver: crossbeam_channel::Receiver<ParsedBatch>,
+    parsing_thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl BamReceiveAndBuffer {
     pub fn new(
+        exit: Arc<AtomicBool>,
         bam_enabled: Arc<AtomicBool>,
         bundle_receiver: crossbeam_channel::Receiver<AtomicTxnBatch>,
         response_sender: Sender<BamOutboundMessage>,
         bank_forks: Arc<RwLock<BankForks>>,
         blacklisted_accounts: HashSet<Pubkey>,
     ) -> Self {
+        let (parsed_batch_sender, parsed_batch_receiver) =
+            crossbeam_channel::unbounded::<ParsedBatch>();
+
+        let response_sender_clone = response_sender.clone();
+        let bank_forks_clone = bank_forks.clone();
+        let blacklisted_accounts_clone = blacklisted_accounts.clone();
+        let parsing_thread = std::thread::spawn(move || {
+            Self::run_parsing(
+                exit,
+                bundle_receiver,
+                parsed_batch_sender,
+                response_sender_clone,
+                bank_forks_clone,
+                blacklisted_accounts_clone,
+            )
+        });
+
         Self {
             bam_enabled,
-            bundle_receiver,
             response_sender,
-            bank_forks,
-            blacklisted_accounts,
-            last_metrics_report: Instant::now(),
-            metrics: BamReceiveAndBufferMetrics::default(),
+            parsed_batch_receiver,
+            parsing_thread: Some(parsing_thread),
+        }
+    }
+
+    fn run_parsing(
+        exit: Arc<AtomicBool>,
+        bundle_receiver: crossbeam_channel::Receiver<AtomicTxnBatch>,
+        parsed_batch_sender: crossbeam_channel::Sender<ParsedBatch>,
+        response_sender: Sender<BamOutboundMessage>,
+        bank_forks: Arc<RwLock<BankForks>>,
+        blacklisted_accounts: HashSet<Pubkey>,
+    ) {
+        let mut last_metrics_report = Instant::now();
+        let mut metrics = BamReceiveAndBufferMetrics::default();
+        const METRICS_REPORT_INTERVAL: Duration = Duration::from_millis(20);
+
+        while !exit.load(Ordering::Relaxed) {
+            if last_metrics_report.elapsed() > METRICS_REPORT_INTERVAL {
+                metrics.report();
+                last_metrics_report = Instant::now();
+            }
+
+            let bundle = match bundle_receiver.recv_timeout(Duration::from_millis(20)) {
+                Ok(bundle) => bundle,
+                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout) => continue,
+            };
+
+            let (parsed_batch, stats) = Self::parse_batch(
+                &bundle,
+                &bank_forks,
+                &blacklisted_accounts,
+                &mut metrics,
+            );
+            metrics.increment_total_us(stats.receive_time_us + stats.buffer_time_us);
+
+            if let Err(reason) = parsed_batch {
+                let _ = response_sender.try_send(BamOutboundMessage::AtomicTxnBatchResult(
+                    jito_protos::proto::bam_types::AtomicTxnBatchResult {
+                        seq_id: bundle.seq_id,
+                        result: Some(atomic_txn_batch_result::Result::NotCommitted(
+                            jito_protos::proto::bam_types::NotCommitted { reason: Some(reason) },
+                        )),
+                    },
+                ));
+                continue;
+            }
+
+            let parsed_batch = parsed_batch.unwrap();
+            let _ = parsed_batch_sender.try_send(parsed_batch);
         }
     }
 
@@ -127,21 +187,6 @@ impl BamReceiveAndBuffer {
         }
 
         Ok(result)
-    }
-
-    fn send_bundle_not_committed_result(&self, seq_id: u32, reason: Reason) {
-        let _ = self
-            .response_sender
-            .try_send(BamOutboundMessage::AtomicTxnBatchResult(
-                jito_protos::proto::bam_types::AtomicTxnBatchResult {
-                    seq_id,
-                    result: Some(atomic_txn_batch_result::Result::NotCommitted(
-                        jito_protos::proto::bam_types::NotCommitted {
-                            reason: Some(reason),
-                        },
-                    )),
-                },
-            ));
     }
 
     fn send_no_leader_slot_txn_batch_result(&self, seq_id: u32) {
@@ -431,6 +476,8 @@ impl BamReceiveAndBuffer {
                 cost,
                 priority,
                 revert_on_error,
+                max_schedule_slot: batch.max_schedule_slot,
+                seq_id: batch.seq_id,
             }),
             stats,
         )
@@ -444,6 +491,8 @@ struct ParsedBatch {
     pub cost: u64,
     priority: u64,
     pub revert_on_error: bool,
+    pub max_schedule_slot: u64,
+    pub seq_id: u32,
 }
 
 impl ReceiveAndBuffer for BamReceiveAndBuffer {
@@ -474,11 +523,7 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
             receive_time_us: 0,
             buffer_time_us: 0,
         };
-        const METRICS_REPORT_INTERVAL: Duration = Duration::from_millis(20);
-        if self.last_metrics_report.elapsed() > METRICS_REPORT_INTERVAL {
-            self.metrics.report();
-            self.last_metrics_report = Instant::now();
-        }
+
 
         match decision {
             BufferedPacketsDecision::Consume(_) | BufferedPacketsDecision::Hold => loop {
@@ -486,9 +531,7 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
                     break;
                 }
 
-                let (batch, receive_time_us) = measure_us!(self.bundle_receiver.try_recv());
-                stats.receive_time_us += receive_time_us;
-                let batch = match batch {
+                let batch = match self.parsed_batch_receiver.try_recv() {
                     Ok(batch) => batch,
                     Err(TryRecvError::Disconnected) => return Err(DisconnectedError),
                     Err(TryRecvError::Empty) => {
@@ -496,7 +539,6 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
                         break;
                     }
                 };
-                stats.num_received += 1;
 
                 // If BAM is not enabled, drain the channel
                 if !is_bam_enabled {
@@ -504,23 +546,14 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
                     continue;
                 }
 
-                let ((parse_result, parse_stats), duration_us) =
-                    measure_us!(Self::parse_batch(&batch, &self.bank_forks, &self.blacklisted_accounts, &mut self.metrics));
-                stats.accumulate(parse_stats);
-                self.metrics.increment_total_us(duration_us);
-
                 let ParsedBatch {
                     txns_max_age,
                     cost,
                     priority,
                     revert_on_error,
-                } = match parse_result {
-                    Ok(parsed) => parsed,
-                    Err(reason) => {
-                        self.send_bundle_not_committed_result(batch.seq_id, reason);
-                        continue;
-                    }
-                };
+                    max_schedule_slot,
+                    seq_id,
+                } = batch;
                 stats.num_buffered = stats
                     .num_buffered
                     .saturating_add(txns_max_age.len());
@@ -531,12 +564,12 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
                         priority,
                         cost,
                         revert_on_error,
-                        batch.max_schedule_slot,
+                        max_schedule_slot,
                     )
                     .is_none()
                 {
                     stats.num_dropped_on_capacity += 1;
-                    self.send_container_full_txn_batch_result(batch.seq_id);
+                    self.send_container_full_txn_batch_result(seq_id);
                     continue;
                 };
 
@@ -547,7 +580,7 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
                 let deadline = Instant::now() + Duration::from_millis(100);
                 loop {
                     let (batch, receive_time_us) =
-                        measure_us!(self.bundle_receiver.recv_deadline(deadline));
+                        measure_us!(self.parsed_batch_receiver.recv_deadline(deadline));
                     stats.receive_time_us += receive_time_us;
 
                     let batch = match batch {
@@ -564,6 +597,14 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
         }
 
         Ok(stats)
+    }
+}
+
+impl Drop for BamReceiveAndBuffer {
+    fn drop(&mut self) {
+        if let Some(parsing_thread) = self.parsing_thread.take() {
+            parsing_thread.join().unwrap();
+        }
     }
 }
 
@@ -686,13 +727,16 @@ mod tests {
         bank_forks: Arc<RwLock<BankForks>>,
         blacklisted_accounts: HashSet<Pubkey>,
     ) -> (
+        Arc<AtomicBool>,
         BamReceiveAndBuffer,
         TransactionStateContainer<RuntimeTransaction<SanitizedTransaction>>,
         crossbeam_channel::Receiver<BamOutboundMessage>,
     ) {
+        let exit = Arc::new(AtomicBool::new(false));
         let (response_sender, response_receiver) =
             crossbeam_channel::unbounded::<BamOutboundMessage>();
         let receive_and_buffer = BamReceiveAndBuffer::new(
+            exit.clone(),
             Arc::new(AtomicBool::new(true)),
             receiver,
             response_sender,
@@ -700,7 +744,7 @@ mod tests {
             blacklisted_accounts,
         );
         let container = TransactionStateContainer::with_capacity(100);
-        (receive_and_buffer, container, response_receiver)
+        (exit, receive_and_buffer, container, response_receiver)
     }
 
     // verify container state makes sense:
@@ -738,11 +782,11 @@ mod tests {
             Arc<RwLock<BankForks>>,
             HashSet<Pubkey>,
         )
-            -> (R, R::Container, Receiver<BamOutboundMessage>),
+            -> (Arc<AtomicBool>, R, R::Container, Receiver<BamOutboundMessage>),
     ) {
         let (sender, receiver) = unbounded();
         let (bank_forks, mint_keypair) = test_bank_forks();
-        let (mut receive_and_buffer, mut container, _response_sender) =
+        let (exit, mut receive_and_buffer, mut container, _response_sender) =
             setup_receive_and_buffer(receiver, bank_forks.clone(), HashSet::new());
         let transaction = transfer(
             &mint_keypair,
@@ -764,13 +808,14 @@ mod tests {
 
         assert_eq!(num_received, 1);
         verify_container(&mut container, 1);
+        exit.store(true, Ordering::Relaxed);
     }
 
     #[test]
     fn test_receive_and_buffer_invalid_packet() {
         let (bank_forks, _mint_keypair) = test_bank_forks();
         let (sender, receiver) = unbounded();
-        let (mut receive_and_buffer, mut container, response_receiver) =
+        let (exit, mut receive_and_buffer, mut container, response_receiver) =
             setup_bam_receive_and_buffer(receiver, bank_forks.clone(), HashSet::new());
 
         // Create an invalid packet with no data
@@ -797,6 +842,7 @@ mod tests {
             matches!(&txn_batch_result.result, Some(atomic_txn_batch_result::Result::NotCommitted(not_committed)) if
                 matches!(not_committed.reason, Some(Reason::DeserializationError(_))))
         ));
+        exit.store(true, Ordering::Relaxed);
     }
 
     #[test]
