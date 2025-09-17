@@ -117,13 +117,13 @@ impl BamReceiveAndBuffer {
                 Err(RecvTimeoutError::Timeout) => continue,
             };
 
-            let (parsed_batch, stats) = Self::parse_batch(
+            let ((parsed_batch, _stats), total_us) = measure_us!(Self::parse_batch(
                 &bundle,
                 &bank_forks,
                 &blacklisted_accounts,
                 &mut metrics,
-            );
-            metrics.increment_total_us(stats.receive_time_us + stats.buffer_time_us);
+            ));
+            metrics.increment_total_us(total_us);
 
             if let Err(reason) = parsed_batch {
                 let _ = response_sender.try_send(BamOutboundMessage::AtomicTxnBatchResult(
