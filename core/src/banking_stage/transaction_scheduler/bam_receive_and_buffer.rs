@@ -395,7 +395,7 @@ impl BamReceiveAndBuffer {
         )
     }
 
-    fn batch_receive_until(&self, recv_timeout: Duration, packet_count_upperbound: usize) -> Result<(usize, Vec<AtomicTxnBatch>), RecvTimeoutError> {
+    fn batch_receive_until(&self, recv_timeout: Duration, batch_count_upperbound: usize) -> Result<(usize, Vec<AtomicTxnBatch>), RecvTimeoutError> {
         let start = Instant::now();
 
         let batch = self.bundle_receiver.recv_timeout(recv_timeout)?;
@@ -406,9 +406,7 @@ impl BamReceiveAndBuffer {
             trace!("got more packet batches in bam receive and buffer");
             num_packets_received += batch.packets.len();
             atomic_txn_batches.push(batch);
-
-            // todo: might want to switch the upperbound to be on number of batches instead of packets
-            if start.elapsed() >= recv_timeout || num_packets_received >= packet_count_upperbound {
+            if start.elapsed() >= recv_timeout || atomic_txn_batches.len() >= batch_count_upperbound {
                 break;
             }
         }
@@ -632,7 +630,7 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
             buffer_time_us: 0,
         };
 
-        const PACKET_BURST_LIMIT: usize = 1_000;
+        const ATOMIC_TXN_BATCH_BURST: usize = 128;
         const TIMEOUT: Duration = Duration::from_millis(10);
         const REPORT_INTERVAL: u128 = 2_000; // milliseconds, report every 2 seconds
 
@@ -640,7 +638,7 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
             BufferedPacketsDecision::Consume(_) | BufferedPacketsDecision::Hold => loop {
                 let (batches, receive_time_us) = measure_us!(self.batch_receive_until(
                     TIMEOUT,
-                    PACKET_BURST_LIMIT
+                    ATOMIC_TXN_BATCH_BURST
                 ));
                 stats.receive_time_us += receive_time_us;
 
