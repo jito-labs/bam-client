@@ -762,7 +762,6 @@ mod tests {
         crate::banking_stage::{
             tests::create_slow_genesis_config,
             transaction_scheduler::transaction_state_container::StateContainer,
-            BamReceiveAndBuffer,
         },
         crossbeam_channel::{unbounded, Receiver},
         solana_keypair::Keypair,
@@ -821,9 +820,6 @@ mod tests {
         (receive_and_buffer, container, response_receiver)
     }
 
-    // verify container state makes sense:
-    // 1. Number of transactions matches expectation
-    // 2. All transactions IDs in priority queue exist in the map
     fn verify_container<Tx: TransactionWithMeta>(
         container: &mut impl StateContainer<Tx>,
         expected_length: usize,
@@ -891,7 +887,6 @@ mod tests {
         let (mut receive_and_buffer, mut container, response_receiver) =
             setup_bam_receive_and_buffer(receiver, bank_forks.clone(), HashSet::new());
 
-        // Create an invalid packet with no data
         let bundle = AtomicTxnBatch {
             seq_id: 1,
             packets: vec![Packet {
@@ -917,20 +912,6 @@ mod tests {
         ));
     }
 
-    // Helper to create batches and test batch processing
-    fn create_batch_and_test_result(
-        batches: Vec<AtomicTxnBatch>,
-        bank_forks: &Arc<RwLock<BankForks>>,
-        blacklisted_accounts: &HashSet<Pubkey>,
-    ) -> (Vec<Result<(Vec<ImmutableDeserializedPacket>, bool, u32), (Reason, u32)>>, ReceivingStats) {
-        let (_sender, receiver) = unbounded();
-        let (_receive_and_buffer, _container, _response_receiver) =
-            setup_bam_receive_and_buffer(receiver, bank_forks.clone(), blacklisted_accounts.clone());
-
-        let mut stats = SigverifyStats::default();
-        BamReceiveAndBuffer::batch_deserialize_and_verify(batches, &mut stats)
-    }
-
     #[test]
     fn test_batch_deserialize_success() {
         let (bank_forks, mint_keypair) = test_bank_forks();
@@ -948,7 +929,9 @@ mod tests {
             }],
             max_schedule_slot: 0,
         };
-        let (results, _stats) = create_batch_and_test_result(vec![bundle], &bank_forks, &HashSet::new());
+        
+        let mut stats = SigverifyStats::default();
+        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(vec![bundle], &mut stats);
         
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
@@ -960,13 +943,15 @@ mod tests {
 
     #[test]
     fn test_batch_deserialize_empty() {
-        let (bank_forks, _mint_keypair) = test_bank_forks();
+        let (_bank_forks, _mint_keypair) = test_bank_forks();
         let batch = AtomicTxnBatch {
             seq_id: 1,
             packets: vec![],
             max_schedule_slot: 0,
         };
-        let (results, batch_stats) = create_batch_and_test_result(vec![batch], &bank_forks, &HashSet::new());
+        
+        let mut stats = SigverifyStats::default();
+        let (results, batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(vec![batch], &mut stats);
         
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err());
@@ -979,16 +964,18 @@ mod tests {
 
     #[test]
     fn test_batch_deserialize_invalid_packet() {
-        let (bank_forks, _mint_keypair) = test_bank_forks();
+        let (_bank_forks, _mint_keypair) = test_bank_forks();
         let batch = AtomicTxnBatch {
             seq_id: 1,
             packets: vec![Packet {
-                data: vec![0; PACKET_DATA_SIZE + 1], // Invalid size
+                data: vec![0; PACKET_DATA_SIZE + 1],
                 meta: None,
             }],
             max_schedule_slot: 0,
         };
-        let (results, _batch_stats) = create_batch_and_test_result(vec![batch], &bank_forks, &HashSet::new());
+        
+        let mut stats = SigverifyStats::default();
+        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(vec![batch], &mut stats);
         
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err());
@@ -1016,12 +1003,13 @@ mod tests {
             }],
             max_schedule_slot: 0,
         };
-        let (results, _batch_stats) = create_batch_and_test_result(vec![batch], &bank_forks, &HashSet::new());
+        
+        let mut stats = SigverifyStats::default();
+        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(vec![batch], &mut stats);
         
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
         
-        // Now test the parse step with the deserialized packets
         if let Ok((deserialized_packets, revert_on_error, seq_id)) = &results[0] {
             let (result, stats) = BamReceiveAndBuffer::parse_deserialized_batch(
                 deserialized_packets.clone(),
@@ -1072,7 +1060,9 @@ mod tests {
             ],
             max_schedule_slot: 0,
         };
-        let (results, batch_stats) = create_batch_and_test_result(vec![bundle], &bank_forks, &HashSet::new());
+        
+        let mut stats = SigverifyStats::default();
+        let (results, batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(vec![bundle], &mut stats);
         
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err());
@@ -1103,12 +1093,13 @@ mod tests {
             }],
             max_schedule_slot: 0,
         };
-        let (results, _batch_stats) = create_batch_and_test_result(vec![batch], &bank_forks, &HashSet::new());
+        
+        let mut stats = SigverifyStats::default();
+        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(vec![batch], &mut stats);
         
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
         
-        // Now test the parse step with blacklisted accounts
         if let Ok((deserialized_packets, revert_on_error, seq_id)) = &results[0] {
             let (result, stats) = BamReceiveAndBuffer::parse_deserialized_batch(
                 deserialized_packets.clone(),
@@ -1128,13 +1119,11 @@ mod tests {
     fn test_batch_deserialize_rejects_vote_transactions() {
         let (bank_forks, _mint_keypair) = test_bank_forks();
 
-        // Create a proper vote transaction
         let vote_keypair = Keypair::new();
         let node_keypair = Keypair::new();
         let authorized_voter = Keypair::new();
         let recent_blockhash = bank_forks.read().unwrap().root_bank().last_blockhash();
 
-        // Create a vote transaction
         let vote_tx = Transaction::new(
             &[&node_keypair, &authorized_voter],
             Message::new(
@@ -1148,13 +1137,11 @@ mod tests {
             recent_blockhash,
         );
 
-        // Serialize the transaction
         let vote_data = bincode::serialize(&VersionedTransaction::from(vote_tx)).unwrap();
 
-        // Create a packet with the vote transaction
         let meta = jito_protos::proto::bam_types::Meta {
             flags: Some(jito_protos::proto::bam_types::PacketFlags {
-                simple_vote_tx: true, // this triggers parsed_packet.is_simple_vote()
+                simple_vote_tx: true,
                 ..Default::default()
             }),
             size: vote_data.len() as u64,
@@ -1168,12 +1155,13 @@ mod tests {
             }],
             max_schedule_slot: 0,
         };
-        let (results, _batch_stats) = create_batch_and_test_result(vec![batch], &bank_forks, &HashSet::new());
+        
+        let mut stats = SigverifyStats::default();
+        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(vec![batch], &mut stats);
         
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
         
-        // Now test the parse step - vote transactions should be rejected during parsing
         if let Ok((deserialized_packets, revert_on_error, seq_id)) = &results[0] {
             let (result, stats) = BamReceiveAndBuffer::parse_deserialized_batch(
                 deserialized_packets.clone(),
