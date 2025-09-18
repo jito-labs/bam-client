@@ -55,6 +55,12 @@ use {
     solana_svm::transaction_error_metrics::TransactionErrorMetrics,
 };
 
+type PrevalidationResult = Result<(AtomicTxnBatch, bool, u32), (Reason, u32)>;
+type PrevalidationOutput = (Vec<PrevalidationResult>, ReceivingStats);
+
+type DeserializationResult = Result<(Vec<ImmutableDeserializedPacket>, bool, u32), (Reason, u32)>;
+type DeserializationOutput = (Vec<DeserializationResult>, ReceivingStats);
+
 pub struct BamReceiveAndBuffer {
     bam_enabled: Arc<AtomicBool>,
     bundle_receiver: crossbeam_channel::Receiver<AtomicTxnBatch>,
@@ -348,9 +354,9 @@ impl BamReceiveAndBuffer {
     }
 
     /// Check basic constraints and extract revert_on_error flags
-    fn prevalidate_batches<'a>(
-        atomic_txn_batches: &'a [AtomicTxnBatch]
-    ) -> (Vec<Result<(&'a AtomicTxnBatch, bool, u32), (Reason, u32)>>, ReceivingStats) {
+    fn prevalidate_batches(
+        atomic_txn_batches: &[AtomicTxnBatch]
+    ) -> PrevalidationOutput {
         let mut stats = ReceivingStats {
             num_received: 0,
             num_dropped_without_parsing: 0,
@@ -410,14 +416,14 @@ impl BamReceiveAndBuffer {
                     ), atomic_txn_batch.seq_id));
                 };
 
-                Ok((atomic_txn_batch, revert_on_error, atomic_txn_batch.seq_id))
+                Ok((atomic_txn_batch.clone(), revert_on_error, atomic_txn_batch.seq_id))
             })
             .collect();
 
         (prevalidated, stats)
     }
 
-    fn batch_deserialize_and_verify(atomic_txn_batches: Vec<AtomicTxnBatch>, metrics: &mut BamReceiveAndBufferMetrics) -> (Vec<Result<(Vec<ImmutableDeserializedPacket>, bool, u32), (Reason, u32)>>, ReceivingStats) {
+    fn batch_deserialize_and_verify(atomic_txn_batches: Vec<AtomicTxnBatch>, metrics: &mut BamReceiveAndBufferMetrics) -> DeserializationOutput {
         fn proto_packet_to_packet(from_packet: &Packet) -> solana_packet::Packet {
             let mut to_packet = solana_packet::Packet::default();
             to_packet.meta_mut().size = from_packet.data.len();
