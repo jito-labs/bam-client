@@ -56,6 +56,7 @@ pub struct BamReceiveAndBuffer {
     bam_enabled: Arc<AtomicBool>,
     response_sender: Sender<BamOutboundMessage>,
     parsed_batch_receiver: crossbeam_channel::Receiver<ParsedBatch>,
+    recv_stats_receiver: crossbeam_channel::Receiver<ReceivingStats>,
     parsing_thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -70,6 +71,8 @@ impl BamReceiveAndBuffer {
     ) -> Self {
         let (parsed_batch_sender, parsed_batch_receiver) =
             crossbeam_channel::unbounded::<ParsedBatch>();
+        let (recv_stats_sender, recv_stats_receiver) =
+            crossbeam_channel::unbounded::<ReceivingStats>();
 
         let response_sender_clone = response_sender.clone();
         let bank_forks_clone = bank_forks.clone();
@@ -79,6 +82,7 @@ impl BamReceiveAndBuffer {
                 exit,
                 bundle_receiver,
                 parsed_batch_sender,
+                recv_stats_sender,
                 response_sender_clone,
                 bank_forks_clone,
                 blacklisted_accounts_clone,
@@ -89,6 +93,7 @@ impl BamReceiveAndBuffer {
             bam_enabled,
             response_sender,
             parsed_batch_receiver,
+            recv_stats_receiver,
             parsing_thread: Some(parsing_thread),
         }
     }
@@ -97,18 +102,22 @@ impl BamReceiveAndBuffer {
         exit: Arc<AtomicBool>,
         bundle_receiver: crossbeam_channel::Receiver<AtomicTxnBatch>,
         parsed_batch_sender: crossbeam_channel::Sender<ParsedBatch>,
+        recv_stats_sender: crossbeam_channel::Sender<ReceivingStats>,
         response_sender: Sender<BamOutboundMessage>,
         bank_forks: Arc<RwLock<BankForks>>,
         blacklisted_accounts: HashSet<Pubkey>,
     ) {
         let mut last_metrics_report = Instant::now();
         let mut metrics = BamReceiveAndBufferMetrics::default();
+        let mut recv_stats = ReceivingStats::default();
         const METRICS_REPORT_INTERVAL: Duration = Duration::from_millis(20);
 
         while !exit.load(Ordering::Relaxed) {
             if last_metrics_report.elapsed() > METRICS_REPORT_INTERVAL {
                 metrics.report();
                 last_metrics_report = Instant::now();
+                let _ = recv_stats_sender.try_send(recv_stats);
+                recv_stats = ReceivingStats::default();
             }
 
             let bundle = match bundle_receiver.recv_timeout(Duration::from_millis(20)) {
@@ -117,12 +126,13 @@ impl BamReceiveAndBuffer {
                 Err(RecvTimeoutError::Timeout) => continue,
             };
 
-            let ((parsed_batch, _stats), total_us) = measure_us!(Self::parse_batch(
+            let ((parsed_batch, stats), total_us) = measure_us!(Self::parse_batch(
                 &bundle,
                 &bank_forks,
                 &blacklisted_accounts,
                 &mut metrics,
             ));
+            recv_stats.accumulate(stats);
             metrics.increment_total_us(total_us);
 
             if let Err(reason) = parsed_batch {
@@ -508,21 +518,12 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
         let start = Instant::now();
         const MAX_RECV_TIME: Duration = Duration::from_millis(5);
 
-        let mut stats = ReceivingStats {
-            num_received: 0,
-            num_dropped_without_parsing: 0,
-            num_dropped_on_parsing_and_sanitization: 0,
-            num_dropped_on_lock_validation: 0,
-            num_dropped_on_compute_budget: 0,
-            num_dropped_on_age: 0,
-            num_dropped_on_already_processed: 0,
-            num_dropped_on_fee_payer: 0,
-            num_dropped_on_capacity: 0,
-            num_buffered: 0,
-            num_dropped_on_blacklisted_account: 0,
-            receive_time_us: 0,
-            buffer_time_us: 0,
-        };
+        let mut stats = ReceivingStats::default();
+
+        // Receive all stats
+        while let Ok(batch_stats) = self.recv_stats_receiver.try_recv() {
+            stats.accumulate(batch_stats);
+        }
 
         match decision {
             BufferedPacketsDecision::Consume(_) | BufferedPacketsDecision::Hold => loop {
@@ -538,8 +539,6 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
                         break;
                     }
                 };
-
-                stats.num_received += 1;
 
                 // If BAM is not enabled, drain the channel
                 if !is_bam_enabled {
