@@ -1297,7 +1297,7 @@ dependencies = [
 
 [[package]]
 name = "bam-banking-bench"
-version = "3.1.0"
+version = "2.3.9"
 dependencies = [
  "agave-banking-stage-ingress-types",
  "assert_matches",
@@ -1311,20 +1311,20 @@ dependencies = [
  "solana-compute-budget-interface",
  "solana-core",
  "solana-gossip",
- "solana-hash 3.0.0",
+ "solana-hash",
  "solana-keypair",
  "solana-ledger",
  "solana-logger",
  "solana-measure",
- "solana-message 3.0.0",
+ "solana-message",
  "solana-perf",
  "solana-poh",
- "solana-pubkey 3.0.0",
+ "solana-pubkey",
  "solana-runtime",
  "solana-signature",
  "solana-signer",
  "solana-streamer",
- "solana-system-interface 2.0.0",
+ "solana-system-interface",
  "solana-system-transaction",
  "solana-time-utils",
  "solana-tpu-client",
