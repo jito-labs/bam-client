@@ -1297,7 +1297,7 @@ dependencies = [
 
 [[package]]
 name = "bam-local-cluster"
-version = "2.3.7"
+version = "2.3.9"
 dependencies = [
  "agave-feature-set",
  "anyhow",
