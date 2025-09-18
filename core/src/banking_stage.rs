@@ -15,7 +15,7 @@ use {
             consume_worker::ConsumeWorker,
             packet_deserializer::PacketDeserializer,
             transaction_scheduler::{
-                bam_scheduler, prio_graph_scheduler::PrioGraphScheduler,
+                prio_graph_scheduler::PrioGraphScheduler,
                 scheduler_controller::SchedulerController, scheduler_error::SchedulerError,
             },
         },
@@ -785,8 +785,6 @@ impl BankingStage {
                                 work_senders,
                                 finished_work_receiver,
                                 bam_dependencies.outbound_sender.clone(),
-                                bam_scheduler::MAX_SCHEDULED_PER_WORKER,
-                                bam_scheduler::MAX_TXN_PER_BATCH,
                                 bank_forks.clone(),
                             );
                         let receive_and_buffer = BamReceiveAndBuffer::new(
