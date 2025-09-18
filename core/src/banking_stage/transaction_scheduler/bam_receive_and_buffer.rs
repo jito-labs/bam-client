@@ -457,7 +457,10 @@ impl BamReceiveAndBuffer {
             metrics.increment_deserialization_us(duration_us);
 
             match packet_result {
-                Ok(deserialized) => Ok(deserialized),
+                Ok(deserialized) => {
+                    metrics.sigverify_metrics.increment_total_packets_verified(1);
+                    Ok(deserialized)
+                },
                 Err((i, e)) => Err((Reason::DeserializationError(
                     jito_protos::proto::bam_types::DeserializationError {
                         index: i as u32,
@@ -505,8 +508,6 @@ impl BamReceiveAndBuffer {
         metrics.sigverify_metrics.increment_verify_batches_pp_us(verify_packet_batch_time_us.as_us(), packet_count);
         metrics.sigverify_metrics.increment_batch_packets_len(packet_count);
         metrics.sigverify_metrics.increment_total_verify_time(verify_packet_batch_time_us.as_us());
-        metrics.sigverify_metrics.increment_total_packets_verified(packet_count);
-        metrics.sigverify_metrics.increment_total_batches_verified(packet_batches.len());
 
         let mut packet_batch_iter = packet_batches.iter();
         let results = pre_validated
@@ -611,6 +612,7 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
                 for result in deserialized_batches_results {
                     match result {
                         Ok((deserialized_batch, revert_on_error, seq_id)) => {
+                            self.metrics.sigverify_metrics.increment_total_batches_verified(1);
                             let ((parse_result, parse_stats), duration_us) = measure_us!(Self::parse_deserialized_batch(
                                 deserialized_batch,
                                 seq_id,
