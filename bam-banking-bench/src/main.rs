@@ -1,21 +1,55 @@
 #![allow(clippy::arithmetic_side_effects)]
 use {
-    assert_matches::assert_matches, clap::{crate_description, crate_name, Arg, ArgEnum, Command}, crossbeam_channel::{unbounded, Receiver}, jito_protos::proto::bam_types::{AtomicTxnBatch, Packet}, log::*, rand::{thread_rng, Rng}, rayon::prelude::*, solana_compute_budget_interface::ComputeBudgetInstruction, solana_core::{
-        bam_dependencies::BamDependencies, banking_stage::{update_bank_forks_and_poh_recorder_for_new_tpu_bank, BankingStage}, banking_trace::{BankingTracer, Channels, BANKING_TRACE_DIR_DEFAULT_BYTE_LIMIT}, bundle_stage::bundle_account_locker::BundleAccountLocker, proxy::block_engine_stage::BlockBuilderFeeInfo, validator::{BlockProductionMethod, TransactionStructure},
-    }, solana_gossip::{cluster_info::ClusterInfo, contact_info::ContactInfo}, solana_hash::Hash, solana_keypair::Keypair, solana_ledger::{
+    assert_matches::assert_matches,
+    clap::{crate_description, crate_name, Arg, ArgEnum, Command},
+    crossbeam_channel::{unbounded, Receiver},
+    jito_protos::proto::bam_types::{AtomicTxnBatch, Packet},
+    log::*,
+    rand::{thread_rng, Rng},
+    rayon::prelude::*,
+    solana_compute_budget_interface::ComputeBudgetInstruction,
+    solana_core::{
+        bam_dependencies::BamDependencies,
+        banking_stage::{update_bank_forks_and_poh_recorder_for_new_tpu_bank, BankingStage},
+        banking_trace::{BankingTracer, Channels, BANKING_TRACE_DIR_DEFAULT_BYTE_LIMIT},
+        bundle_stage::bundle_account_locker::BundleAccountLocker,
+        proxy::block_engine_stage::BlockBuilderFeeInfo,
+        validator::{BlockProductionMethod, TransactionStructure},
+    },
+    solana_gossip::{cluster_info::ClusterInfo, contact_info::ContactInfo},
+    solana_hash::Hash,
+    solana_keypair::Keypair,
+    solana_ledger::{
         blockstore::Blockstore,
         genesis_utils::{create_genesis_config, GenesisConfigInfo},
         get_tmp_ledger_path_auto_delete,
         leader_schedule_cache::LeaderScheduleCache,
-    }, solana_measure::measure::Measure, solana_message::Message, solana_perf::packet::{to_packet_batches, PacketBatch}, solana_poh::poh_recorder::{create_test_recorder, PohRecorder, WorkingBankEntry}, solana_pubkey::{self as pubkey, Pubkey}, solana_runtime::{
+    },
+    solana_measure::measure::Measure,
+    solana_message::Message,
+    solana_perf::packet::{to_packet_batches, PacketBatch},
+    solana_poh::poh_recorder::{create_test_recorder, PohRecorder, WorkingBankEntry},
+    solana_pubkey::{self as pubkey, Pubkey},
+    solana_runtime::{
         bank::Bank, bank_forks::BankForks, prioritization_fee_cache::PrioritizationFeeCache,
-    }, solana_signature::Signature, solana_signer::Signer, solana_streamer::socket::SocketAddrSpace, solana_system_interface::instruction as system_instruction, solana_system_transaction as system_transaction, solana_time_utils::timestamp, solana_transaction::Transaction, std::{
+    },
+    solana_signature::Signature,
+    solana_signer::Signer,
+    solana_streamer::socket::SocketAddrSpace,
+    solana_system_interface::instruction as system_instruction,
+    solana_system_transaction as system_transaction,
+    solana_time_utils::timestamp,
+    solana_transaction::Transaction,
+    std::{
         collections::HashSet,
         num::NonZeroUsize,
-        sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, RwLock},
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc, Mutex, RwLock,
+        },
         thread::sleep,
         time::{Duration, Instant},
-    }
+    },
 };
 
 // transfer transaction cost = 1 * SIGNATURE_COST +
@@ -426,7 +460,7 @@ fn main() {
     let (batch_sender, batch_receiver) = unbounded();
     let (outbound_sender, outbound_receiver) = unbounded();
     let keypair = Keypair::new();
-    let bam_dependencies = BamDependencies{
+    let bam_dependencies = BamDependencies {
         bam_enabled: Arc::new(AtomicBool::new(true)),
         batch_sender: batch_sender.clone(),
         batch_receiver,
@@ -496,17 +530,21 @@ fn main() {
                 packet_batch_index,
                 timestamp(),
             );
-            
+
             // 1. Convert to Bam message
-            let bam_batch = AtomicTxnBatch{
+            let bam_batch = AtomicTxnBatch {
                 seq_id: next_seq_id,
                 max_schedule_slot: bank.slot(),
-                packets: packet_batch.iter().map(|p| {
-                    Packet{
+                packets: packet_batch
+                    .iter()
+                    .map(|p| Packet {
                         data: p.data(..).unwrap_or_default().to_vec(),
-                        meta: Some(jito_protos::proto::bam_types::Meta { size: p.meta().size as u64, flags: None })
-                    }
-                }).collect(),
+                        meta: Some(jito_protos::proto::bam_types::Meta {
+                            size: p.meta().size as u64,
+                            flags: None,
+                        }),
+                    })
+                    .collect(),
             };
             next_seq_id += 1;
 
