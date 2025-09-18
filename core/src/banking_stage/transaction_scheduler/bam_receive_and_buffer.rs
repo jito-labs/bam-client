@@ -498,8 +498,6 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
                 };
                 stats.num_received += 1;
 
-                info!("BAM received batch with {} packets", batch.packets.len());
-
                 // If BAM is not enabled, drain the channel
                 if !is_bam_enabled {
                     stats.num_dropped_without_parsing += 1;
@@ -526,12 +524,6 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
                 stats.num_buffered = stats
                     .num_buffered
                     .saturating_add(txns_max_age.len());
-
-                info!(
-                    "BAM parsed batch with {} transactions, total cost {}",
-                    txns_max_age.len(),
-                    cost
-                );
 
                 if container
                     .insert_new_batch(
