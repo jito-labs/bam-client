@@ -336,21 +336,23 @@ impl BamReceiveAndBuffer {
         )
     }
 
-    fn batch_receive_until(&self, &start: &Instant, recv_timeout: Duration, batch_count_upperbound: usize) -> Result<(usize, Vec<AtomicTxnBatch>), RecvTimeoutError> {
+    fn batch_receive_until(&self, recv_buffer: &mut Vec<AtomicTxnBatch>, &start: &Instant, recv_timeout: Duration, batch_count_upperbound: usize) -> Result<(usize, usize), RecvTimeoutError> {
         let batch = self.bundle_receiver.recv_timeout(recv_timeout)?;
         let mut num_packets_received = batch.packets.len();
-        let mut atomic_txn_batches = vec![batch];
+        let mut num_atomic_txn_batches_received = 1;
+        recv_buffer.push(batch);
 
         while let Ok(batch) = self.bundle_receiver.try_recv() {
             trace!("got more packet batches in bam receive and buffer");
             num_packets_received += batch.packets.len();
-            atomic_txn_batches.push(batch);
-            if start.elapsed() > recv_timeout || atomic_txn_batches.len() >= batch_count_upperbound {
+            num_atomic_txn_batches_received += 1;
+            recv_buffer.push(batch);
+            if start.elapsed() > recv_timeout || recv_buffer.len() >= batch_count_upperbound {
                 break;
             }
         }
 
-        Ok((num_packets_received, atomic_txn_batches)) 
+        Ok((num_packets_received, num_atomic_txn_batches_received))
     }
 
     /// Check basic constraints and extract revert_on_error flags
@@ -423,7 +425,7 @@ impl BamReceiveAndBuffer {
         (prevalidated, stats)
     }
 
-    fn batch_deserialize_and_verify(atomic_txn_batches: Vec<AtomicTxnBatch>, metrics: &mut BamReceiveAndBufferMetrics) -> DeserializationOutput {
+    fn batch_deserialize_and_verify(atomic_txn_batches: &Vec<AtomicTxnBatch>, metrics: &mut BamReceiveAndBufferMetrics) -> DeserializationOutput {
         fn proto_packet_to_packet(from_packet: &Packet) -> solana_packet::Packet {
             let mut to_packet = solana_packet::Packet::default();
             to_packet.meta_mut().size = from_packet.data.len();
@@ -583,19 +585,20 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
             self.last_metrics_report = Instant::now();
         }
 
+        let mut recv_buffer = Vec::with_capacity(ATOMIC_TXN_BATCH_BURST * 2);
         match decision {
             BufferedPacketsDecision::Consume(_) | BufferedPacketsDecision::Hold => loop {
-                let (batches, receive_time_us) = measure_us!(self.batch_receive_until(
+                let (recv_info, receive_time_us) = measure_us!(self.batch_receive_until(
+                    &mut recv_buffer,
                     &start,
                     TIMEOUT,
                     ATOMIC_TXN_BATCH_BURST
                 ));
                 stats.receive_time_us += receive_time_us;
 
-                let batches = match batches {
-                    Ok((_, batches)) => {
-                        stats.num_received += batches.len();
-                        batches
+                match recv_info {
+                    Ok((_, num_batches_received)) => {
+                        stats.num_received += num_batches_received;
                     },
                     Err(RecvTimeoutError::Disconnected) => return Err(DisconnectedError),
                     Err(RecvTimeoutError::Timeout) => {
@@ -611,9 +614,10 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
                 }
 
                 let ((deserialized_batches_results, deserialize_stats), duration_us) =
-                    measure_us!(Self::batch_deserialize_and_verify(batches, &mut self.metrics));
+                    measure_us!(Self::batch_deserialize_and_verify(&recv_buffer, &mut self.metrics));
                 stats.accumulate(deserialize_stats);
                 self.metrics.increment_total_us(duration_us);
+                recv_buffer.clear();
 
                 for result in deserialized_batches_results {
                     match result {
@@ -1012,8 +1016,8 @@ mod tests {
         };
         
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(vec![bundle], &mut stats);
-        
+        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&vec![bundle], &mut stats);
+
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
         if let Ok((deserialized_packets, _, seq_id)) = &results[0] {
@@ -1032,8 +1036,8 @@ mod tests {
         };
 
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(vec![batch], &mut stats);
-        
+        let (results, batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&vec![batch], &mut stats);
+
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err());
         assert_eq!(batch_stats.num_dropped_without_parsing, 1);
@@ -1056,7 +1060,7 @@ mod tests {
         };
 
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(vec![batch], &mut stats);
+        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&vec![batch], &mut stats);
         
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err());
@@ -1086,7 +1090,7 @@ mod tests {
         };
         
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(vec![batch], &mut stats);
+        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&vec![batch], &mut stats);
         
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
@@ -1144,8 +1148,7 @@ mod tests {
         };
         
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(vec![bundle], &mut stats);
-        
+        let (results, batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&vec![bundle], &mut stats);
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err());
         assert_eq!(batch_stats.num_dropped_without_parsing, 1);
@@ -1177,7 +1180,7 @@ mod tests {
         };
         
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(vec![batch], &mut stats);
+        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&vec![batch], &mut stats);
         
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
@@ -1240,7 +1243,7 @@ mod tests {
         };
         
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(vec![batch], &mut stats);
+        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&vec![batch], &mut stats);
         
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
