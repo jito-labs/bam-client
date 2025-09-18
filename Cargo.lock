@@ -1392,6 +1392,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "bam-banking-bench"
+version = "3.1.0"
+dependencies = [
+ "agave-banking-stage-ingress-types",
+ "assert_matches",
+ "clap 3.2.23",
+ "crossbeam-channel",
+ "jito-protos",
+ "log",
+ "rand 0.8.5",
+ "rayon",
+ "solana-client",
+ "solana-compute-budget-interface",
+ "solana-core",
+ "solana-gossip",
+ "solana-hash 3.0.0",
+ "solana-keypair",
+ "solana-ledger",
+ "solana-logger",
+ "solana-measure",
+ "solana-message 3.0.0",
+ "solana-perf",
+ "solana-poh",
+ "solana-pubkey 3.0.0",
+ "solana-runtime",
+ "solana-signature",
+ "solana-signer",
+ "solana-streamer",
+ "solana-system-interface 2.0.0",
+ "solana-system-transaction",
+ "solana-time-utils",
+ "solana-tpu-client",
+ "solana-transaction",
+ "solana-version",
+]
+
+[[package]]
 name = "bam-local-cluster"
 version = "3.1.0"
 dependencies = [
