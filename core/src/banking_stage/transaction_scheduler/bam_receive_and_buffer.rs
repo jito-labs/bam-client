@@ -75,8 +75,6 @@ impl BamReceiveAndBuffer {
             crossbeam_channel::unbounded::<ReceivingStats>();
 
         let response_sender_clone = response_sender.clone();
-        let bank_forks_clone = bank_forks.clone();
-        let blacklisted_accounts_clone = blacklisted_accounts.clone();
         let parsing_thread = std::thread::spawn(move || {
             Self::run_parsing(
                 exit,
@@ -84,8 +82,8 @@ impl BamReceiveAndBuffer {
                 parsed_batch_sender,
                 recv_stats_sender,
                 response_sender_clone,
-                bank_forks_clone,
-                blacklisted_accounts_clone,
+                bank_forks,
+                blacklisted_accounts,
             )
         });
 
