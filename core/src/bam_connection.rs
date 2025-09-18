@@ -228,7 +228,10 @@ impl BamConnection {
                     jito_protos::proto::bam_types::MultipleAtomicTxnBatchResult { results },
                 )),
             };
-            if outbound_sender.try_send(v0_to_versioned_proto(outbound)).is_err() {
+            if outbound_sender
+                .try_send(v0_to_versioned_proto(outbound))
+                .is_err()
+            {
                 metrics.outbound_fail.fetch_add(1, Relaxed);
             } else {
                 metrics.outbound_sent.fetch_add(1, Relaxed);
