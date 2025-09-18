@@ -19,6 +19,7 @@ agave-banking-stage-ingress-types = { workspace = true }
 assert_matches = { workspace = true }
 clap = { version = "3.1.8", features = ["derive", "cargo"] }
 crossbeam-channel = { workspace = true }
+jito-protos = { workspace = true }
 log = { workspace = true }
 rand = { workspace = true }
 rayon = { workspace = true }
@@ -45,4 +46,3 @@ solana-time-utils = { workspace = true }
 solana-tpu-client = { workspace = true }
 solana-transaction = { workspace = true }
 solana-version = { workspace = true }
-jito-protos = { workspace = true }
