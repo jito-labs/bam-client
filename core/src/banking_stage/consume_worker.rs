@@ -253,13 +253,12 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
             return true;
         }
 
-        let keypair = cluster_info.keypair();
-
         let mut last_tip_updated_slot_guard = last_tip_updated_slot.lock().unwrap();
         if bank.slot() == *last_tip_updated_slot_guard {
             return true;
         }
 
+        let keypair = cluster_info.keypair().clone();
         let initialize_tip_programs_bundle =
             tip_manager.get_initialize_tip_programs_bundle(bank, &keypair);
         if let Some(init_bundle) = initialize_tip_programs_bundle {
@@ -272,7 +271,11 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
             if result
                 .execute_and_commit_transactions_output
                 .commit_transactions_result
-                .is_err()
+                .map_or(true, |results| {
+                    results
+                        .iter()
+                        .any(|r| matches!(r, CommitTransactionDetails::NotCommitted(_)))
+                })
             {
                 return false;
             }
@@ -293,7 +296,11 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
                 if result
                     .execute_and_commit_transactions_output
                     .commit_transactions_result
-                    .is_err()
+                    .map_or(true, |results| {
+                        results
+                            .iter()
+                            .any(|r| matches!(r, CommitTransactionDetails::NotCommitted(_)))
+                    })
                 {
                     return false;
                 }
@@ -391,12 +398,9 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         self.metrics.has_data.store(true, Ordering::Relaxed);
         let extra_info = if work.respond_with_extra_info {
             Some(FinishedConsumeWorkExtraInfo {
-                processed_results: vec![
-                    TransactionResult::NotCommitted(
-                        NotCommittedReason::PohTimeout,
-                    );
-                    num_retryable
-                ],
+                processed_results: (0..work.transactions.len())
+                    .map(|_| TransactionResult::NotCommitted(NotCommittedReason::PohTimeout))
+                    .collect(),
             })
         } else {
             None
