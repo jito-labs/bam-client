@@ -120,6 +120,7 @@ fn make_accounts_txs(
     contention: WriteLockContention,
     simulate_mint: bool,
     mint_txs_percentage: usize,
+    sigverify_failure_percentage: usize,
 ) -> (Vec<Transaction>, HashMap<Pubkey, Keypair>) {
     let to_pubkey = pubkey::new_rand();
     let chunk_pubkeys: Vec<pubkey::Pubkey> = (0..total_num_transactions / packets_per_batch)
@@ -151,13 +152,19 @@ fn make_accounts_txs(
                 WriteLockContention::Full => to_pubkey,
             };
 
-            let tx = make_transfer_transaction_with_compute_unit_price(
+            let mut tx = make_transfer_transaction_with_compute_unit_price(
                 &payer_key,
                 &destination,
                 1,
                 hash,
                 compute_unit_price,
             );
+
+            // corrupt signature for a percentage of transactions to simulate sigverify failure
+            if should_fail_sigverify(sigverify_failure_percentage, i) {
+                let invalid_sig: [u8; 64] = std::array::from_fn(|_| thread_rng().gen::<u8>());
+                tx.signatures[0] = Signature::from(invalid_sig);
+            }
             
             (tx, payer_key)
         })
@@ -183,6 +190,13 @@ fn is_simulated_mint_transaction(
     simulate_mint && (index % packets_per_batch <= packets_per_batch * mint_txs_percentage / 100)
 }
 
+fn should_fail_sigverify(
+    sigverify_failure_percentage: usize,
+    index: usize,
+) -> bool {
+    sigverify_failure_percentage > 0 && (index % 100 < sigverify_failure_percentage)
+}
+
 fn make_transfer_transaction_with_compute_unit_price(
     from_keypair: &Keypair,
     to: &Pubkey,
@@ -205,6 +219,7 @@ struct PacketsPerIteration {
     transactions: Vec<Transaction>,
     packets_per_batch: usize,
     pubkey_to_keypairs: HashMap<Pubkey, Keypair>,
+    sigverify_failure_percentage: usize,
 }
 
 impl PacketsPerIteration {
@@ -215,6 +230,7 @@ impl PacketsPerIteration {
         write_lock_contention: WriteLockContention,
         simulate_mint: bool,
         mint_txs_percentage: usize,
+        sigverify_failure_percentage: usize,
     ) -> Self {
         let total_num_transactions = packets_per_batch * batches_per_iteration;
         let (transactions, pubkey_to_keypairs) = make_accounts_txs(
@@ -224,6 +240,7 @@ impl PacketsPerIteration {
             write_lock_contention,
             simulate_mint,
             mint_txs_percentage,
+            sigverify_failure_percentage,
         );
 
         let packet_batches: Vec<PacketBatch> = to_packet_batches(&transactions, packets_per_batch);
@@ -233,16 +250,21 @@ impl PacketsPerIteration {
             transactions,
             packets_per_batch,
             pubkey_to_keypairs,
+            sigverify_failure_percentage,
         }
     }
 
     fn refresh_blockhash(&mut self, new_blockhash: Hash) {
-        for tx in self.transactions.iter_mut() {
+        for (index, tx) in self.transactions.iter_mut().enumerate() {
             tx.message.recent_blockhash = new_blockhash;
 
             let payer_pubkey = tx.message.account_keys[0];
-            // re-sign transaction w/ correct signer and updated blockhash
-            if let Some(payer_keypair) = self.pubkey_to_keypairs.get(&payer_pubkey) {
+            
+            if should_fail_sigverify(self.sigverify_failure_percentage, index) {
+                let invalid_sig: [u8; 64] = std::array::from_fn(|_| thread_rng().gen::<u8>());
+                tx.signatures[0] = Signature::from(invalid_sig);
+            } else if let Some(payer_keypair) = self.pubkey_to_keypairs.get(&payer_pubkey) {
+                // re-sign with correct signature for valid transactions
                 tx.sign(&[payer_keypair], new_blockhash);
             }
         }
@@ -338,6 +360,12 @@ fn main() {
                 .requires("simulate_mint")
                 .help("In simulating mint, number of mint transactions out of 100."),
         )
+        .arg(
+            Arg::new("sigverify_failure_percentage")
+                .long("sigverify-failure-percentage")
+                .takes_value(true)
+                .help("Percentage of transactions that should fail signature verification (0-100)"),
+        )
         .get_matches();
 
     let block_production_method = matches
@@ -364,6 +392,10 @@ fn main() {
     let mint_txs_percentage = matches
         .value_of_t::<usize>("mint_txs_percentage")
         .unwrap_or(99);
+    let sigverify_failure_percentage = matches
+        .value_of_t::<usize>("sigverify_failure_percentage")
+        .unwrap_or(0);
+
 
     let mint_total = 1_000_000_000_000;
     let GenesisConfigInfo {
@@ -390,10 +422,12 @@ fn main() {
             write_lock_contention,
             matches.is_present("simulate_mint"),
             mint_txs_percentage,
+            sigverify_failure_percentage,
         ))
     })
     .take(num_chunks)
     .collect();
+
 
     let total_num_transactions: u64 = all_packets
         .iter()
