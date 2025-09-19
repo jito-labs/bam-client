@@ -41,7 +41,7 @@ use {
     solana_time_utils::timestamp,
     solana_transaction::Transaction,
     std::{
-        collections::HashSet,
+        collections::{HashSet, HashMap},
         num::NonZeroUsize,
         sync::{
             atomic::{AtomicBool, Ordering},
@@ -120,36 +120,28 @@ fn make_accounts_txs(
     contention: WriteLockContention,
     simulate_mint: bool,
     mint_txs_percentage: usize,
-) -> Vec<Transaction> {
+) -> (Vec<Transaction>, HashMap<Pubkey, Keypair>) {
     let to_pubkey = pubkey::new_rand();
     let chunk_pubkeys: Vec<pubkey::Pubkey> = (0..total_num_transactions / packets_per_batch)
         .map(|_| pubkey::new_rand())
         .collect();
-    let payer_key = Keypair::new();
-    (0..total_num_transactions)
+
+    let tx_keypair_pairs: Vec<(Transaction, Keypair)> = (0..total_num_transactions)
         .into_par_iter()
         .map(|i| {
+            let payer_key = Keypair::new();
+            
             let is_simulated_mint = is_simulated_mint_transaction(
                 simulate_mint,
                 i,
                 packets_per_batch,
                 mint_txs_percentage,
             );
-            // simulated mint transactions have higher compute-unit-price
+            
             let compute_unit_price = if is_simulated_mint { 5 } else { 1 };
-            let mut new = make_transfer_transaction_with_compute_unit_price(
-                &payer_key,
-                &to_pubkey,
-                1,
-                hash,
-                compute_unit_price,
-            );
-            let sig: [u8; 64] = std::array::from_fn(|_| thread_rng().gen::<u8>());
-            new.message.account_keys[0] = pubkey::new_rand();
-            new.message.account_keys[1] = match contention {
+            let destination = match contention {
                 WriteLockContention::None => pubkey::new_rand(),
                 WriteLockContention::SameBatchOnly => {
-                    // simulated mint transactions have conflict accounts
                     if is_simulated_mint {
                         chunk_pubkeys[i / packets_per_batch]
                     } else {
@@ -158,10 +150,25 @@ fn make_accounts_txs(
                 }
                 WriteLockContention::Full => to_pubkey,
             };
-            new.signatures = vec![Signature::from(sig)];
-            new
+
+            let tx = make_transfer_transaction_with_compute_unit_price(
+                &payer_key,
+                &destination,
+                1,
+                hash,
+                compute_unit_price,
+            );
+            
+            (tx, payer_key)
         })
-        .collect()
+        .collect();
+    
+    let transactions: Vec<Transaction> = tx_keypair_pairs.iter().map(|(tx, _)| tx.clone()).collect();
+    let keypairs: HashMap<Pubkey, Keypair> = tx_keypair_pairs.into_iter()
+        .map(|(tx, keypair)| (tx.message.account_keys[0], keypair))
+        .collect();
+    
+    (transactions, keypairs)
 }
 
 // In simulating mint, `mint_txs_percentage` transactions in a batch are mint transaction
@@ -197,6 +204,7 @@ struct PacketsPerIteration {
     packet_batches: Vec<PacketBatch>,
     transactions: Vec<Transaction>,
     packets_per_batch: usize,
+    pubkey_to_keypairs: HashMap<Pubkey, Keypair>,
 }
 
 impl PacketsPerIteration {
@@ -209,7 +217,7 @@ impl PacketsPerIteration {
         mint_txs_percentage: usize,
     ) -> Self {
         let total_num_transactions = packets_per_batch * batches_per_iteration;
-        let transactions = make_accounts_txs(
+        let (transactions, pubkey_to_keypairs) = make_accounts_txs(
             total_num_transactions,
             packets_per_batch,
             genesis_hash,
@@ -224,14 +232,19 @@ impl PacketsPerIteration {
             packet_batches,
             transactions,
             packets_per_batch,
+            pubkey_to_keypairs,
         }
     }
 
     fn refresh_blockhash(&mut self, new_blockhash: Hash) {
         for tx in self.transactions.iter_mut() {
             tx.message.recent_blockhash = new_blockhash;
-            let sig: [u8; 64] = std::array::from_fn(|_| thread_rng().gen::<u8>());
-            tx.signatures[0] = Signature::from(sig);
+
+            let payer_pubkey = tx.message.account_keys[0];
+            // re-sign transaction w/ correct signer and updated blockhash
+            if let Some(payer_keypair) = self.pubkey_to_keypairs.get(&payer_pubkey) {
+                tx.sign(&[payer_keypair], new_blockhash);
+            }
         }
         self.packet_batches = to_packet_batches(&self.transactions, self.packets_per_batch);
     }
