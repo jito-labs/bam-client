@@ -222,9 +222,18 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             return;
         };
 
+        let mut id_to_worker = HashMap::default();
         let now = Instant::now();
         let working_bank = self.bank_forks.read().unwrap().working_bank();
-        while let Some(id) = self.prio_graph.pop() {
+        while let Some((id, unblocked)) = self.prio_graph.pop_and_unblock() {
+
+            // Update worker mappings:
+            // 1. If a contentious transaction came before in this scheduling round; we MUST use that same worker
+            // 2. Save the worker mapping for all unblocked transactions; once it it their turn, they will go to the same worker
+            let worker_index = id_to_worker.get(&id).cloned().unwrap_or(self.get_best_available_worker().unwrap());
+            id_to_worker.extend(unblocked.iter().map(|id| (*id, worker_index)));
+
+
             let Some((batch_ids, revert_on_error, batch_slot)) = container.get_batch(id.id) else {
                 self.prio_graph.unblock(&id);
                 continue;
@@ -285,7 +294,6 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             }
 
             // Schedulit
-            let worker_index = self.get_best_available_worker().unwrap();
             let mut work = self.get_or_create_work_object();
             let batch_id = self.get_next_schedule_id();
             *num_scheduled += batch_ids.len();

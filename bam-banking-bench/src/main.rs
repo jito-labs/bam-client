@@ -41,7 +41,7 @@ use {
     solana_time_utils::timestamp,
     solana_transaction::Transaction,
     std::{
-        collections::{HashSet, HashMap},
+        collections::{HashMap, HashSet},
         num::NonZeroUsize,
         sync::{
             atomic::{AtomicBool, Ordering},
@@ -130,14 +130,14 @@ fn make_accounts_txs(
         .into_par_iter()
         .map(|i| {
             let payer_key = Keypair::new();
-            
+
             let is_simulated_mint = is_simulated_mint_transaction(
                 simulate_mint,
                 i,
                 packets_per_batch,
                 mint_txs_percentage,
             );
-            
+
             let compute_unit_price = if is_simulated_mint { 5 } else { 1 };
             let destination = match contention {
                 WriteLockContention::None => pubkey::new_rand(),
@@ -158,16 +158,18 @@ fn make_accounts_txs(
                 hash,
                 compute_unit_price,
             );
-            
+
             (tx, payer_key)
         })
         .collect();
-    
-    let transactions: Vec<Transaction> = tx_keypair_pairs.iter().map(|(tx, _)| tx.clone()).collect();
-    let keypairs: HashMap<Pubkey, Keypair> = tx_keypair_pairs.into_iter()
+
+    let transactions: Vec<Transaction> =
+        tx_keypair_pairs.iter().map(|(tx, _)| tx.clone()).collect();
+    let keypairs: HashMap<Pubkey, Keypair> = tx_keypair_pairs
+        .into_iter()
         .map(|(tx, keypair)| (tx.message.account_keys[0], keypair))
         .collect();
-    
+
     (transactions, keypairs)
 }
 
