@@ -52,6 +52,7 @@ pub(crate) struct DisconnectedError;
 
 /// Stats/metrics returned by `receive_and_buffer_packets`.
 #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
+#[derive(Default)]
 pub(crate) struct ReceivingStats {
     pub num_received: usize,
     /// Count of packets that passed sigverify but were dropped
