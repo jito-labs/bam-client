@@ -550,7 +550,7 @@ impl BamReceiveAndBuffer {
         (prevalidated, stats)
     }
 
-    fn batch_deserialize_and_verify(atomic_txn_batches: &Vec<AtomicTxnBatch>, metrics: &mut BamReceiveAndBufferMetrics) -> DeserializationOutput {
+    fn batch_deserialize_and_verify(atomic_txn_batches: &[AtomicTxnBatch], metrics: &mut BamReceiveAndBufferMetrics) -> DeserializationOutput {
         fn proto_packet_to_packet(from_packet: &Packet) -> solana_packet::Packet {
             let mut to_packet = solana_packet::Packet::default();
             to_packet.meta_mut().size = from_packet.data.len();
@@ -1076,7 +1076,7 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
-        if let Ok((deserialized_packets, _, seq_id)) = &results[0] {
+        if let Ok((deserialized_packets, _, seq_id, _max_schedule_slot)) = &results[0] {
             assert_eq!(deserialized_packets.len(), 1);
             assert_eq!(*seq_id, 1);
         }
@@ -1151,11 +1151,12 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
         
-        if let Ok((deserialized_packets, revert_on_error, seq_id)) = &results[0] {
+        if let Ok((deserialized_packets, revert_on_error, seq_id, max_schedule_slot)) = &results[0] {
             let (result, stats) = BamReceiveAndBuffer::parse_deserialized_batch(
                 deserialized_packets.clone(),
                 *seq_id,
                 *revert_on_error,
+                *max_schedule_slot,
                 &bank_forks,
                 &HashSet::new(),
                 &mut stats,
@@ -1241,11 +1242,12 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
         
-        if let Ok((deserialized_packets, revert_on_error, seq_id)) = &results[0] {
+        if let Ok((deserialized_packets, revert_on_error, seq_id, max_schedule_slot)) = &results[0] {
             let (result, stats) = BamReceiveAndBuffer::parse_deserialized_batch(
                 deserialized_packets.clone(),
                 *seq_id,
                 *revert_on_error,
+                *max_schedule_slot,
                 &bank_forks,
                 &blacklisted_accounts,
                 &mut stats,
@@ -1304,11 +1306,12 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
         
-        if let Ok((deserialized_packets, revert_on_error, seq_id)) = &results[0] {
+        if let Ok((deserialized_packets, revert_on_error, seq_id, max_schedule_slot)) = &results[0] {
             let (result, stats) = BamReceiveAndBuffer::parse_deserialized_batch(
                 deserialized_packets.clone(),
                 *seq_id,
                 *revert_on_error,
+                *max_schedule_slot,
                 &bank_forks,
                 &HashSet::new(),
                 &mut stats,
