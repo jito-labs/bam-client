@@ -257,12 +257,9 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
 
             // Filter on check_transactions
             if self.extra_checks_enabled {
-                let transaction_ids = match container.get_batch(id.id) {
-                    Some((tx_ids, _, _)) => tx_ids,
-                    None => {
-                        self.prio_graph.unblock(&id);
-                        continue;
-                    }
+                let Some((transaction_ids, _, _)) = container.get_batch(id.id) else {
+                    self.prio_graph.unblock(&id);
+                    continue;
                 };
                 let sanitized_txs = transaction_ids.iter()
                     .filter_map(|txn_id| container.get_transaction(*txn_id))
