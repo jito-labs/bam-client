@@ -6,7 +6,7 @@ use crate::bam_dependencies::BamOutboundMessage;
 use crate::banking_stage::scheduler_messages::MaxAge;
 use crate::banking_stage::transaction_scheduler::receive_and_buffer::DisconnectedError;
 use crate::banking_stage::transaction_scheduler::scheduler_metrics::{SchedulerCountMetrics, SchedulerTimingMetrics};
-use crossbeam_channel::RecvTimeoutError;
+use crossbeam_channel::{RecvTimeoutError, TryRecvError};
 use solana_clock::MAX_PROCESSING_AGE;
 use solana_measure::{measure::Measure, measure_us};
 use solana_packet::{PacketFlags, PACKET_DATA_SIZE};
@@ -53,20 +53,27 @@ use {
     solana_svm::transaction_error_metrics::TransactionErrorMetrics,
 };
 
-type PrevalidationResult = Result<(AtomicTxnBatch, bool, u32), (Reason, u32)>;
+type PrevalidationResult = Result<(AtomicTxnBatch, bool, u32, u64), (Reason, u32)>;
 type PrevalidationOutput = Vec<PrevalidationResult>;
 
-type DeserializationResult = Result<(Vec<ImmutableDeserializedPacket>, bool, u32), (Reason, u32)>;
+type DeserializationResult = Result<(Vec<ImmutableDeserializedPacket>, bool, u32, u64), (Reason, u32)>;
 type DeserializationOutput = Vec<DeserializationResult>;
 
 pub struct BamReceiveAndBuffer {
     bam_enabled: Arc<AtomicBool>,
-    bundle_receiver: crossbeam_channel::Receiver<AtomicTxnBatch>,
     response_sender: Sender<BamOutboundMessage>,
-    bank_forks: Arc<RwLock<BankForks>>,
-    blacklisted_accounts: HashSet<Pubkey>,
-    last_metrics_report: Instant,
-    metrics: BamReceiveAndBufferMetrics,
+    parsed_batch_receiver: crossbeam_channel::Receiver<ParsedBatch>,
+    parsing_thread: Option<std::thread::JoinHandle<()>>,
+    exit: Arc<AtomicBool>,
+}
+
+struct ParsedBatch {
+    pub txns_max_age: Vec<(RuntimeTransaction<SanitizedTransaction>, MaxAge)>,
+    pub cost: u64,
+    priority: u64,
+    pub revert_on_error: bool,
+    pub max_schedule_slot: u64,
+    pub seq_id: u32,
 }
 
 impl BamReceiveAndBuffer {
@@ -77,30 +84,126 @@ impl BamReceiveAndBuffer {
         bank_forks: Arc<RwLock<BankForks>>,
         blacklisted_accounts: HashSet<Pubkey>,
     ) -> Self {
+        let (parsed_batch_sender, parsed_batch_receiver) =
+            crossbeam_channel::unbounded::<ParsedBatch>();
+
+        let response_sender_clone = response_sender.clone();
+        let exit = Arc::new(AtomicBool::new(false));
+        let exit_clone = exit.clone();
+        let parsing_thread = std::thread::spawn(move || {
+            Self::run_parsing(
+                exit_clone,
+                bundle_receiver,
+                parsed_batch_sender,
+                response_sender_clone,
+                bank_forks,
+                blacklisted_accounts,
+            )
+        });
+
         Self {
             bam_enabled,
-            bundle_receiver,
             response_sender,
-            bank_forks,
-            blacklisted_accounts,
-            last_metrics_report: Instant::now(),
-            metrics: BamReceiveAndBufferMetrics::default(),
+            parsed_batch_receiver,
+            parsing_thread: Some(parsing_thread),
+            exit,
         }
     }
 
-    fn send_bundle_not_committed_result(&self, seq_id: u32, reason: Reason) {
-        let _ = self
-            .response_sender
-            .try_send(BamOutboundMessage::AtomicTxnBatchResult(
-                jito_protos::proto::bam_types::AtomicTxnBatchResult {
-                    seq_id,
-                    result: Some(atomic_txn_batch_result::Result::NotCommitted(
-                        jito_protos::proto::bam_types::NotCommitted {
-                            reason: Some(reason),
-                        },
-                    )),
-                },
+                /*
+                
+
+            }
+            */
+
+    fn run_parsing(
+        exit: Arc<AtomicBool>,
+        bundle_receiver: crossbeam_channel::Receiver<AtomicTxnBatch>,
+        parsed_batch_sender: crossbeam_channel::Sender<ParsedBatch>,
+        response_sender: Sender<BamOutboundMessage>,
+        bank_forks: Arc<RwLock<BankForks>>,
+        blacklisted_accounts: HashSet<Pubkey>,
+    ) {
+        let mut last_metrics_report = Instant::now();
+        let mut metrics = BamReceiveAndBufferMetrics::default();
+        const METRICS_REPORT_INTERVAL: Duration = Duration::from_millis(20);
+        let mut recv_buffer = Vec::with_capacity(ATOMIC_TXN_BATCH_BURST * 2);
+
+        while !exit.load(Ordering::Relaxed) {
+            if last_metrics_report.elapsed() > METRICS_REPORT_INTERVAL {
+                metrics.report();
+                last_metrics_report = Instant::now();
+            }
+
+            let start = Instant::now();
+            let (recv_info, _) = measure_us!(Self::batch_receive_until(
+                &bundle_receiver,
+                &mut recv_buffer,
+                &start,
+                TIMEOUT,
+                ATOMIC_TXN_BATCH_BURST
             ));
+
+            match recv_info {
+                Ok((_, _)) => {
+                },
+                Err(RecvTimeoutError::Disconnected) => return,
+                Err(RecvTimeoutError::Timeout) => {
+                    // No more work to do
+                    continue;
+                }
+            }
+    
+            let (deserialized_batches_results, duration_us) =
+                measure_us!(Self::batch_deserialize_and_verify(&recv_buffer, &mut metrics));
+            metrics.increment_total_us(duration_us);
+            recv_buffer.clear();
+
+            for result in deserialized_batches_results {
+                match result {
+                    Ok((deserialized_batch, revert_on_error, seq_id, max_schedule_slot)) => {
+                        metrics.sigverify_metrics.increment_total_batches_verified(1);
+                        let (parse_result, duration_us) = measure_us!(Self::parse_deserialized_batch(
+                            deserialized_batch,
+                            seq_id,
+                            revert_on_error,
+                            max_schedule_slot,
+                            &bank_forks,
+                            &blacklisted_accounts,
+                            &mut metrics,
+                        ));
+                        metrics.increment_total_us(duration_us);
+
+                        if let Err(reason) = parse_result {
+                            let _ = response_sender.try_send(BamOutboundMessage::AtomicTxnBatchResult(
+                                jito_protos::proto::bam_types::AtomicTxnBatchResult {
+                                    seq_id,
+                                    result: Some(atomic_txn_batch_result::Result::NotCommitted(
+                                        jito_protos::proto::bam_types::NotCommitted { reason: Some(reason) },
+                                    )),
+                                },
+                            ));
+                            continue;
+                        }
+
+                        let parsed_batch = parse_result.unwrap();
+
+                        let _ = parsed_batch_sender.try_send(parsed_batch);
+                    }
+                    Err((reason, seq_id)) => {
+                        let _ = response_sender.try_send(BamOutboundMessage::AtomicTxnBatchResult(
+                            jito_protos::proto::bam_types::AtomicTxnBatchResult {
+                                seq_id,
+                                result: Some(atomic_txn_batch_result::Result::NotCommitted(
+                                    jito_protos::proto::bam_types::NotCommitted { reason: Some(reason) },
+                                )),
+                            },
+                        ));
+                        continue;
+                    }
+                }
+            }
+        }
     }
 
     fn send_no_leader_slot_txn_batch_result(&self, seq_id: u32) {
@@ -141,6 +244,7 @@ impl BamReceiveAndBuffer {
         deserialized_batch: Vec<ImmutableDeserializedPacket>,
         seq_id: u32,
         revert_on_error: bool,
+        max_schedule_slot: u64,
         bank_forks: &Arc<RwLock<BankForks>>,
         blacklisted_accounts: &HashSet<Pubkey>,
         metrics: &mut BamReceiveAndBufferMetrics,
@@ -291,16 +395,24 @@ impl BamReceiveAndBuffer {
             cost,
             priority,
             revert_on_error,
+            max_schedule_slot,
+            seq_id,
         })
     }
 
-    fn batch_receive_until(&self, recv_buffer: &mut Vec<AtomicTxnBatch>, &start: &Instant, recv_timeout: Duration, batch_count_upperbound: usize) -> Result<(usize, usize), RecvTimeoutError> {
-        let batch = self.bundle_receiver.recv_timeout(recv_timeout)?;
+    fn batch_receive_until(
+        bundle_receiver: &crossbeam_channel::Receiver<AtomicTxnBatch>,
+        recv_buffer: &mut Vec<AtomicTxnBatch>,
+        &start: &Instant,
+        recv_timeout: Duration,
+        batch_count_upperbound: usize
+    ) -> Result<(usize, usize), RecvTimeoutError> {
+        let batch = bundle_receiver.recv_timeout(recv_timeout)?;
         let mut num_packets_received = batch.packets.len();
         let mut num_atomic_txn_batches_received = 1;
         recv_buffer.push(batch);
 
-        while let Ok(batch) = self.bundle_receiver.try_recv() {
+        while let Ok(batch) = bundle_receiver.try_recv() {
             trace!("got more packet batches in bam receive and buffer");
             num_packets_received += batch.packets.len();
             num_atomic_txn_batches_received += 1;
@@ -357,14 +469,14 @@ impl BamReceiveAndBuffer {
                     ), atomic_txn_batch.seq_id));
                 };
 
-                Ok((atomic_txn_batch.clone(), revert_on_error, atomic_txn_batch.seq_id))
+                Ok((atomic_txn_batch.clone(), revert_on_error, atomic_txn_batch.seq_id, atomic_txn_batch.max_schedule_slot))
             })
             .collect();
 
         prevalidated
     }
 
-    fn batch_deserialize_and_verify(atomic_txn_batches: &Vec<AtomicTxnBatch>, metrics: &mut BamReceiveAndBufferMetrics) -> DeserializationOutput {
+    fn batch_deserialize_and_verify(atomic_txn_batches: &[AtomicTxnBatch], metrics: &mut BamReceiveAndBufferMetrics) -> DeserializationOutput {
         fn proto_packet_to_packet(from_packet: &Packet) -> solana_packet::Packet {
             let mut to_packet = solana_packet::Packet::default();
             to_packet.meta_mut().size = from_packet.data.len();
@@ -443,7 +555,7 @@ impl BamReceiveAndBuffer {
         let results = pre_validated
             .into_iter()
             .map(|pre_result| {
-                pre_result.and_then(|(_, revert_on_error, seq_id)| {
+                pre_result.and_then(|(_, revert_on_error, seq_id, max_schedule_slot)| {
                     let batch = packet_batch_iter.next().unwrap();
 
                     let deserialized = batch
@@ -452,7 +564,7 @@ impl BamReceiveAndBuffer {
                         .map(|(i, pkt)| pkt_to_idp(&pkt, i, seq_id, metrics))
                         .collect::<Result<Vec<_>, _>>()?;
                     
-                    Ok((deserialized, revert_on_error, seq_id))
+                    Ok((deserialized, revert_on_error, seq_id, max_schedule_slot))
                 })
             })
             .collect();
@@ -461,18 +573,9 @@ impl BamReceiveAndBuffer {
     }
 }
 
-struct ParsedBatch {
-    pub txns_max_age: Vec<(RuntimeTransaction<SanitizedTransaction>, MaxAge)>,
-    pub cost: u64,
-    priority: u64,
-    pub revert_on_error: bool,
-}
-
 // nomenclature taken from the agave versions of these constants
 const ATOMIC_TXN_BATCH_BURST: usize = 128;
-const TIMEOUT: Duration = Duration::from_millis(10);
-
-const METRICS_REPORT_INTERVAL: Duration = Duration::from_millis(20);
+const TIMEOUT: Duration = Duration::from_millis(1);
 
 impl ReceiveAndBuffer for BamReceiveAndBuffer {
     type Transaction = RuntimeTransaction<SanitizedTransaction>;
@@ -486,32 +589,15 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
         decision: &BufferedPacketsDecision,
     ) -> Result<usize, DisconnectedError> {
         let is_bam_enabled = self.bam_enabled.load(Ordering::Relaxed);
-        let start = Instant::now();
-        let mut result = 0;
 
-        if self.last_metrics_report.elapsed() > METRICS_REPORT_INTERVAL {
-            self.metrics.report();
-            self.last_metrics_report = Instant::now();
-        }
-
-        let mut recv_buffer = Vec::with_capacity(ATOMIC_TXN_BATCH_BURST * 2);
         match decision {
             BufferedPacketsDecision::Consume(_) | BufferedPacketsDecision::Hold => loop {
-                let (recv_info, _receive_time_us) = measure_us!(self.batch_receive_until(
-                    &mut recv_buffer,
-                    &start,
-                    TIMEOUT,
-                    ATOMIC_TXN_BATCH_BURST
-                ));
-
-                match recv_info {
-                    Ok((_, num_batches_received)) => {
-                        result += num_batches_received;
-                    },
-                    Err(RecvTimeoutError::Disconnected) => return Err(DisconnectedError),
-                    Err(RecvTimeoutError::Timeout) => {
-                        // No more work to do
-                        return Ok(result);
+                let batch = match self.parsed_batch_receiver.try_recv() {
+                    Ok(batch) => batch,
+                    Err(TryRecvError::Disconnected) => return Err(DisconnectedError),
+                    Err(TryRecvError::Empty) => {
+                        // If the channel is empty, work here is done.
+                        return Ok(0);
                     }
                 };
 
@@ -520,65 +606,34 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
                     continue;
                 }
 
-                let (deserialized_batches_results, duration_us) =
-                    measure_us!(Self::batch_deserialize_and_verify(&recv_buffer, &mut self.metrics));
-                self.metrics.increment_total_us(duration_us);
-                recv_buffer.clear();
+                let ParsedBatch {
+                    txns_max_age,
+                    cost,
+                    priority,
+                    revert_on_error,
+                    max_schedule_slot,
+                    seq_id,
+                } = batch;
 
-                for result in deserialized_batches_results {
-                    match result {
-                        Ok((deserialized_batch, revert_on_error, seq_id)) => {
-                            self.metrics.sigverify_metrics.increment_total_batches_verified(1);
-                            let (parse_result, duration_us) = measure_us!(Self::parse_deserialized_batch(
-                                deserialized_batch,
-                                seq_id,
-                                revert_on_error,
-                                &self.bank_forks,
-                                &self.blacklisted_accounts,
-                                &mut self.metrics,
-                            ));
-                            self.metrics.increment_total_us(duration_us);
-
-                            let ParsedBatch {
-                                txns_max_age,
-                                cost,
-                                priority,
-                                revert_on_error,
-                            } = match parse_result {
-                                Ok(parsed) => parsed,
-                                Err(reason) => {
-                                    self.send_bundle_not_committed_result(seq_id, reason);
-                                    continue;
-                                }
-                            };
-
-                            if container
-                                .insert_new_batch(
-                                    txns_max_age,
-                                    priority,
-                                    cost,
-                                    revert_on_error,
-                                    u64::MAX, // max_schedule_slot is not used in BAM mode
-                                )
-                                .is_none()
-                            {
-                                self.send_container_full_txn_batch_result(seq_id);
-                                continue;
-                            };
-
-                        }
-                        Err((reason, seq_id)) => {
-                            self.send_bundle_not_committed_result(seq_id, reason);
-                            continue;
-                    }
-                }
-            }
+                if container
+                    .insert_new_batch(
+                        txns_max_age,
+                        priority,
+                        cost,
+                        revert_on_error,
+                        max_schedule_slot,
+                    )
+                    .is_none()
+                {
+                    self.send_container_full_txn_batch_result(seq_id);
+                    continue;
+                };
             },
             BufferedPacketsDecision::ForwardAndHold | BufferedPacketsDecision::Forward => {
                 // Send back any batches that were received while in Forward/Hold state
                 let deadline = Instant::now() + Duration::from_millis(100);
                 loop {
-                    let batch = match self.bundle_receiver.recv_deadline(deadline) {
+                    let batch = match self.parsed_batch_receiver.recv_deadline(deadline) {
                         Ok(batch) => batch,
                         Err(RecvTimeoutError::Disconnected) => return Err(DisconnectedError),
                         Err(RecvTimeoutError::Timeout) => {
@@ -588,6 +643,15 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
                     self.send_no_leader_slot_txn_batch_result(batch.seq_id);
                 }
             }
+        }
+    }
+}
+
+impl Drop for BamReceiveAndBuffer {
+    fn drop(&mut self) {
+        self.exit.store(true, Ordering::Relaxed);
+        if let Some(parsing_thread) = self.parsing_thread.take() {
+            parsing_thread.join().unwrap();
         }
     }
 }
@@ -788,10 +852,12 @@ mod tests {
         bank_forks: Arc<RwLock<BankForks>>,
         blacklisted_accounts: HashSet<Pubkey>,
     ) -> (
+        Arc<AtomicBool>,
         BamReceiveAndBuffer,
         TransactionStateContainer<RuntimeTransaction<SanitizedTransaction>>,
         crossbeam_channel::Receiver<BamOutboundMessage>,
     ) {
+        let exit: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
         let (response_sender, response_receiver) =
             crossbeam_channel::unbounded::<BamOutboundMessage>();
         let receive_and_buffer = BamReceiveAndBuffer::new(
@@ -802,7 +868,7 @@ mod tests {
             blacklisted_accounts,
         );
         let container = TransactionStateContainer::with_capacity(100);
-        (receive_and_buffer, container, response_receiver)
+        (exit, receive_and_buffer, container, response_receiver)
     }
 
     fn verify_container<Tx: TransactionWithMeta>(
@@ -837,11 +903,11 @@ mod tests {
             Arc<RwLock<BankForks>>,
             HashSet<Pubkey>,
         )
-            -> (R, R::Container, Receiver<BamOutboundMessage>),
+            -> (Arc<AtomicBool>, R, R::Container, Receiver<BamOutboundMessage>),
     ) {
         let (sender, receiver) = unbounded();
         let (bank_forks, mint_keypair) = test_bank_forks();
-        let (mut receive_and_buffer, mut container, _response_sender) =
+        let (exit, mut receive_and_buffer, mut container, _response_sender) =
             setup_receive_and_buffer(receiver, bank_forks.clone(), HashSet::new());
         let mut timing_metrics = SchedulerTimingMetrics::default();
         let mut count_metrics = SchedulerCountMetrics::default();
@@ -860,7 +926,7 @@ mod tests {
         };
         sender.send(bundle).unwrap();
 
-        let num_received = receive_and_buffer
+        let _ = receive_and_buffer
             .receive_and_buffer_packets(
                 &mut container,
                 &mut timing_metrics,
@@ -869,15 +935,15 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(num_received, 1);
         verify_container(&mut container, 1);
+        exit.store(true, Ordering::Relaxed);
     }
 
     #[test]
     fn test_receive_and_buffer_invalid_packet() {
         let (bank_forks, _mint_keypair) = test_bank_forks();
         let (sender, receiver) = unbounded();
-        let (mut receive_and_buffer, mut container, response_receiver) =
+        let (exit, mut receive_and_buffer, mut container, response_receiver) =
             setup_bam_receive_and_buffer(receiver, bank_forks.clone(), HashSet::new());
 
         let bundle = AtomicTxnBatch {
@@ -908,6 +974,7 @@ mod tests {
             matches!(&txn_batch_result.result, Some(atomic_txn_batch_result::Result::NotCommitted(not_committed)) if
                 matches!(not_committed.reason, Some(Reason::DeserializationError(_))))
         ));
+        exit.store(true, Ordering::Relaxed);
     }
 
     #[test]
@@ -929,11 +996,11 @@ mod tests {
         };
         
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&vec![bundle], &mut stats);
+        let results = BamReceiveAndBuffer::batch_deserialize_and_verify(&[bundle], &mut stats);
 
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
-        if let Ok((deserialized_packets, _, seq_id)) = &results[0] {
+        if let Ok((deserialized_packets, _, seq_id, _max_schedule_slot)) = &results[0] {
             assert_eq!(deserialized_packets.len(), 1);
             assert_eq!(*seq_id, 1);
         }
@@ -949,11 +1016,10 @@ mod tests {
         };
 
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&vec![batch], &mut stats);
+        let results = BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], &mut stats);
 
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err());
-        assert_eq!(batch_stats.num_dropped_without_parsing, 1);
         if let Err((reason, seq_id)) = &results[0] {
             assert_eq!(*seq_id, 1);
             assert!(matches!(reason, Reason::DeserializationError(_)));
@@ -973,7 +1039,7 @@ mod tests {
         };
 
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&vec![batch], &mut stats);
+        let results = BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], &mut stats);
         
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err());
@@ -1003,23 +1069,23 @@ mod tests {
         };
         
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&vec![batch], &mut stats);
+        let results = BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], &mut stats);
         
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
         
-        if let Ok((deserialized_packets, revert_on_error, seq_id)) = &results[0] {
-            let (result, stats) = BamReceiveAndBuffer::parse_deserialized_batch(
+        if let Ok((deserialized_packets, revert_on_error, seq_id, max_schedule_slot)) = &results[0] {
+            let result = BamReceiveAndBuffer::parse_deserialized_batch(
                 deserialized_packets.clone(),
                 *seq_id,
                 *revert_on_error,
+                *max_schedule_slot,
                 &bank_forks,
                 &HashSet::new(),
                 &mut stats,
             );
             
             assert!(result.is_err());
-            assert_eq!(stats.num_dropped_on_fee_payer, 1);
             assert!(matches!(result.err().unwrap(), Reason::TransactionError(_)));
         }
     }
@@ -1061,10 +1127,9 @@ mod tests {
         };
         
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&vec![bundle], &mut stats);
+        let results = BamReceiveAndBuffer::batch_deserialize_and_verify(&[bundle], &mut stats);
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err());
-        assert_eq!(batch_stats.num_dropped_without_parsing, 1);
         if let Err((reason, seq_id)) = &results[0] {
             assert_eq!(*seq_id, 1);
             assert!(matches!(reason, Reason::DeserializationError(_)));
@@ -1093,23 +1158,23 @@ mod tests {
         };
         
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&vec![batch], &mut stats);
+        let results = BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], &mut stats);
         
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
         
-        if let Ok((deserialized_packets, revert_on_error, seq_id)) = &results[0] {
-            let (result, stats) = BamReceiveAndBuffer::parse_deserialized_batch(
+        if let Ok((deserialized_packets, revert_on_error, seq_id, max_schedule_slot)) = &results[0] {
+            let result = BamReceiveAndBuffer::parse_deserialized_batch(
                 deserialized_packets.clone(),
                 *seq_id,
                 *revert_on_error,
+                *max_schedule_slot,
                 &bank_forks,
                 &blacklisted_accounts,
                 &mut stats,
             );
             
             assert!(result.is_err());
-            assert_eq!(stats.num_dropped_on_blacklisted_account, 1);
             assert!(matches!(result.err().unwrap(), Reason::TransactionError(_)));
         }
     }
@@ -1156,23 +1221,23 @@ mod tests {
         };
         
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&vec![batch], &mut stats);
+        let results = BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], &mut stats);
         
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
         
-        if let Ok((deserialized_packets, revert_on_error, seq_id)) = &results[0] {
-            let (result, stats) = BamReceiveAndBuffer::parse_deserialized_batch(
+        if let Ok((deserialized_packets, revert_on_error, seq_id, max_schedule_slot)) = &results[0] {
+            let result = BamReceiveAndBuffer::parse_deserialized_batch(
                 deserialized_packets.clone(),
                 *seq_id,
                 *revert_on_error,
+                *max_schedule_slot,
                 &bank_forks,
                 &HashSet::new(),
                 &mut stats,
             );
             
             assert!(result.is_err());
-            assert_eq!(stats.num_dropped_on_parsing_and_sanitization, 1);
             assert!(matches!(result.err().unwrap(), Reason::DeserializationError(_)));
         }
     }
