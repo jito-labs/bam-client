@@ -229,7 +229,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
 
             // Update worker mappings:
             // 1. If a contentious transaction came before in this scheduling round; we MUST use that same worker
-            // 2. Save the worker mapping for all unblocked transactions; once it it their turn, they will go to the same worker
+            // 2. Save the worker mapping for all unblocked transactions; once it is their turn, they will go to the same worker
             let worker_index = id_to_worker.get(&id).cloned().unwrap_or(self.get_best_available_worker().unwrap());
             id_to_worker.extend(unblocked.iter().map(|id| (*id, worker_index)));
 
