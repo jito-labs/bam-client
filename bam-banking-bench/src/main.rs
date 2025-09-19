@@ -41,7 +41,7 @@ use {
     solana_time_utils::timestamp,
     solana_transaction::Transaction,
     std::{
-        collections::{HashSet, HashMap},
+        collections::{HashMap, HashSet},
         num::NonZeroUsize,
         sync::{
             atomic::{AtomicBool, Ordering},
@@ -131,14 +131,14 @@ fn make_accounts_txs(
         .into_par_iter()
         .map(|i| {
             let payer_key = Keypair::new();
-            
+
             let is_simulated_mint = is_simulated_mint_transaction(
                 simulate_mint,
                 i,
                 packets_per_batch,
                 mint_txs_percentage,
             );
-            
+
             let compute_unit_price = if is_simulated_mint { 5 } else { 1 };
             let destination = match contention {
                 WriteLockContention::None => pubkey::new_rand(),
@@ -165,16 +165,18 @@ fn make_accounts_txs(
                 let invalid_sig: [u8; 64] = std::array::from_fn(|_| thread_rng().gen::<u8>());
                 tx.signatures[0] = Signature::from(invalid_sig);
             }
-            
+
             (tx, payer_key)
         })
         .collect();
-    
-    let transactions: Vec<Transaction> = tx_keypair_pairs.iter().map(|(tx, _)| tx.clone()).collect();
-    let keypairs: HashMap<Pubkey, Keypair> = tx_keypair_pairs.into_iter()
+
+    let transactions: Vec<Transaction> =
+        tx_keypair_pairs.iter().map(|(tx, _)| tx.clone()).collect();
+    let keypairs: HashMap<Pubkey, Keypair> = tx_keypair_pairs
+        .into_iter()
         .map(|(tx, keypair)| (tx.message.account_keys[0], keypair))
         .collect();
-    
+
     (transactions, keypairs)
 }
 
@@ -190,10 +192,7 @@ fn is_simulated_mint_transaction(
     simulate_mint && (index % packets_per_batch <= packets_per_batch * mint_txs_percentage / 100)
 }
 
-fn should_fail_sigverify(
-    sigverify_failure_percentage: usize,
-    index: usize,
-) -> bool {
+fn should_fail_sigverify(sigverify_failure_percentage: usize, index: usize) -> bool {
     sigverify_failure_percentage > 0 && (index % 100 < sigverify_failure_percentage)
 }
 
@@ -259,7 +258,7 @@ impl PacketsPerIteration {
             tx.message.recent_blockhash = new_blockhash;
 
             let payer_pubkey = tx.message.account_keys[0];
-            
+
             if should_fail_sigverify(self.sigverify_failure_percentage, index) {
                 let invalid_sig: [u8; 64] = std::array::from_fn(|_| thread_rng().gen::<u8>());
                 tx.signatures[0] = Signature::from(invalid_sig);
@@ -396,7 +395,6 @@ fn main() {
         .value_of_t::<usize>("sigverify_failure_percentage")
         .unwrap_or(0);
 
-
     let mint_total = 1_000_000_000_000;
     let GenesisConfigInfo {
         genesis_config,
@@ -427,7 +425,6 @@ fn main() {
     })
     .take(num_chunks)
     .collect();
-
 
     let total_num_transactions: u64 = all_packets
         .iter()
