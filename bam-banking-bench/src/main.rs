@@ -332,7 +332,7 @@ fn main() {
         .unwrap_or_default();
     let block_production_num_workers = matches
         .value_of_t::<NonZeroUsize>("block_production_num_workers")
-        .unwrap_or_else(|_| BankingStage::default_num_workers());
+        .unwrap_or_else(|_| NonZeroUsize::new(BankingStage::num_threads() as usize).unwrap());
     let transaction_struct = matches
         .value_of_t::<TransactionStructure>("transaction_struct")
         .unwrap_or_default();
@@ -344,7 +344,7 @@ fn main() {
     let iterations = matches.value_of_t::<usize>("iterations").unwrap_or(1000);
     let batches_per_iteration = matches
         .value_of_t::<usize>("batches_per_iteration")
-        .unwrap_or(BankingStage::default_num_workers().get());
+        .unwrap_or(BankingStage::num_threads() as usize);
     let write_lock_contention = matches
         .value_of_t::<WriteLockContention>("write_lock_contention")
         .unwrap_or(WriteLockContention::None);
@@ -459,18 +459,18 @@ fn main() {
     let prioritization_fee_cache = Arc::new(PrioritizationFeeCache::new(0u64));
     let (batch_sender, batch_receiver) = unbounded();
     let (outbound_sender, outbound_receiver) = unbounded();
-    let keypair = Keypair::new();
+    let cluster_info = Arc::new(ClusterInfo::new(
+        ContactInfo::new_localhost(&mint_keypair.pubkey(), timestamp()),
+        Arc::new(mint_keypair),
+        SocketAddrSpace::new(true),
+    ));
     let bam_dependencies = BamDependencies {
         bam_enabled: Arc::new(AtomicBool::new(true)),
         batch_sender: batch_sender.clone(),
         batch_receiver,
         outbound_sender,
         outbound_receiver,
-        cluster_info: Arc::new(ClusterInfo::new(
-            ContactInfo::new_localhost(&keypair.pubkey(), timestamp()),
-            Arc::new(keypair),
-            SocketAddrSpace::new(true),
-        )),
+        cluster_info: cluster_info.clone(),
         block_builder_fee_info: Arc::new(Mutex::new(BlockBuilderFeeInfo::default())),
         bank_forks: bank_forks.clone(),
         bam_node_pubkey: Arc::new(Mutex::new(Pubkey::new_unique())),
@@ -486,17 +486,18 @@ fn main() {
     let banking_stage = BankingStage::new_num_threads(
         block_production_method,
         transaction_struct,
-        poh_recorder.clone(),
+        &cluster_info,
+        &poh_recorder.clone(),
         transaction_recorder,
         non_vote_receiver,
         tpu_vote_receiver,
         gossip_vote_receiver,
-        block_production_num_workers,
+        block_production_num_workers.get() as u32,
         None,
         replay_vote_sender,
         None,
         bank_forks.clone(),
-        prioritization_fee_cache,
+        &prioritization_fee_cache,
         HashSet::default(),
         BundleAccountLocker::default(),
         |_| 0,
@@ -602,6 +603,7 @@ fn main() {
                 &bank_forks,
                 &poh_recorder,
                 new_bank,
+                true,
             );
             bank = bank_forks.read().unwrap().working_bank_with_scheduler();
             assert_matches!(poh_recorder.read().unwrap().bank(), Some(_));
