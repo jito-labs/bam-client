@@ -605,7 +605,7 @@ impl BamReceiveAndBuffer {
 
         let mut stats = ReceivingStats::default();
 
-        let (pre_validated, preverify_stats) = Self::prevalidate_batches(&atomic_txn_batches);
+        let (pre_validated, preverify_stats) = Self::prevalidate_batches(atomic_txn_batches);
         stats.accumulate(preverify_stats);
 
         let mut packet_batches: Vec<solana_perf::packet::PacketBatch> = Vec::new();
