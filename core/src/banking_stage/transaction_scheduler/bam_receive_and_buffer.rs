@@ -1072,7 +1072,7 @@ mod tests {
         };
         
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&vec![bundle], &mut stats);
+        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&[bundle], &mut stats);
 
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
@@ -1092,7 +1092,7 @@ mod tests {
         };
 
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&vec![batch], &mut stats);
+        let (results, batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], &mut stats);
 
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err());
@@ -1116,7 +1116,7 @@ mod tests {
         };
 
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&vec![batch], &mut stats);
+        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], &mut stats);
         
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err());
@@ -1146,7 +1146,7 @@ mod tests {
         };
         
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&vec![batch], &mut stats);
+        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], &mut stats);
         
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
@@ -1205,7 +1205,7 @@ mod tests {
         };
         
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&vec![bundle], &mut stats);
+        let (results, batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&[bundle], &mut stats);
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err());
         assert_eq!(batch_stats.num_dropped_without_parsing, 1);
@@ -1237,7 +1237,7 @@ mod tests {
         };
         
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&vec![batch], &mut stats);
+        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], &mut stats);
         
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
@@ -1301,7 +1301,7 @@ mod tests {
         };
         
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&vec![batch], &mut stats);
+        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], &mut stats);
         
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
