@@ -64,6 +64,7 @@ pub struct BamReceiveAndBuffer {
     response_sender: Sender<BamOutboundMessage>,
     parsed_batch_receiver: crossbeam_channel::Receiver<ParsedBatch>,
     parsing_thread: Option<std::thread::JoinHandle<()>>,
+    exit: Arc<AtomicBool>,
 }
 
 struct ParsedBatch {
@@ -77,7 +78,6 @@ struct ParsedBatch {
 
 impl BamReceiveAndBuffer {
     pub fn new(
-        exit: Arc<AtomicBool>,
         bam_enabled: Arc<AtomicBool>,
         bundle_receiver: crossbeam_channel::Receiver<AtomicTxnBatch>,
         response_sender: Sender<BamOutboundMessage>,
@@ -87,10 +87,12 @@ impl BamReceiveAndBuffer {
         let (parsed_batch_sender, parsed_batch_receiver) =
             crossbeam_channel::unbounded::<ParsedBatch>();
 
+        let exit = Arc::new(AtomicBool::new(false));
+        let exit_clone = exit.clone();
         let response_sender_clone = response_sender.clone();
         let parsing_thread = std::thread::spawn(move || {
             Self::run_parsing(
-                exit,
+                exit_clone,
                 bundle_receiver,
                 parsed_batch_sender,
                 response_sender_clone,
@@ -104,14 +106,9 @@ impl BamReceiveAndBuffer {
             response_sender,
             parsed_batch_receiver,
             parsing_thread: Some(parsing_thread),
+            exit,
         }
     }
-
-                /*
-                
-
-            }
-            */
 
     fn run_parsing(
         exit: Arc<AtomicBool>,
@@ -133,7 +130,7 @@ impl BamReceiveAndBuffer {
             }
 
             let start = Instant::now();
-            let (recv_info, receive_time_us) = measure_us!(Self::batch_receive_until(
+            let (recv_info, _receive_time_us) = measure_us!(Self::batch_receive_until(
                 &bundle_receiver,
                 &mut recv_buffer,
                 &start,
@@ -142,7 +139,7 @@ impl BamReceiveAndBuffer {
             ));
 
             match recv_info {
-                Ok((_, num_batches_received)) => {
+                Ok((_, _num_batches_received)) => {
                 },
                 Err(RecvTimeoutError::Disconnected) => return,
                 Err(RecvTimeoutError::Timeout) => {
@@ -646,6 +643,7 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
 
 impl Drop for BamReceiveAndBuffer {
     fn drop(&mut self) {
+        self.exit.store(true, Ordering::Relaxed);
         if let Some(parsing_thread) = self.parsing_thread.take() {
             parsing_thread.join().unwrap();
         }
