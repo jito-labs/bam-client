@@ -115,12 +115,6 @@ impl BamReceiveAndBuffer {
         }
     }
 
-    /*
-
-
-    }
-    */
-
     fn run_parsing(
         exit: Arc<AtomicBool>,
         bundle_receiver: crossbeam_channel::Receiver<AtomicTxnBatch>,
