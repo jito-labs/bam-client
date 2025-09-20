@@ -57,8 +57,7 @@ fn passthrough_priority(
 }
 
 pub struct BamScheduler<Tx: TransactionWithMeta> {
-    workers_scheduled_count: Vec<usize>,
-    consume_work_senders: Vec<Sender<ConsumeWork<Tx>>>,
+    consume_work_sender: Sender<ConsumeWork<Tx>>,
     finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
     response_sender: Sender<BamOutboundMessage>,
 
@@ -86,20 +85,18 @@ pub struct BamScheduler<Tx: TransactionWithMeta> {
 struct InflightBatchInfo {
     pub schedule_time: Instant,
     pub batch_priority_ids: Vec<TransactionPriorityId>,
-    pub worker_index: usize,
     pub slot: Slot,
 }
 
 impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
     pub fn new(
-        consume_work_senders: Vec<Sender<ConsumeWork<Tx>>>,
+        consume_work_sender: Sender<ConsumeWork<Tx>>,
         finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
         response_sender: Sender<BamOutboundMessage>,
         bank_forks: Arc<RwLock<BankForks>>,
     ) -> Self {
         Self {
-            workers_scheduled_count: vec![0; consume_work_senders.len()],
-            consume_work_senders,
+            consume_work_sender,
             finished_consume_work_receiver,
             response_sender,
             next_batch_id: 0,
@@ -197,21 +194,6 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         }
     }
 
-    fn get_best_available_worker(&mut self) -> Option<usize> {
-        let mut best_worker_index = Some(0);
-        let mut best_worker_count = self.workers_scheduled_count[0];
-        for (worker_index, count) in self.workers_scheduled_count.iter_mut().enumerate() {
-            if *count == 0 {
-                return Some(worker_index);
-            }
-            if *count < best_worker_count {
-                best_worker_index = Some(worker_index);
-                best_worker_count = *count;
-            }
-        }
-        best_worker_index
-    }
-
     fn send_to_workers(
         &mut self,
         container: &mut impl StateContainer<Tx>,
@@ -293,31 +275,26 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 container,
                 slot,
             );
-            let worker_index = self.get_best_available_worker().unwrap_or(0);
-            self.send_to_worker(worker_index, vec![id], work, slot);
+            self.send_to_worker(vec![id], work, slot);
         }
     }
 
     fn send_to_worker(
         &mut self,
-        worker_index: usize,
         priority_ids: Vec<TransactionPriorityId>,
         work: ConsumeWork<Tx>,
         slot: Slot,
     ) {
-        let consume_work_sender = &self.consume_work_senders[worker_index];
         let batch_id = work.batch_id;
-        let _ = consume_work_sender.send(work);
+        let _ = self.consume_work_sender.send(work);
         self.inflight_batch_info.insert(
             batch_id,
             InflightBatchInfo {
                 schedule_time: Instant::now(),
                 batch_priority_ids: priority_ids,
-                worker_index,
                 slot,
             },
         );
-        self.workers_scheduled_count[worker_index] += 1;
     }
 
     fn get_next_schedule_id(&mut self) -> TransactionBatchId {
@@ -658,7 +635,6 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
             let Some(inflight_batch_info) = self.inflight_batch_info.remove(&batch_id) else {
                 continue;
             };
-            self.workers_scheduled_count[inflight_batch_info.worker_index] -= 1;
 
             let _ = self.time_in_worker_us.increment(
                 now.duration_since(inflight_batch_info.schedule_time)
