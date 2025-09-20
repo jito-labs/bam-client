@@ -191,41 +191,6 @@ impl MockBamServer {
                         seq_id += 1;
                     }
                 }
-
-                // for current_iteration_index in 0..iterations {
-                //     trace!("RUNNING ITERATION {}", current_iteration_index);
-                //     let now = Instant::now();
-                //     let mut sent = 0;
-
-                //     let packets_for_this_iteration = &all_packets[current_iteration_index % num_chunks];
-                //     for (packet_batch_index, packet_batch) in
-                //         packets_for_this_iteration.packet_batches.iter().enumerate()
-                //     {
-                //         sent += packet_batch.len();
-                //         trace!(
-                //             "Sending PacketBatch index {}, {}",
-                //             packet_batch_index,
-                //             timestamp(),
-                //         );
-
-                //         for p in packet_batch {
-                //             // bam non-multi transaction bundles are a single packet
-                //             let bam_batch = AtomicTxnBatch {
-                //                 seq_id: next_seq_id,
-                //                 max_schedule_slot: bank.slot(),
-                //                 packets: vec![Packet {
-                //                     data: p.data(..).unwrap_or_default().to_vec(),
-                //                     meta: Some(jito_protos::proto::bam_types::Meta {
-                //                         size: p.meta().size as u64,
-                //                         flags: None,
-                //                     }),
-                //                 }],
-                //             };
-
-                //             next_seq_id += 1;
-                //             batch_sender.send(bam_batch).unwrap();
-                //         }
-                //     }
             }
         })
     }

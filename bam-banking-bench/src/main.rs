@@ -55,22 +55,9 @@ fn main() {
                 .long("num-keypairs")
                 .takes_value(true)
                 .help("Number of keypairs")
-                .default_value("10"),
+                .default_value("1000"),
         )
         .get_matches();
-
-    //   a multiple of packet chunk duplicates to avoid races
-    // let num_chunks = matches.value_of_t::<usize>("num_chunks").unwrap();
-    // let iterations = matches.value_of_t::<usize>("iterations").unwrap();
-    // let packets_per_iteration = matches
-    //     .value_of_t::<usize>("packets_per_iteration")
-    //     .unwrap();
-    // let write_lock_contention = matches
-    //     .value_of_t::<WriteLockContention>("write_lock_contention")
-    //     .unwrap_or(WriteLockContention::None);
-    // let mint_txs_percentage = matches
-    //     .value_of_t::<usize>("mint_txs_percentage")
-    //     .unwrap_or(99);
 
     let mint_total = 10_000 * 1_000_000_000; // 10k SOL
     let GenesisConfigInfo {
