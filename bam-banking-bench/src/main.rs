@@ -42,7 +42,6 @@ use {
     solana_transaction::Transaction,
     std::{
         collections::HashSet,
-        num::NonZeroUsize,
         sync::{
             atomic::{AtomicBool, Ordering},
             Arc, Mutex, RwLock,
@@ -248,21 +247,16 @@ fn main() {
             Arg::new("iterations")
                 .long("iterations")
                 .takes_value(true)
-                .help("Number of test iterations"),
+                .help("Number of test iterations")
+                .default_value("10"),
         )
         .arg(
             Arg::new("num_chunks")
                 .long("num-chunks")
                 .takes_value(true)
                 .value_name("SIZE")
-                .help("Number of transaction chunks."),
-        )
-        .arg(
-            Arg::new("packets_per_batch")
-                .long("packets-per-batch")
-                .takes_value(true)
-                .value_name("SIZE")
-                .help("Packets per batch"),
+                .help("Number of transaction chunks.")
+                .default_value("16"),
         )
         .arg(
             Arg::new("skip_sanity")
@@ -284,67 +278,20 @@ fn main() {
                 .help("Accounts that test transactions write lock"),
         )
         .arg(
-            Arg::new("batches_per_iteration")
-                .long("batches-per-iteration")
+            Arg::new("packets_per_iteration")
+                .long("packets-per-iteration")
                 .takes_value(true)
-                .help("Number of batches to send in each iteration"),
-        )
-        .arg(
-            Arg::with_name("block_production_method")
-                .long("block-production-method")
-                .value_name("METHOD")
-                .takes_value(true)
-                .possible_values(BlockProductionMethod::cli_names())
-                .help(BlockProductionMethod::cli_message()),
-        )
-        .arg(
-            Arg::with_name("block_production_num_workers")
-                .long("block-production-num-workers")
-                .takes_value(true)
-                .value_name("NUMBER")
-                .help("Number of worker threads to use for block production"),
-        )
-        .arg(
-            Arg::with_name("transaction_struct")
-                .long("transaction-structure")
-                .value_name("STRUCT")
-                .takes_value(true)
-                .possible_values(TransactionStructure::cli_names())
-                .help(TransactionStructure::cli_message()),
-        )
-        .arg(
-            Arg::new("simulate_mint")
-                .long("simulate-mint")
-                .takes_value(false)
-                .help("Simulate mint transactions to have higher priority"),
-        )
-        .arg(
-            Arg::new("mint_txs_percentage")
-                .long("mint-txs-percentage")
-                .takes_value(true)
-                .requires("simulate_mint")
-                .help("In simulating mint, number of mint transactions out of 100."),
+                .help("Number of packets to send in each iteration")
+                .default_value("10000"),
         )
         .get_matches();
 
-    let block_production_method = matches
-        .value_of_t::<BlockProductionMethod>("block_production_method")
-        .unwrap_or_default();
-    let block_production_num_workers = matches
-        .value_of_t::<NonZeroUsize>("block_production_num_workers")
-        .unwrap_or_else(|_| BankingStage::default_num_workers());
-    let transaction_struct = matches
-        .value_of_t::<TransactionStructure>("transaction_struct")
-        .unwrap_or_default();
     //   a multiple of packet chunk duplicates to avoid races
-    let num_chunks = matches.value_of_t::<usize>("num_chunks").unwrap_or(16);
-    let packets_per_batch = matches
-        .value_of_t::<usize>("packets_per_batch")
-        .unwrap_or(192);
-    let iterations = matches.value_of_t::<usize>("iterations").unwrap_or(1000);
-    let batches_per_iteration = matches
-        .value_of_t::<usize>("batches_per_iteration")
-        .unwrap_or(BankingStage::default_num_workers().get());
+    let num_chunks = matches.value_of_t::<usize>("num_chunks").unwrap();
+    let iterations = matches.value_of_t::<usize>("iterations").unwrap();
+    let packets_per_iteration = matches
+        .value_of_t::<usize>("packets_per_iteration")
+        .unwrap();
     let write_lock_contention = matches
         .value_of_t::<WriteLockContention>("write_lock_contention")
         .unwrap_or(WriteLockContention::None);
@@ -371,8 +318,10 @@ fn main() {
 
     let mut all_packets: Vec<PacketsPerIteration> = std::iter::from_fn(|| {
         Some(PacketsPerIteration::new(
-            packets_per_batch,
-            batches_per_iteration,
+            // bam handles 1 packet per batch
+            1,
+            // given the above, the number of batches should be the number of packets
+            packets_per_iteration,
             genesis_config.hash(),
             write_lock_contention,
             matches.is_present("simulate_mint"),
@@ -386,10 +335,7 @@ fn main() {
         .iter()
         .map(|packets_for_single_iteration| packets_for_single_iteration.transactions.len() as u64)
         .sum();
-    info!(
-        "worker threads: {} txs: {}",
-        block_production_num_workers, total_num_transactions
-    );
+    info!("txs: {}", total_num_transactions);
 
     // fund all the accounts
     all_packets.iter().for_each(|packets_for_single_iteration| {
@@ -484,14 +430,17 @@ fn main() {
         gossip_vote_receiver,
     } = banking_tracer.create_channels(false);
     let banking_stage = BankingStage::new_num_threads(
-        block_production_method,
-        transaction_struct,
+        // this doesn't matter for the BAM test
+        BlockProductionMethod::CentralScheduler,
+        // this doesn't matter for the BAM test
+        TransactionStructure::View,
         poh_recorder.clone(),
         transaction_recorder,
         non_vote_receiver,
         tpu_vote_receiver,
         gossip_vote_receiver,
-        block_production_num_workers,
+        // this doesn't matter for the BAM test
+        BankingStage::default_num_workers(),
         None,
         replay_vote_sender,
         None,
@@ -531,25 +480,23 @@ fn main() {
                 timestamp(),
             );
 
-            // 1. Convert to Bam message
-            let bam_batch = AtomicTxnBatch {
-                seq_id: next_seq_id,
-                max_schedule_slot: bank.slot(),
-                packets: packet_batch
-                    .iter()
-                    .map(|p| Packet {
+            for p in packet_batch {
+                // bam non-multi transaction bundles are a single packet
+                let bam_batch = AtomicTxnBatch {
+                    seq_id: next_seq_id,
+                    max_schedule_slot: bank.slot(),
+                    packets: vec![Packet {
                         data: p.data(..).unwrap_or_default().to_vec(),
                         meta: Some(jito_protos::proto::bam_types::Meta {
                             size: p.meta().size as u64,
                             flags: None,
                         }),
-                    })
-                    .collect(),
-            };
-            next_seq_id += 1;
+                    }],
+                };
 
-            // 2. Send to bam
-            batch_sender.send(bam_batch).unwrap();
+                next_seq_id += 1;
+                batch_sender.send(bam_batch).unwrap();
+            }
         }
 
         for tx in &packets_for_this_iteration.transactions {
