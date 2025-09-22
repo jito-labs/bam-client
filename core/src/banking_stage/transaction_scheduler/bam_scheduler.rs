@@ -733,20 +733,21 @@ mod tests {
         num_threads: usize,
         bank_forks: &Arc<RwLock<BankForks>>,
     ) -> TestScheduler {
-        let (consume_work_senders, consume_work_receivers) =
-            (0..num_threads).map(|_| unbounded()).unzip();
+        let (consume_work_sender, consume_work_receiver) = unbounded();
         let (finished_consume_work_sender, finished_consume_work_receiver) = unbounded();
         let (response_sender, response_receiver) = unbounded();
         test_bank_forks();
         let scheduler = BamScheduler::new(
-            consume_work_senders,
+            consume_work_sender,
             finished_consume_work_receiver,
             response_sender,
             bank_forks.clone(),
         );
         TestScheduler {
             scheduler,
-            consume_work_receivers,
+            consume_work_receivers: (0..num_threads)
+                .map(|_| consume_work_receiver.clone())
+                .collect(),
             finished_consume_work_sender,
             response_receiver,
         }
@@ -848,6 +849,7 @@ mod tests {
         let keypair_a = Keypair::new();
 
         let first_recipient = Pubkey::new_unique();
+        let second_recipient = Pubkey::new_unique();
 
         let mut container = create_container(vec![
             (
@@ -870,7 +872,7 @@ mod tests {
             ),
             (
                 &Keypair::new(),
-                vec![Pubkey::new_unique()],
+                vec![second_recipient],
                 2000,
                 seq_id_to_priority(3),
             ),
@@ -905,9 +907,11 @@ mod tests {
         // Only two should have been scheduled as one is blocked
         assert_eq!(result.num_scheduled, 2);
 
-        // First one scheduled to first worker
+        // Receive the scheduled work
         let work_1 = consume_work_receivers[0].try_recv().unwrap();
-        assert_eq!(work_1.ids.len(), 2);
+        assert_eq!(work_1.ids.len(), 1);
+        let work_2 = consume_work_receivers[0].try_recv().unwrap();
+        assert_eq!(work_2.ids.len(), 1);
 
         // Check that the first transaction is from keypair_a and first recipient is the first recipient
         assert_eq!(
@@ -919,6 +923,16 @@ mod tests {
             first_recipient
         );
 
+        // Check that the second transaction is from the other keypair
+        assert_ne!(
+            work_2.transactions[0].message().account_keys()[0],
+            keypair_a.pubkey(),
+        );
+        assert_eq!(
+            work_2.transactions[0].message().account_keys()[1],
+            second_recipient
+        );
+
         // Try scheduling; nothing should be scheduled as the remaining transaction is blocked
         let result = scheduler
             .schedule(
@@ -928,36 +942,37 @@ mod tests {
             )
             .unwrap();
         assert_eq!(result.num_scheduled, 0);
-        assert_eq!(scheduler.workers_scheduled_count[0], 1);
 
-        // Respond with finsihed work
-        let finished_work = FinishedConsumeWork {
-            work: work_1,
-            retryable_indexes: vec![],
-            extra_info: Some(
-                crate::banking_stage::scheduler_messages::FinishedConsumeWorkExtraInfo {
-                    processed_results: vec![
-                        TransactionResult::Committed(TransactionCommittedResult {
-                            cus_consumed: 100,
-                            feepayer_balance_lamports: 1000,
-                            loaded_accounts_data_size: 10,
-                            execution_success: true,
-                        }),
-                        TransactionResult::NotCommitted(NotCommittedReason::PohTimeout),
-                    ],
-                },
-            ),
-        };
-        let _ = finished_consume_work_sender.send(finished_work);
+        // Respond with finished work
+        let responses = [
+            (work_1, TransactionResult::Committed(TransactionCommittedResult {
+                cus_consumed: 100,
+                feepayer_balance_lamports: 1000,
+                loaded_accounts_data_size: 10,
+                execution_success: true,
+            })), // Committed
+            (work_2, TransactionResult::NotCommitted(NotCommittedReason::PohTimeout)), // Not committed
+        ];
+        for (work, response) in responses.into_iter() {
+            let finished_work = FinishedConsumeWork {
+                work,
+                retryable_indexes: vec![],
+                extra_info: Some(
+                    crate::banking_stage::scheduler_messages::FinishedConsumeWorkExtraInfo {
+                        processed_results: vec![response],
+                    },
+                ),
+            };
+            let _ = finished_consume_work_sender.send(finished_work);
+        }
 
         // Receive the finished work
         let (num_transactions, _) = scheduler
             .receive_completed(&mut container, &decision)
             .unwrap();
         assert_eq!(num_transactions, 2);
-        assert_eq!(scheduler.workers_scheduled_count[0], 0);
 
-        // Check the response for the first transaction (committed)
+        // Check the responses
         let response = response_receiver.try_recv().unwrap();
         let BamOutboundMessage::AtomicTxnBatchResult(bundle_result) = response else {
             panic!("Expected AtomicTxnBatchResult message");
@@ -1023,7 +1038,6 @@ mod tests {
         // Check that the remaining transaction is sent to the worker
         let work_2 = consume_work_receivers[0].try_recv().unwrap();
         assert_eq!(work_2.ids.len(), 1);
-        assert_eq!(scheduler.workers_scheduled_count[0], 1);
 
         // Try scheduling; nothing should be scheduled as the remaining transaction is blocked
         let result = scheduler
@@ -1059,7 +1073,6 @@ mod tests {
             .receive_completed(&mut container, &decision)
             .unwrap();
         assert_eq!(num_transactions, 1);
-        assert_eq!(scheduler.workers_scheduled_count[0], 0);
 
         // Check the response for the next transaction
         let response = response_receiver.try_recv().unwrap();
