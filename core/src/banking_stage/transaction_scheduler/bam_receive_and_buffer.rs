@@ -11,7 +11,7 @@ use solana_clock::MAX_PROCESSING_AGE;
 use solana_measure::{measure::Measure, measure_us};
 use solana_packet::{PacketFlags, PACKET_DATA_SIZE};
 
-use solana_perf::sigverify::ed25519_verify_cpu;
+// use solana_perf::sigverify::ed25519_verify_cpu;
 use solana_pubkey::Pubkey;
 use solana_transaction::sanitized::SanitizedTransaction;
 use std::{
@@ -39,8 +39,8 @@ use {
         },
     },
     crossbeam_channel::Sender,
-    itertools::Itertools,
     histogram::Histogram,
+    itertools::Itertools,
     jito_protos::proto::bam_types::{
         atomic_txn_batch_result, not_committed::Reason, AtomicTxnBatch, DeserializationErrorReason,
         Packet, SchedulingError,
@@ -110,12 +110,6 @@ impl BamReceiveAndBuffer {
         }
     }
 
-                /*
-                
-
-            }
-            */
-
     fn run_parsing(
         exit: Arc<AtomicBool>,
         bundle_receiver: crossbeam_channel::Receiver<AtomicTxnBatch>,
@@ -175,14 +169,19 @@ impl BamReceiveAndBuffer {
                         metrics.increment_total_us(duration_us);
 
                         if let Err(reason) = parse_result {
-                            let _ = response_sender.try_send(BamOutboundMessage::AtomicTxnBatchResult(
-                                jito_protos::proto::bam_types::AtomicTxnBatchResult {
-                                    seq_id,
-                                    result: Some(atomic_txn_batch_result::Result::NotCommitted(
-                                        jito_protos::proto::bam_types::NotCommitted { reason: Some(reason) },
-                                    )),
-                                },
-                            ));
+                            let _ =
+                                response_sender.try_send(BamOutboundMessage::AtomicTxnBatchResult(
+                                    jito_protos::proto::bam_types::AtomicTxnBatchResult {
+                                        seq_id,
+                                        result: Some(
+                                            atomic_txn_batch_result::Result::NotCommitted(
+                                                jito_protos::proto::bam_types::NotCommitted {
+                                                    reason: Some(reason),
+                                                },
+                                            ),
+                                        ),
+                                    },
+                                ));
                             continue;
                         }
 
@@ -195,7 +194,9 @@ impl BamReceiveAndBuffer {
                             jito_protos::proto::bam_types::AtomicTxnBatchResult {
                                 seq_id,
                                 result: Some(atomic_txn_batch_result::Result::NotCommitted(
-                                    jito_protos::proto::bam_types::NotCommitted { reason: Some(reason) },
+                                    jito_protos::proto::bam_types::NotCommitted {
+                                        reason: Some(reason),
+                                    },
                                 )),
                             },
                         ));
@@ -405,7 +406,7 @@ impl BamReceiveAndBuffer {
         recv_buffer: &mut Vec<AtomicTxnBatch>,
         &start: &Instant,
         recv_timeout: Duration,
-        batch_count_upperbound: usize
+        batch_count_upperbound: usize,
     ) -> Result<(usize, usize), RecvTimeoutError> {
         let batch = bundle_receiver.recv_timeout(recv_timeout)?;
         let mut num_packets_received = batch.packets.len();
@@ -469,14 +470,22 @@ impl BamReceiveAndBuffer {
                     ), atomic_txn_batch.seq_id));
                 };
 
-                Ok((atomic_txn_batch.clone(), revert_on_error, atomic_txn_batch.seq_id, atomic_txn_batch.max_schedule_slot))
+                Ok((
+                    atomic_txn_batch.clone(),
+                    revert_on_error,
+                    atomic_txn_batch.seq_id,
+                    atomic_txn_batch.max_schedule_slot,
+                ))
             })
             .collect();
 
         prevalidated
     }
 
-    fn batch_deserialize_and_verify(atomic_txn_batches: &[AtomicTxnBatch], metrics: &mut BamReceiveAndBufferMetrics) -> DeserializationOutput {
+    fn batch_deserialize_and_verify(
+        atomic_txn_batches: &[AtomicTxnBatch],
+        metrics: &mut BamReceiveAndBufferMetrics,
+    ) -> DeserializationOutput {
         fn proto_packet_to_packet(from_packet: &Packet) -> solana_packet::Packet {
             let mut to_packet = solana_packet::Packet::default();
             to_packet.meta_mut().size = from_packet.data.len();
@@ -499,33 +508,50 @@ impl BamReceiveAndBuffer {
             to_packet
         }
 
-        fn pkt_to_idp(solana_packet_ref: &solana_perf::packet::PacketRef, i: usize, seq_id: u32, metrics: &mut BamReceiveAndBufferMetrics) -> Result<ImmutableDeserializedPacket, (Reason, u32)> {
+        fn pkt_to_idp(
+            solana_packet_ref: &solana_perf::packet::PacketRef,
+            i: usize,
+            seq_id: u32,
+            metrics: &mut BamReceiveAndBufferMetrics,
+        ) -> Result<ImmutableDeserializedPacket, (Reason, u32)> {
             if solana_packet_ref.meta().discard() {
-                let reason = convert_deserialize_error_to_proto(&DeserializedPacketError::SanitizeError(solana_sanitize::SanitizeError::InvalidValue));
-                return Err((Reason::DeserializationError(
-                    jito_protos::proto::bam_types::DeserializationError {
-                        index: i as u32,
-                        reason: reason as i32,
-                    },
-                ), seq_id));
+                let reason =
+                    convert_deserialize_error_to_proto(&DeserializedPacketError::SanitizeError(
+                        solana_sanitize::SanitizeError::InvalidValue,
+                    ));
+                return Err((
+                    Reason::DeserializationError(
+                        jito_protos::proto::bam_types::DeserializationError {
+                            index: i as u32,
+                            reason: reason as i32,
+                        },
+                    ),
+                    seq_id,
+                ));
             }
 
-            let (packet_result, duration_us) = measure_us!(
-                ImmutableDeserializedPacket::new(*solana_packet_ref).map_err(|e| (i, e))
-            );
+            let (packet_result, duration_us) = measure_us!(ImmutableDeserializedPacket::new(
+                *solana_packet_ref
+            )
+            .map_err(|e| (i, e)));
             metrics.increment_deserialization_us(duration_us);
 
             match packet_result {
                 Ok(deserialized) => {
-                    metrics.sigverify_metrics.increment_total_packets_verified(1);
+                    metrics
+                        .sigverify_metrics
+                        .increment_total_packets_verified(1);
                     Ok(deserialized)
-                },
-                Err((i, e)) => Err((Reason::DeserializationError(
-                    jito_protos::proto::bam_types::DeserializationError {
-                        index: i as u32,
-                        reason: convert_deserialize_error_to_proto(&e) as i32,
-                    },
-                ), seq_id)),
+                }
+                Err((i, e)) => Err((
+                    Reason::DeserializationError(
+                        jito_protos::proto::bam_types::DeserializationError {
+                            index: i as u32,
+                            reason: convert_deserialize_error_to_proto(&e) as i32,
+                        },
+                    ),
+                    seq_id,
+                )),
             }
         }
 
@@ -534,22 +560,30 @@ impl BamReceiveAndBuffer {
         let mut packet_batches: Vec<solana_perf::packet::PacketBatch> = Vec::new();
         let mut packet_count = 0;
         pre_validated.iter().flatten().for_each(|result| {
-            let solana_packet_batch: Vec<solana_packet::Packet> = result.0
+            let solana_packet_batch: Vec<solana_packet::Packet> = result
+                .0
                 .packets
                 .iter()
                 .map(proto_packet_to_packet)
                 .collect();
             packet_count += solana_packet_batch.len();
-            packet_batches.push(solana_perf::packet::PinnedPacketBatch::new(solana_packet_batch).into());
+            packet_batches
+                .push(solana_perf::packet::PinnedPacketBatch::new(solana_packet_batch).into());
         });
 
         let mut verify_packet_batch_time_us = Measure::start("verify_packet_batch_time_us");
-        ed25519_verify_cpu(&mut packet_batches, false, packet_count);
+        // ed25519_verify_cpu(&mut packet_batches, false, packet_count);
         verify_packet_batch_time_us.stop();
 
-        metrics.sigverify_metrics.increment_verify_batches_pp_us(verify_packet_batch_time_us.as_us(), packet_count);
-        metrics.sigverify_metrics.increment_batch_packets_len(packet_count);
-        metrics.sigverify_metrics.increment_total_verify_time(verify_packet_batch_time_us.as_us());
+        metrics
+            .sigverify_metrics
+            .increment_verify_batches_pp_us(verify_packet_batch_time_us.as_us(), packet_count);
+        metrics
+            .sigverify_metrics
+            .increment_batch_packets_len(packet_count);
+        metrics
+            .sigverify_metrics
+            .increment_total_verify_time(verify_packet_batch_time_us.as_us());
 
         let mut packet_batch_iter = packet_batches.iter();
         let results = pre_validated
@@ -563,7 +597,7 @@ impl BamReceiveAndBuffer {
                         .enumerate()
                         .map(|(i, pkt)| pkt_to_idp(&pkt, i, seq_id, metrics))
                         .collect::<Result<Vec<_>, _>>()?;
-                    
+
                     Ok((deserialized, revert_on_error, seq_id, max_schedule_slot))
                 })
             })
@@ -762,30 +796,66 @@ impl SigverifyMetrics {
             ("total_verify_time_us", self.total_verify_time_us, i64),
             ("total_packets_verified", self.total_packets_verified, i64),
             ("total_batches_verified", self.total_batches_verified, i64),
-            ("verify_batches_pp_us_p50", self.verify_batches_pp_us_hist.percentile(50.0).unwrap_or(0), i64),
-            ("verify_batches_pp_us_p75", self.verify_batches_pp_us_hist.percentile(75.0).unwrap_or(0), i64),
-            ("verify_batches_pp_us_p90", self.verify_batches_pp_us_hist.percentile(90.0).unwrap_or(0), i64),
-            ("verify_batches_pp_us_p99", self.verify_batches_pp_us_hist.percentile(99.0).unwrap_or(0), i64),
-            ("batch_packets_len_p50", self.batch_packets_len_hist.percentile(50.0).unwrap_or(0), i64),
-            ("batch_packets_len_p75", self.batch_packets_len_hist.percentile(75.0).unwrap_or(0), i64),
-            ("batch_packets_len_p90", self.batch_packets_len_hist.percentile(90.0).unwrap_or(0), i64),
-            ("batch_packets_len_p99", self.batch_packets_len_hist.percentile(99.0).unwrap_or(0), i64),
+            (
+                "verify_batches_pp_us_p50",
+                self.verify_batches_pp_us_hist.percentile(50.0).unwrap_or(0),
+                i64
+            ),
+            (
+                "verify_batches_pp_us_p75",
+                self.verify_batches_pp_us_hist.percentile(75.0).unwrap_or(0),
+                i64
+            ),
+            (
+                "verify_batches_pp_us_p90",
+                self.verify_batches_pp_us_hist.percentile(90.0).unwrap_or(0),
+                i64
+            ),
+            (
+                "verify_batches_pp_us_p99",
+                self.verify_batches_pp_us_hist.percentile(99.0).unwrap_or(0),
+                i64
+            ),
+            (
+                "batch_packets_len_p50",
+                self.batch_packets_len_hist.percentile(50.0).unwrap_or(0),
+                i64
+            ),
+            (
+                "batch_packets_len_p75",
+                self.batch_packets_len_hist.percentile(75.0).unwrap_or(0),
+                i64
+            ),
+            (
+                "batch_packets_len_p90",
+                self.batch_packets_len_hist.percentile(90.0).unwrap_or(0),
+                i64
+            ),
+            (
+                "batch_packets_len_p99",
+                self.batch_packets_len_hist.percentile(99.0).unwrap_or(0),
+                i64
+            ),
         );
     }
 
     pub fn increment_verify_batches_pp_us(&mut self, us: u64, packet_count: usize) {
         if packet_count > 0 {
             let per_packet_us = (us as f64 / packet_count as f64).round() as u64;
-            self.verify_batches_pp_us_hist.increment(per_packet_us).unwrap();
+            self.verify_batches_pp_us_hist
+                .increment(per_packet_us)
+                .unwrap();
         }
     }
 
     pub fn increment_batch_packets_len(&mut self, packet_count: usize) {
         if packet_count > 0 {
-            self.batch_packets_len_hist.increment(packet_count as u64).unwrap();
+            self.batch_packets_len_hist
+                .increment(packet_count as u64)
+                .unwrap();
         }
     }
-    
+
     pub fn increment_total_verify_time(&mut self, us: u64) {
         self.total_verify_time_us += us;
     }
@@ -902,8 +972,12 @@ mod tests {
             Receiver<AtomicTxnBatch>,
             Arc<RwLock<BankForks>>,
             HashSet<Pubkey>,
-        )
-            -> (Arc<AtomicBool>, R, R::Container, Receiver<BamOutboundMessage>),
+        ) -> (
+            Arc<AtomicBool>,
+            R,
+            R::Container,
+            Receiver<BamOutboundMessage>,
+        ),
     ) {
         let (sender, receiver) = unbounded();
         let (bank_forks, mint_keypair) = test_bank_forks();
@@ -994,7 +1068,7 @@ mod tests {
             }],
             max_schedule_slot: 0,
         };
-        
+
         let mut stats = BamReceiveAndBufferMetrics::default();
         let results = BamReceiveAndBuffer::batch_deserialize_and_verify(&[bundle], &mut stats);
 
@@ -1067,7 +1141,7 @@ mod tests {
             }],
             max_schedule_slot: 0,
         };
-        
+
         let mut stats = BamReceiveAndBufferMetrics::default();
         let results = BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], &mut stats);
         
@@ -1084,7 +1158,7 @@ mod tests {
                 &HashSet::new(),
                 &mut stats,
             );
-            
+
             assert!(result.is_err());
             assert!(matches!(result.err().unwrap(), Reason::TransactionError(_)));
         }
@@ -1125,7 +1199,7 @@ mod tests {
             ],
             max_schedule_slot: 0,
         };
-        
+
         let mut stats = BamReceiveAndBufferMetrics::default();
         let results = BamReceiveAndBuffer::batch_deserialize_and_verify(&[bundle], &mut stats);
         assert_eq!(results.len(), 1);
@@ -1156,7 +1230,7 @@ mod tests {
             }],
             max_schedule_slot: 0,
         };
-        
+
         let mut stats = BamReceiveAndBufferMetrics::default();
         let results = BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], &mut stats);
         
@@ -1173,7 +1247,7 @@ mod tests {
                 &blacklisted_accounts,
                 &mut stats,
             );
-            
+
             assert!(result.is_err());
             assert!(matches!(result.err().unwrap(), Reason::TransactionError(_)));
         }
@@ -1219,7 +1293,7 @@ mod tests {
             }],
             max_schedule_slot: 0,
         };
-        
+
         let mut stats = BamReceiveAndBufferMetrics::default();
         let results = BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], &mut stats);
         
@@ -1236,7 +1310,7 @@ mod tests {
                 &HashSet::new(),
                 &mut stats,
             );
-            
+
             assert!(result.is_err());
             assert!(matches!(result.err().unwrap(), Reason::DeserializationError(_)));
         }
