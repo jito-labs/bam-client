@@ -261,21 +261,7 @@ impl BamReceiveAndBuffer {
         blacklisted_accounts: &HashSet<Pubkey>,
         metrics: &mut BamReceiveAndBufferMetrics,
     ) -> (Result<ParsedBatch, Reason>, ReceivingStats) {
-        let mut stats = ReceivingStats {
-            num_received: 0,
-            num_dropped_without_parsing: 0,
-            num_dropped_on_parsing_and_sanitization: 0,
-            num_dropped_on_lock_validation: 0,
-            num_dropped_on_compute_budget: 0,
-            num_dropped_on_age: 0,
-            num_dropped_on_already_processed: 0,
-            num_dropped_on_fee_payer: 0,
-            num_dropped_on_capacity: 0,
-            num_buffered: 0,
-            num_dropped_on_blacklisted_account: 0,
-            receive_time_us: 0,
-            buffer_time_us: 0,
-        };
+        let mut stats = ReceivingStats::default();
 
         let (root_bank, working_bank) = {
             let bank_forks = bank_forks.read().unwrap();
@@ -482,21 +468,7 @@ impl BamReceiveAndBuffer {
         atomic_txn_batches: &[AtomicTxnBatch],
         current_slot: Slot,
     ) -> PrevalidationOutput {
-        let mut stats = ReceivingStats {
-            num_received: 0,
-            num_dropped_without_parsing: 0,
-            num_dropped_on_parsing_and_sanitization: 0,
-            num_dropped_on_lock_validation: 0,
-            num_dropped_on_compute_budget: 0,
-            num_dropped_on_age: 0,
-            num_dropped_on_already_processed: 0,
-            num_dropped_on_fee_payer: 0,
-            num_dropped_on_capacity: 0,
-            num_buffered: 0,
-            num_dropped_on_blacklisted_account: 0,
-            receive_time_us: 0,
-            buffer_time_us: 0,
-        };
+        let mut stats = ReceivingStats::default();
 
         let prevalidated = atomic_txn_batches
             .iter()
