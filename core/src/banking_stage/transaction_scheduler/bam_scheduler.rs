@@ -140,12 +140,12 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         let working_bank = self.bank_forks.read().unwrap().working_bank();
 
         while let Some(next_batch_id) = container.pop() {
-            let Some((batch_ids, _, batch_slot)) = container.get_batch(next_batch_id.id) else {
+            let Some((batch_ids, _, max_schedule_slot)) = container.get_batch(next_batch_id.id) else {
                 error!("Batch {} not found in container", next_batch_id.id);
                 continue;
             };
 
-            if batch_slot != slot {
+            if max_schedule_slot < slot {
                 // If the slot has changed, we cannot schedule this batch
                 let seq_id = priority_to_seq_id(next_batch_id.priority);
                 self.send_no_leader_slot_bundle_result(seq_id);
@@ -207,10 +207,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         let now = Instant::now();
         let working_bank = self.bank_forks.read().unwrap().working_bank();
         while let Some(id) = self.prio_graph.pop() {
-            let Some((batch_ids, revert_on_error, batch_slot)) = container.get_batch(id.id) else {
-                self.prio_graph.unblock(&id);
-                continue;
-            };
+            let (batch_ids, revert_on_error, max_schedule_slot) = container.get_batch(id.id).unwrap();
 
             // Update time in prio-graph metric
             if let Some(insertion_time) = self.insertion_to_prio_graph_time
@@ -220,7 +217,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             };
 
             // Filter on slot
-            if slot != batch_slot {
+            if max_schedule_slot < slot {
                 self.prio_graph.unblock(&id);
                 let seq_id = priority_to_seq_id(id.priority);
                 self.send_no_leader_slot_bundle_result(seq_id);
@@ -230,11 +227,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
 
             // Filter on check_transactions
             if self.extra_checks_enabled {
-                let Some((transaction_ids, _, _)) = container.get_batch(id.id) else {
-                    self.prio_graph.unblock(&id);
-                    continue;
-                };
-                let sanitized_txs = transaction_ids.iter()
+                let sanitized_txs = batch_ids.iter()
                     .filter_map(|txn_id| container.get_transaction(*txn_id))
                     .map(|txn| txn.borrow())
                     .collect::<Vec<_>>();
@@ -315,7 +308,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 max_ages: Vec::with_capacity(5),
                 revert_on_error: false,
                 respond_with_extra_info: false,
-                schedulable_slot: None,
+                max_schedule_slot: None,
             }
         }
     }
@@ -363,7 +356,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
 
         output.batch_id = batch_id;
         output.revert_on_error = revert_on_error;
-        output.schedulable_slot = Some(slot);
+        output.max_schedule_slot = Some(slot);
         output.respond_with_extra_info = true;
     }
 
