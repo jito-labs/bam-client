@@ -4,12 +4,12 @@ mod mock_bam_server;
 use {
     crate::mock_bam_server::MockBamServer,
     assert_matches::assert_matches,
-    clap::{Arg, Command, crate_description, crate_name},
-    crossbeam_channel::{Receiver, unbounded},
+    clap::{crate_description, crate_name, Arg, Command},
+    crossbeam_channel::{unbounded, Receiver},
     log::*,
     solana_core::{
         bam_dependencies::BamDependencies,
-        banking_stage::{BankingStage, update_bank_forks_and_poh_recorder_for_new_tpu_bank},
+        banking_stage::{update_bank_forks_and_poh_recorder_for_new_tpu_bank, BankingStage},
         banking_trace::{BankingTracer, Channels},
         bundle_stage::bundle_account_locker::BundleAccountLocker,
         proxy::block_engine_stage::BlockBuilderFeeInfo,
@@ -19,11 +19,11 @@ use {
     solana_keypair::Keypair,
     solana_ledger::{
         blockstore::Blockstore,
-        genesis_utils::{GenesisConfigInfo, create_genesis_config},
+        genesis_utils::{create_genesis_config, GenesisConfigInfo},
         get_tmp_ledger_path_auto_delete,
         leader_schedule_cache::LeaderScheduleCache,
     },
-    solana_poh::poh_recorder::{PohRecorder, WorkingBankEntry, create_test_recorder},
+    solana_poh::poh_recorder::{create_test_recorder, PohRecorder, WorkingBankEntry},
     solana_pubkey::Pubkey,
     solana_runtime::{
         bank::Bank, bank_forks::BankForks, prioritization_fee_cache::PrioritizationFeeCache,
@@ -35,8 +35,8 @@ use {
     std::{
         collections::HashSet,
         sync::{
-            Arc, Mutex, RwLock,
             atomic::{AtomicBool, Ordering},
+            Arc, Mutex, RwLock,
         },
         thread::{sleep, spawn},
         time::{Duration, Instant},
