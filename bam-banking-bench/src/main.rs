@@ -142,6 +142,7 @@ fn main() {
         gossip_vote_sender,
         gossip_vote_receiver,
     } = banking_tracer.create_channels(false);
+
     let banking_stage = BankingStage::new_num_threads(
         // this doesn't matter for the BAM test
         BlockProductionMethod::CentralScheduler,
