@@ -4,12 +4,12 @@ mod mock_bam_server;
 use {
     crate::mock_bam_server::MockBamServer,
     assert_matches::assert_matches,
-    clap::{crate_description, crate_name, Arg, Command},
-    crossbeam_channel::{unbounded, Receiver},
+    clap::{Arg, Command, crate_description, crate_name},
+    crossbeam_channel::{Receiver, unbounded},
     log::*,
     solana_core::{
         bam_dependencies::BamDependencies,
-        banking_stage::{update_bank_forks_and_poh_recorder_for_new_tpu_bank, BankingStage},
+        banking_stage::{BankingStage, update_bank_forks_and_poh_recorder_for_new_tpu_bank},
         banking_trace::{BankingTracer, Channels},
         bundle_stage::bundle_account_locker::BundleAccountLocker,
         proxy::block_engine_stage::BlockBuilderFeeInfo,
@@ -19,11 +19,11 @@ use {
     solana_keypair::Keypair,
     solana_ledger::{
         blockstore::Blockstore,
-        genesis_utils::{create_genesis_config, GenesisConfigInfo},
+        genesis_utils::{GenesisConfigInfo, create_genesis_config},
         get_tmp_ledger_path_auto_delete,
         leader_schedule_cache::LeaderScheduleCache,
     },
-    solana_poh::poh_recorder::{create_test_recorder, PohRecorder, WorkingBankEntry},
+    solana_poh::poh_recorder::{PohRecorder, WorkingBankEntry, create_test_recorder},
     solana_pubkey::Pubkey,
     solana_runtime::{
         bank::Bank, bank_forks::BankForks, prioritization_fee_cache::PrioritizationFeeCache,
@@ -35,8 +35,8 @@ use {
     std::{
         collections::HashSet,
         sync::{
-            atomic::{AtomicBool, Ordering},
             Arc, Mutex, RwLock,
+            atomic::{AtomicBool, Ordering},
         },
         thread::{sleep, spawn},
         time::{Duration, Instant},
@@ -57,7 +57,16 @@ fn main() {
                 .help("Number of keypairs")
                 .default_value("1000"),
         )
+        .arg(
+            Arg::new("test_duration")
+                .long("test-duration")
+                .takes_value(true)
+                .help("Test duration in seconds")
+                .default_value("60"),
+        )
         .get_matches();
+
+    let test_duration = matches.value_of_t::<u64>("test_duration").unwrap();
 
     let mint_total = 10_000 * 1_000_000_000; // 10k SOL
     let GenesisConfigInfo {
@@ -174,8 +183,7 @@ fn main() {
         spawn(move || bank_setting_loop(bank_forks, poh_recorder, signal_receiver, exit.clone()))
     };
 
-    // TODO (LB): catch ctrl+c and exit gracefully
-    sleep(Duration::from_secs(60));
+    sleep(Duration::from_secs(test_duration));
 
     exit.store(true, Ordering::Relaxed);
     drop(non_vote_sender);
