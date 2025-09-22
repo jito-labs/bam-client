@@ -635,16 +635,9 @@ impl BamReceiveAndBuffer {
             packet_batches.push(solana_perf::packet::PinnedPacketBatch::new(solana_packet_batch).into());
         });
 
-        let mut verify_packet_batch_time_us = Measure::start("verify_packet_batch_time_us");
-        ed25519_verify_cpu(&mut packet_batches, false, packet_count);
-        verify_packet_batch_time_us.stop();
-
-        metrics.sigverify_metrics.increment_verify_batches_pp_us(verify_packet_batch_time_us.as_us(), packet_count);
-        metrics.sigverify_metrics.increment_batch_packets_len(packet_count);
-        metrics.sigverify_metrics.increment_total_verify_time(verify_packet_batch_time_us.as_us());
-
-        let mut packet_batch_iter = packet_batches.iter();
-        let results = pre_validated
+        let mut packet_batch_iter = packet_batches.into_iter();
+        let mut final_packet_batches = vec![];
+        let mut results: Vec<Result<(Vec<ImmutableDeserializedPacket>, bool, u32, u64), (_, u32)>> = pre_validated
             .into_iter()
             .map(|pre_result| {
                 pre_result.and_then(|(_, revert_on_error, seq_id, max_schedule_slot)| {
@@ -655,11 +648,35 @@ impl BamReceiveAndBuffer {
                         .enumerate()
                         .map(|(i, pkt)| pkt_to_idp(&pkt, i, seq_id, metrics))
                         .collect::<Result<Vec<_>, _>>()?;
-                    
+                    final_packet_batches.push(batch);
                     Ok((deserialized, revert_on_error, seq_id, max_schedule_slot))
                 })
             })
             .collect();
+
+        let mut verify_packet_batch_time_us = Measure::start("verify_packet_batch_time_us");
+        ed25519_verify_cpu(&mut final_packet_batches, false, packet_count);
+        verify_packet_batch_time_us.stop();
+
+        metrics.sigverify_metrics.increment_verify_batches_pp_us(verify_packet_batch_time_us.as_us(), packet_count);
+        metrics.sigverify_metrics.increment_batch_packets_len(packet_count);
+        metrics.sigverify_metrics.increment_total_verify_time(verify_packet_batch_time_us.as_us());
+
+        for (i, r) in final_packet_batches.iter().enumerate() {
+            if let Some((pkt_index, _)) = r.iter().find_position(|p| p.meta().discard()) {
+                let reason = convert_deserialize_error_to_proto(&DeserializedPacketError::SanitizeError(solana_sanitize::SanitizeError::InvalidValue));
+                let seq_id = match &results[i] {
+                    Ok((_, _, seq_id, _)) => *seq_id,
+                    Err((_, seq_id)) => *seq_id,
+                };
+                results[i] =  Err((Reason::DeserializationError(
+                    jito_protos::proto::bam_types::DeserializationError {
+                        index: pkt_index as u32,
+                        reason: reason as i32,
+                    },
+                ), seq_id));
+            }
+        }
 
         (results, stats)
     }
