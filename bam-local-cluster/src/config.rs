@@ -6,7 +6,7 @@ use {
 #[derive(Debug, Deserialize, Clone)]
 pub struct LocalClusterConfig {
     pub bam_url: String,
-    pub bam_transactions_per_slot_threshold: u64,
+    pub bam_transactions_per_slot_fallback_threshold: u64,
     pub tip_payment_program_id: String,
     pub tip_distribution_program_id: String,
     pub faucet_address: String,
