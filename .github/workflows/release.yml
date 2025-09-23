@@ -21,7 +21,7 @@ jobs:
   #         message: ":github: Triggered from a GitHub Action"
 
   draft-release:
-    if: github.repository == 'jito-labs/jito-solana-jds'
+    if: github.repository == 'jito-labs/bam-client'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code with submodules
@@ -50,10 +50,10 @@ jobs:
               prerelease: true
             });
             core.setOutput('upload_url', release.data.upload_url);
-      
+
       - name: Create tarball with submodules
         run: |
-          RELEASE_NAME="jito-solana-jds-${{ github.ref_name }}.tar.gz"
+          RELEASE_NAME="bam-client-${{ github.ref_name }}.tar.gz"
           tar --exclude-vcs -C . -czf "/tmp/$RELEASE_NAME" .
           mv "/tmp/$RELEASE_NAME" .
 
