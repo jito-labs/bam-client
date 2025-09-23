@@ -154,11 +154,20 @@ impl BamManager {
                         crate::bam_dependencies::BamOutboundMessage::LeaderState(leader_state),
                     );
                 }
+
             }
 
             // Sleep for a short duration to avoid busy-waiting
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
+
+        payment_sender
+            .join()
+            .expect("Failed to join payment sender thread");
+        fallback_manager
+            .join()
+            .expect("Failed to join fallback manager thread");
+        info!("BAM Manager thread exiting");
     }
 
     fn generate_leader_state(bank: &Bank) -> LeaderState {
