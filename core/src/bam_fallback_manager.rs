@@ -190,3 +190,64 @@ impl BamFallbackManager {
         self.thread.join()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use {
+        super::*,
+        solana_runtime::{bank::Bank, bank_forks::BankForks, genesis_utils::create_genesis_config},
+        solana_signer::Signer,
+        solana_system_interface::instruction::transfer as system_transfer,
+        solana_transaction::Transaction,
+    };
+
+    #[test]
+    fn check_bank_at_slot_returns_count_when_below_threshold() {
+        let mut genesis = create_genesis_config(10_000_000_000);
+        genesis
+            .genesis_config
+            .fee_rate_governor
+            .lamports_per_signature = 5_000;
+        let parent = std::sync::Arc::new(Bank::new_for_tests(&genesis.genesis_config));
+        let slot = 100u64;
+        let bank = Bank::new_from_parent(
+            parent,
+            &solana_pubkey::Pubkey::new_unique(),
+            slot,
+        );
+        let bank_forks = BankForks::new_rw_arc(bank);
+        let bank_ref = bank_forks.read().unwrap().get(slot).unwrap().clone();
+
+        let payer = genesis.mint_keypair;
+        let bh = bank_ref.last_blockhash();
+        let transfer_ix = system_transfer(&payer.pubkey(), &payer.pubkey(), 1);
+        let tx = Transaction::new_signed_with_payer(
+            &[transfer_ix],
+            Some(&payer.pubkey()),
+            &[&payer],
+            bh,
+        );
+        let _results = bank_ref.process_transaction(&tx);
+
+        let threshold = 10u64;
+        let forks_read = bank_forks.read().unwrap();
+        let result = BamFallbackManager::check_bank_at_slot(&forks_read, slot, threshold);
+
+        assert!(result.is_some());
+        assert!(result.unwrap() < threshold);
+    }
+
+    #[test]
+    fn check_bank_at_slot_returns_none_for_missing_bank() {
+        let genesis = create_genesis_config(1_000_000).genesis_config;
+        let parent = std::sync::Arc::new(Bank::new_for_tests(&genesis));
+        let slot = 42u64;
+        let bank = Bank::new_from_parent(parent, &solana_pubkey::Pubkey::default(), slot);
+        let bank_forks = BankForks::new_rw_arc(bank);
+        let forks_read = bank_forks.read().unwrap();
+
+        let result = BamFallbackManager::check_bank_at_slot(&forks_read, slot + 1, 10);
+
+        assert!(result.is_none());
+    }
+}
