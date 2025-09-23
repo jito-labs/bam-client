@@ -185,7 +185,7 @@ impl<Tx> SchedulingCommon<Tx> {
             max_ages,
             revert_on_error: false,
             respond_with_extra_info: false,
-            schedulable_slot: None,
+            max_schedule_slot: None,
         };
         self.consume_work_senders[thread_index]
             .send(work)
@@ -226,7 +226,7 @@ impl<Tx: TransactionWithMeta> SchedulingCommon<Tx> {
                         max_ages: _,
                         revert_on_error: _,
                         respond_with_extra_info: _,
-                        schedulable_slot: _,
+                        max_schedule_slot: _,
                     },
                 retryable_indexes,
                 extra_info: _,
