@@ -576,6 +576,10 @@ pub fn execute(
 
     let bam_url = Arc::new(Mutex::new(crate::commands::bam::extract_bam_url(matches)?));
 
+    let bam_txns_per_slot_threshold = Arc::new(RwLock::new(
+        value_of(matches, "bam_transaction_per_slot_fallback_threshold").unwrap_or(0),
+    ));
+
     // Defaults are set in cli definition, safe to use unwrap() here
     let expected_heartbeat_interval_ms: u64 =
         value_of(matches, "relayer_expected_heartbeat_interval_ms").unwrap();
@@ -751,6 +755,7 @@ pub fn execute(
         preallocated_bundle_cost: value_of(matches, "preallocated_bundle_cost")
             .expect("preallocated_bundle_cost set as default"),
         bam_url,
+        bam_txns_per_slot_threshold,
     };
 
     let reserved = validator_config
@@ -845,6 +850,7 @@ pub fn execute(
             staked_nodes_overrides,
             rpc_to_plugin_manager_sender,
             bam_url: validator_config.bam_url.clone(),
+            bam_txns_per_slot_threshold: validator_config.bam_txns_per_slot_threshold.clone(),
         },
     );
 

@@ -425,6 +425,11 @@ fn main() {
             exit(1);
         }),
     ));
+
+    genesis.bam_txns_per_slot_threshold = Arc::new(RwLock::new(
+        value_t!(matches, "bam_transaction_per_slot_fallback_threshold", u64).unwrap_or(0),
+    ));
+    
     admin_rpc_service::run(
         &ledger_path,
         admin_rpc_service::AdminRpcRequestMetadata {
@@ -439,6 +444,7 @@ fn main() {
             tower_storage: tower_storage.clone(),
             rpc_to_plugin_manager_sender,
             bam_url: genesis.bam_url.clone(),
+            bam_txns_per_slot_threshold: genesis.bam_txns_per_slot_threshold.clone(),
         },
     );
     let dashboard = if output == Output::Dashboard {

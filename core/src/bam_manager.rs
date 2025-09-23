@@ -38,12 +38,13 @@ impl BamManager {
     pub fn new(
         exit: Arc<AtomicBool>,
         bam_url: Arc<Mutex<Option<String>>>,
+        bam_txns_per_slot_threshold: Arc<RwLock<u64>>,
         dependencies: BamDependencies,
         poh_recorder: Arc<RwLock<PohRecorder>>,
     ) -> Self {
         Self {
             thread: std::thread::spawn(move || {
-                Self::run(exit, bam_url, dependencies, poh_recorder)
+                Self::run(exit, bam_url, bam_txns_per_slot_threshold, dependencies, poh_recorder)
             }),
         }
     }
@@ -51,6 +52,7 @@ impl BamManager {
     fn run(
         exit: Arc<AtomicBool>,
         bam_url: Arc<Mutex<Option<String>>>,
+        bam_txns_per_slot_threshold: Arc<RwLock<u64>>,
         dependencies: BamDependencies,
         poh_recorder: Arc<RwLock<PohRecorder>>,
     ) {
@@ -68,11 +70,11 @@ impl BamManager {
         let mut fallback_manager = BamFallbackManager::new(
             exit.clone(),
             poh_recorder.clone(),
-            Arc::new(RwLock::new(0)),
+            bam_txns_per_slot_threshold,
             bam_url.clone(),
             dependencies.clone(),
         );
-        
+
         while !exit.load(Ordering::Relaxed) {
             // Update if bam is enabled
             dependencies.bam_enabled.store(
