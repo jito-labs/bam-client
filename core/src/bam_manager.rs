@@ -16,8 +16,8 @@ use {
     crate::{
         bam_connection::BamConnection,
         bam_dependencies::BamDependencies,
-        bam_payment::{BamPaymentSender, COMMISSION_PERCENTAGE},
         bam_fallback_manager::BamFallbackManager,
+        bam_payment::{BamPaymentSender, COMMISSION_PERCENTAGE},
         proxy::block_engine_stage::BlockBuilderFeeInfo,
     },
     jito_protos::proto::{
@@ -44,7 +44,13 @@ impl BamManager {
     ) -> Self {
         Self {
             thread: std::thread::spawn(move || {
-                Self::run(exit, bam_url, bam_txns_per_slot_threshold, dependencies, poh_recorder)
+                Self::run(
+                    exit,
+                    bam_url,
+                    bam_txns_per_slot_threshold,
+                    dependencies,
+                    poh_recorder,
+                )
             }),
         }
     }

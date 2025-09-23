@@ -1,17 +1,13 @@
-
 use {
     crate::bam_dependencies::BamDependencies,
+    solana_clock::Slot,
     solana_poh::poh_recorder::PohRecorder,
+    solana_runtime::bank_forks::BankForks,
     std::{
         collections::BTreeSet,
-        sync::{Arc, RwLock, Mutex},
+        sync::{Arc, Mutex, RwLock},
         time::Instant,
     },
-};
-
-use {
-    solana_clock::Slot,
-    solana_runtime::bank_forks::BankForks,
 };
 
 const CONSECUTIVE_SLOTS_THRESHOLD: u32 = 3;
@@ -33,7 +29,14 @@ impl BamFallbackManager {
         let (slot_sender, slot_receiver) = crossbeam_channel::bounded(10_000);
         Self {
             thread: std::thread::spawn(move || {
-                Self::run(exit, slot_receiver, poh_recorder, bam_txns_per_slot_threshold, bam_url, dependencies)
+                Self::run(
+                    exit,
+                    slot_receiver,
+                    poh_recorder,
+                    bam_txns_per_slot_threshold,
+                    bam_url,
+                    dependencies,
+                )
             }),
             slot_sender,
             previous_slot: 0,
@@ -74,7 +77,7 @@ impl BamFallbackManager {
                 continue;
             }
             last_check_time = now;
-            
+
             let current_slot = poh_recorder.read().unwrap().current_poh_slot();
             let slots_below_threshold = Self::check_txns_at_slot(
                 &mut leader_slots_to_track,
@@ -82,10 +85,10 @@ impl BamFallbackManager {
                 &dependencies.bank_forks,
                 *bam_txns_per_slot_threshold.read().unwrap(),
             );
-            
+
             if slots_below_threshold > 0 {
                 consecutive_threshold_hits = slots_below_threshold;
-                
+
                 if consecutive_threshold_hits >= CONSECUTIVE_SLOTS_THRESHOLD {
                     error!("BAM Fallback triggered! Disconnecting from BAM");
                     // Clear BAM URL to trigger fallback
@@ -97,9 +100,12 @@ impl BamFallbackManager {
                 // Reset on successful check
                 consecutive_threshold_hits = 0;
             }
-            
-            info!("slots_tracked={:?}, below_threshold={}", 
-                  leader_slots_to_track.len(), consecutive_threshold_hits);
+
+            info!(
+                "slots_tracked={:?}, below_threshold={}",
+                leader_slots_to_track.len(),
+                consecutive_threshold_hits
+            );
         }
         warn!("BAM Fallback Manager thread exiting");
     }
@@ -114,41 +120,45 @@ impl BamFallbackManager {
         bam_txns_per_slot_threshold: Slot,
     ) -> u32 {
         let mut threshold_hit_count = 0;
-        
+
         let bank_forks = bank_forks.read().unwrap();
         let root = bank_forks.root();
-        
+
         // Define the valid window for checking (32-64 slots old)
         // Only want to check slots that have reached consensus
         let min_valid_slot = current_slot.saturating_sub(64).max(root);
         let max_valid_slot = current_slot.saturating_sub(32);
-        
+
         let checkable_slots: Vec<Slot> = leader_slots_to_track
             .range(min_valid_slot..=max_valid_slot)
             .copied()
             .collect();
-        
+
         for slot in &checkable_slots {
-            if let Some(slot_non_vote_txs) = Self::check_bank_at_slot(&bank_forks, *slot, bam_txns_per_slot_threshold) {
+            if let Some(slot_non_vote_txs) =
+                Self::check_bank_at_slot(&bank_forks, *slot, bam_txns_per_slot_threshold)
+            {
                 threshold_hit_count += 1;
-                warn!("BAM Fallback: Slot {} has non-vote tx count {} < threshold {}", 
-                      slot, slot_non_vote_txs, bam_txns_per_slot_threshold);
+                warn!(
+                    "BAM Fallback: Slot {} has non-vote tx count {} < threshold {}",
+                    slot, slot_non_vote_txs, bam_txns_per_slot_threshold
+                );
             }
         }
-        
+
         for slot in checkable_slots {
             leader_slots_to_track.remove(&slot);
         }
-        
+
         let stale_slots: Vec<Slot> = leader_slots_to_track
             .range(..min_valid_slot)
             .copied()
             .collect();
-        
+
         for slot in stale_slots {
             leader_slots_to_track.remove(&slot);
         }
-        
+
         threshold_hit_count
     }
 
@@ -164,9 +174,10 @@ impl BamFallbackManager {
             error!("Bank not found for slot {} in check_bank_at_slot", slot);
             return None;
         };
-        
+
         let non_vote_tx_count = bank.non_vote_transaction_count_since_restart();
-        let parent_non_vote_count = bank.parent()
+        let parent_non_vote_count = bank
+            .parent()
             .map(|p| p.non_vote_transaction_count_since_restart())
             .unwrap_or(0);
 
@@ -210,11 +221,7 @@ mod tests {
             .lamports_per_signature = 5_000;
         let parent = std::sync::Arc::new(Bank::new_for_tests(&genesis.genesis_config));
         let slot = 100u64;
-        let bank = Bank::new_from_parent(
-            parent,
-            &solana_pubkey::Pubkey::new_unique(),
-            slot,
-        );
+        let bank = Bank::new_from_parent(parent, &solana_pubkey::Pubkey::new_unique(), slot);
         let bank_forks = BankForks::new_rw_arc(bank);
         let bank_ref = bank_forks.read().unwrap().get(slot).unwrap().clone();
 
