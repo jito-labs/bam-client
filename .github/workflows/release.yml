@@ -63,8 +63,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create.outputs.upload_url }}
-          asset_path: ./jito-solana-jds-${{ github.ref_name }}.tar.gz
-          asset_name: jito-solana-jds-${{ github.ref_name }}.tar.gz
+          asset_path: ./bam-client-${{ github.ref_name }}.tar.gz
+          asset_name: bam-client-${{ github.ref_name }}.tar.gz
           asset_content_type: application/gzip
 
   # version-bump:
