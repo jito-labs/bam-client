@@ -49,7 +49,7 @@ impl BamFallbackManager {
         dependencies: BamDependencies,
     ) {
         let mut leader_slots_to_track: BTreeSet<Slot> = BTreeSet::new();
-        let mut consecutive_threshold_hits: u32 = 0;
+        let mut consecutive_threshold_hits;
         const MAX_TRACKED_SLOTS: usize = 64;
 
         // 400ms * 32 slots = ~12.8s; round to 15s
@@ -119,10 +119,10 @@ impl BamFallbackManager {
         let root = bank_forks.root();
         
         // Define the valid window for checking (32-64 slots old)
+        // Only want to check slots that have reached consensus
         let min_valid_slot = current_slot.saturating_sub(64).max(root);
         let max_valid_slot = current_slot.saturating_sub(32);
         
-        // Collect slots in the valid range
         let checkable_slots: Vec<Slot> = leader_slots_to_track
             .range(min_valid_slot..=max_valid_slot)
             .copied()
