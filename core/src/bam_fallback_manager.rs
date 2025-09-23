@@ -3,8 +3,8 @@ use {
     crate::bam_dependencies::BamDependencies,
     solana_poh::poh_recorder::PohRecorder,
     std::{
-        collections::VecDeque,
-        sync::{Arc, RwLock},
+        collections::BTreeSet,
+        sync::{Arc, RwLock, Mutex},
         time::Instant,
     },
 };
@@ -13,6 +13,8 @@ use {
     solana_clock::Slot,
     solana_runtime::bank_forks::BankForks,
 };
+
+const CONSECUTIVE_SLOTS_THRESHOLD: u32 = 3;
 
 pub struct BamFallbackManager {
     thread: std::thread::JoinHandle<()>,
@@ -25,12 +27,13 @@ impl BamFallbackManager {
         exit: Arc<std::sync::atomic::AtomicBool>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         bam_txns_per_slot_threshold: Arc<RwLock<u64>>,
+        bam_url: Arc<Mutex<Option<String>>>,
         dependencies: BamDependencies,
     ) -> Self {
         let (slot_sender, slot_receiver) = crossbeam_channel::bounded(10_000);
         Self {
             thread: std::thread::spawn(move || {
-                Self::run(exit, slot_receiver, poh_recorder, bam_txns_per_slot_threshold, dependencies)
+                Self::run(exit, slot_receiver, poh_recorder, bam_txns_per_slot_threshold, bam_url, dependencies)
             }),
             slot_sender,
             previous_slot: 0,
@@ -42,19 +45,27 @@ impl BamFallbackManager {
         slot_receiver: crossbeam_channel::Receiver<Slot>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         bam_txns_per_slot_threshold: Arc<RwLock<Slot>>,
+        bam_url: Arc<Mutex<Option<String>>>,
         dependencies: BamDependencies,
     ) {
-        let mut leader_slots_to_track: VecDeque<Slot> = VecDeque::new();
+        let mut leader_slots_to_track: BTreeSet<Slot> = BTreeSet::new();
+        let mut consecutive_threshold_hits: u32 = 0;
+        const MAX_TRACKED_SLOTS: usize = 64;
 
         // 400ms * 32 slots = ~12.8s; round to 15s
         const DURATION_BETWEEN_CHECKS: std::time::Duration = std::time::Duration::from_secs(15);
-        const CONSECUTIVE_SLOTS_THRESHOLD: u32 = 3;
-
         let mut last_check_time = Instant::now();
 
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
             while let Ok(slot) = slot_receiver.try_recv() {
-                leader_slots_to_track.push_back(slot);
+                leader_slots_to_track.insert(slot);
+
+                // Remove oldest if exceeding max tracked slots
+                while leader_slots_to_track.len() > MAX_TRACKED_SLOTS {
+                    if let Some(&oldest) = leader_slots_to_track.iter().next() {
+                        leader_slots_to_track.remove(&oldest);
+                    }
+                }
             }
 
             let now = Instant::now();
@@ -65,44 +76,79 @@ impl BamFallbackManager {
             last_check_time = now;
             
             let current_slot = poh_recorder.read().unwrap().current_poh_slot();
-            let threshold_hit_count = Self::check_txns_at_slot(
-                &leader_slots_to_track,
+            let slots_below_threshold = Self::check_txns_at_slot(
+                &mut leader_slots_to_track,
                 current_slot,
                 &dependencies.bank_forks,
                 *bam_txns_per_slot_threshold.read().unwrap(),
             );
-            if threshold_hit_count >= CONSECUTIVE_SLOTS_THRESHOLD {
-                error!("BAM Fallback triggered! Disconnecting from BAM");
-                dependencies.bam_enabled.store(false, std::sync::atomic::Ordering::Relaxed);
-                leader_slots_to_track.clear();
+            
+            if slots_below_threshold > 0 {
+                consecutive_threshold_hits = slots_below_threshold;
+                
+                if consecutive_threshold_hits >= CONSECUTIVE_SLOTS_THRESHOLD {
+                    error!("BAM Fallback triggered! Disconnecting from BAM");
+                    // Clear BAM URL to trigger fallback
+                    *bam_url.lock().unwrap() = None;
+                    leader_slots_to_track.clear();
+                    consecutive_threshold_hits = 0;
+                }
+            } else {
+                // Reset on successful check
+                consecutive_threshold_hits = 0;
             }
-            info!("slots_tracked={:?}", leader_slots_to_track);
+            
+            info!("slots_tracked={:?}, below_threshold={}", 
+                  leader_slots_to_track.len(), consecutive_threshold_hits);
         }
-
         warn!("BAM Fallback Manager thread exiting");
     }
 
+    /// Check the tracked leader slots for non-vote transaction counts below the threshold.
+    /// Returns the count of slots that hit the threshold. Early-outs if the count reaches the consecutive_slots_threshold.
+    /// Also cleans up old slots beyond the valid window (32-64 slots old).
     fn check_txns_at_slot(
-        leader_slots_to_track: &VecDeque<Slot>,
+        leader_slots_to_track: &mut BTreeSet<Slot>,
         current_slot: Slot,
         bank_forks: &Arc<RwLock<BankForks>>,
         bam_txns_per_slot_threshold: Slot,
     ) -> u32 {
         let mut threshold_hit_count = 0;
-
-        for slot in leader_slots_to_track.iter().copied() {
-            let bank_forks = bank_forks.read().unwrap();
-            let root = bank_forks.root();
-
-            if current_slot.saturating_sub(slot) < 32 || slot < root {
-                continue;
-            }
-
-            if let Some(slot_non_vote_txs) = Self::check_bank_at_slot(&bank_forks, slot, bam_txns_per_slot_threshold) {
+        
+        let bank_forks = bank_forks.read().unwrap();
+        let root = bank_forks.root();
+        
+        // Define the valid window for checking (32-64 slots old)
+        let min_valid_slot = current_slot.saturating_sub(64).max(root);
+        let max_valid_slot = current_slot.saturating_sub(32);
+        
+        // Collect slots in the valid range
+        let checkable_slots: Vec<Slot> = leader_slots_to_track
+            .range(min_valid_slot..=max_valid_slot)
+            .copied()
+            .collect();
+        
+        for slot in &checkable_slots {
+            if let Some(slot_non_vote_txs) = Self::check_bank_at_slot(&bank_forks, *slot, bam_txns_per_slot_threshold) {
                 threshold_hit_count += 1;
-                warn!("BAM Fallback: Slot {} has non-vote tx count {} < threshold {}", slot, slot_non_vote_txs, bam_txns_per_slot_threshold);
+                warn!("BAM Fallback: Slot {} has non-vote tx count {} < threshold {}", 
+                      slot, slot_non_vote_txs, bam_txns_per_slot_threshold);
             }
         }
+        
+        for slot in checkable_slots {
+            leader_slots_to_track.remove(&slot);
+        }
+        
+        let stale_slots: Vec<Slot> = leader_slots_to_track
+            .range(..min_valid_slot)
+            .copied()
+            .collect();
+        
+        for slot in stale_slots {
+            leader_slots_to_track.remove(&slot);
+        }
+        
         threshold_hit_count
     }
 
