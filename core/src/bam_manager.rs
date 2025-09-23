@@ -61,6 +61,15 @@ impl BamManager {
         let mut current_connection = None;
         let mut cached_builder_config = None;
 
+        let mut circuit_breaker_count: u32 = 0;
+        let mut last_checked_slot: Option<u64> = None;
+        let mut our_leader_slots: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
+        const CIRCUIT_BREAKER_THRESHOLD: u32 = 5;
+        const MAX_TRACKED_SLOTS: usize = 10;
+
+        // get our pubkey for leader slot checks
+        let my_pubkey = dependencies.cluster_info.id();
+
         while !exit.load(Ordering::Relaxed) {
             // Update if bam is enabled
             dependencies.bam_enabled.store(
@@ -132,6 +141,54 @@ impl BamManager {
 
             // Send leader state if we are in a leader slot
             if let Some(bank) = shared_working_bank.load() {
+                let current_slot = bank.slot();
+    
+                if bank.collector_id() == &my_pubkey && !bank.is_frozen() {
+                    // track our leader slots
+                    if !our_leader_slots.contains(&current_slot) {
+                        our_leader_slots.push_back(current_slot);
+                        if our_leader_slots.len() > MAX_TRACKED_SLOTS {
+                            our_leader_slots.pop_front();
+                        }
+                    }
+                }
+                
+                // Check frozen banks for non-vote transaction counts (?)
+                // maybe can do this at an earlier commitment stage
+                if bank.is_frozen() && last_checked_slot != Some(current_slot) {
+                    last_checked_slot = Some(current_slot);
+                    
+                    if our_leader_slots.contains(&current_slot) {
+                        let non_vote_tx_count = bank.non_vote_transaction_count_since_restart();
+                        
+                        let parent_non_vote_count = bank.parent()
+                            .map(|p| p.non_vote_transaction_count_since_restart())
+                            .unwrap_or(0);
+                        
+                        let slot_non_vote_txs = non_vote_tx_count.saturating_sub(parent_non_vote_count);
+                        
+                        if slot_non_vote_txs == 0 {
+                            circuit_breaker_count += 1;
+                            warn!("Circuit breaker: No non-vote transactions in our leader slot {}. Count: {}", 
+                                current_slot, circuit_breaker_count);
+                            
+                            if circuit_breaker_count >= CIRCUIT_BREAKER_THRESHOLD {
+                                error!("Circuit breaker triggered! Disconnecting from BAM");
+                                current_connection = None;
+                                cached_builder_config = None;
+                                circuit_breaker_count = 0;
+                            }
+                        } else {
+                            if circuit_breaker_count > 0 {
+                                info!("Circuit breaker reset. Had {} non-vote txs in slot {}", 
+                                    slot_non_vote_txs, current_slot);
+                                circuit_breaker_count = 0;
+                            }
+                        }
+                        our_leader_slots.retain(|&s| s != current_slot);
+                    }
+                }
+
                 if !bank.is_frozen() {
                     let leader_state = Self::generate_leader_state(&bank);
                     let _ = dependencies.outbound_sender.try_send(
