@@ -1084,7 +1084,7 @@ mod tests {
         let bundle = AtomicTxnBatch {
             seq_id: 1,
             packets: vec![Packet { data, meta: None }],
-            max_schedule_slot: 0,
+            max_schedule_slot: Slot::MAX,
         };
         sender.send(bundle).unwrap();
 
@@ -1115,7 +1115,7 @@ mod tests {
                 data: vec![],
                 meta: None,
             }],
-            max_schedule_slot: 0,
+            max_schedule_slot: Slot::MAX,
         };
         sender.send(bundle).unwrap();
 
@@ -1150,7 +1150,7 @@ mod tests {
                 .unwrap(),
                 meta: None,
             }],
-            max_schedule_slot: 0,
+            max_schedule_slot: Slot::MAX,
         };
 
         let mut stats = BamReceiveAndBufferMetrics::default();
@@ -1170,7 +1170,7 @@ mod tests {
         let batch = AtomicTxnBatch {
             seq_id: 1,
             packets: vec![],
-            max_schedule_slot: 0,
+            max_schedule_slot: Slot::MAX,
         };
 
         let mut stats = BamReceiveAndBufferMetrics::default();
@@ -1194,7 +1194,7 @@ mod tests {
                 data: vec![0; PACKET_DATA_SIZE + 1],
                 meta: None,
             }],
-            max_schedule_slot: 0,
+            max_schedule_slot: Slot::MAX,
         };
 
         let mut stats = BamReceiveAndBufferMetrics::default();
@@ -1224,7 +1224,7 @@ mod tests {
                 .unwrap(),
                 meta: None,
             }],
-            max_schedule_slot: 0,
+            max_schedule_slot: Slot::MAX,
         };
 
         let mut stats = BamReceiveAndBufferMetrics::default();
@@ -1284,7 +1284,7 @@ mod tests {
                     }),
                 },
             ],
-            max_schedule_slot: 0,
+            max_schedule_slot: Slot::MAX,
         };
 
         let mut stats = BamReceiveAndBufferMetrics::default();
@@ -1316,7 +1316,7 @@ mod tests {
                 .unwrap(),
                 meta: None,
             }],
-            max_schedule_slot: 0,
+            max_schedule_slot: Slot::MAX,
         };
 
         let mut stats = BamReceiveAndBufferMetrics::default();
@@ -1381,7 +1381,7 @@ mod tests {
                 data: vote_data,
                 meta: Some(meta),
             }],
-            max_schedule_slot: 0,
+            max_schedule_slot: Slot::MAX,
         };
 
         let mut stats = BamReceiveAndBufferMetrics::default();
@@ -1409,5 +1409,30 @@ mod tests {
                 Reason::DeserializationError(_)
             ));
         }
+    }
+
+    #[test]
+    fn test_batch_deserialize_reject_wrong_slot() {
+        let (bank_forks, mint_keypair) = test_bank_forks();
+        let batch = AtomicTxnBatch {
+            seq_id: 1,
+            packets: vec![Packet {
+                data: bincode::serialize(&transfer(
+                    &mint_keypair,
+                    &Pubkey::new_unique(),
+                    1,
+                    bank_forks.read().unwrap().root_bank().last_blockhash(),
+                ))
+                .unwrap(),
+                meta: None,
+            }],
+            max_schedule_slot: 0,
+        };
+
+        let mut stats = BamReceiveAndBufferMetrics::default();
+        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], Slot::MAX, &mut stats);
+        
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_err());
     }
 }
