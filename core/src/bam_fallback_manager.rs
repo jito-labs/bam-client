@@ -3,7 +3,7 @@ use {
     crate::bam_dependencies::BamDependencies,
     solana_poh::poh_recorder::PohRecorder,
     std::{
-        collections::BTreeSet,
+        collections::VecDeque,
         sync::{Arc, RwLock},
         time::Instant,
     },
@@ -39,12 +39,12 @@ impl BamFallbackManager {
 
     fn run(
         exit: Arc<std::sync::atomic::AtomicBool>,
-        slot_receiver: crossbeam_channel::Receiver<u64>,
+        slot_receiver: crossbeam_channel::Receiver<Slot>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
-        bam_txns_per_slot_threshold: Arc<RwLock<u64>>,
+        bam_txns_per_slot_threshold: Arc<RwLock<Slot>>,
         dependencies: BamDependencies,
     ) {
-        let mut leader_slots_to_track = BTreeSet::new();
+        let mut leader_slots_to_track: VecDeque<Slot> = VecDeque::new();
 
         // 400ms * 32 slots = ~12.8s; round to 15s
         const DURATION_BETWEEN_CHECKS: std::time::Duration = std::time::Duration::from_secs(15);
@@ -54,7 +54,7 @@ impl BamFallbackManager {
 
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
             while let Ok(slot) = slot_receiver.try_recv() {
-                leader_slots_to_track.insert(slot);
+                leader_slots_to_track.push_back(slot);
             }
 
             let now = Instant::now();
@@ -83,7 +83,7 @@ impl BamFallbackManager {
     }
 
     fn check_txns_at_slot(
-        leader_slots_to_track: &BTreeSet<Slot>,
+        leader_slots_to_track: &VecDeque<Slot>,
         current_slot: Slot,
         bank_forks: &Arc<RwLock<BankForks>>,
         bam_txns_per_slot_threshold: Slot,
