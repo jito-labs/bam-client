@@ -138,7 +138,6 @@ impl BamManager {
             if let Some(bank) = shared_working_bank.load() {
                 if !bank.is_frozen() {
                     let leader_state = Self::generate_leader_state(&bank);
-                    payment_sender.send_slot(leader_state.slot);
                     let _ = dependencies.outbound_sender.try_send(
                         crate::bam_dependencies::BamOutboundMessage::LeaderState(leader_state),
                     );
