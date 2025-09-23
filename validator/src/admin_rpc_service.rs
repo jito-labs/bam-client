@@ -279,8 +279,8 @@ pub trait AdminRpc {
     #[rpc(meta, name = "setBamUrl")]
     fn set_bam_url(&self, meta: Self::Metadata, bam_url: Option<String>) -> Result<()>;
 
-    #[rpc(meta, name = "setBamTransactionPerSlotFallbackThreshold")]
-    fn set_bam_transaction_per_slot_fallback_threshold(
+    #[rpc(meta, name = "setBamTransactionsPerSlotFallbackThreshold")]
+    fn set_bam_transactions_per_slot_fallback_threshold(
         &self,
         meta: Self::Metadata,
         threshold: u64,
@@ -583,14 +583,14 @@ impl AdminRpc for AdminRpcImpl {
         Ok(())
     }
 
-    fn set_bam_transaction_per_slot_fallback_threshold(
+    fn set_bam_transactions_per_slot_fallback_threshold(
         &self,
         meta: Self::Metadata,
         threshold: u64,
     ) -> Result<()> {
         let current_threshold = *meta.bam_txns_per_slot_threshold.read().unwrap();
         debug!(
-            "set_bam_transaction_per_slot_fallback_threshold old={}, new={}",
+            "set_bam_transactions_per_slot_fallback_threshold old={}, new={}",
             current_threshold, threshold
         );
         *meta.bam_txns_per_slot_threshold.write().unwrap() = threshold;

@@ -577,7 +577,7 @@ pub fn execute(
     let bam_url = Arc::new(Mutex::new(crate::commands::bam::extract_bam_url(matches)?));
 
     let bam_txns_per_slot_threshold = Arc::new(RwLock::new(
-        value_of(matches, "bam_transaction_per_slot_fallback_threshold").unwrap_or(0),
+        value_of(matches, "bam_transactions_per_slot_fallback_threshold").unwrap_or(0),
     ));
 
     // Defaults are set in cli definition, safe to use unwrap() here

@@ -427,9 +427,9 @@ fn main() {
     ));
 
     genesis.bam_txns_per_slot_threshold = Arc::new(RwLock::new(
-        value_t!(matches, "bam_transaction_per_slot_fallback_threshold", u64).unwrap_or(0),
+        value_t!(matches, "bam_transactions_per_slot_fallback_threshold", u64).unwrap_or(0),
     ));
-    
+
     admin_rpc_service::run(
         &ledger_path,
         admin_rpc_service::AdminRpcRequestMetadata {
