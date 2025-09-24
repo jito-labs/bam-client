@@ -56,12 +56,8 @@ fn passthrough_priority(
     *id
 }
 
-pub const MAX_SCHEDULED_PER_WORKER: usize = 3;
-pub const MAX_TXN_PER_BATCH: usize = 8;
-
 pub struct BamScheduler<Tx: TransactionWithMeta> {
-    workers_scheduled_count: Vec<usize>,
-    consume_work_senders: Vec<Sender<ConsumeWork<Tx>>>,
+    consume_work_sender: Sender<ConsumeWork<Tx>>,
     finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
     response_sender: Sender<BamOutboundMessage>,
 
@@ -75,13 +71,9 @@ pub struct BamScheduler<Tx: TransactionWithMeta> {
     last_schedule_time: Instant,
     slot: Option<Slot>,
 
-    max_scheduled_per_worker: usize,
-    max_txn_per_batch: usize,
-
     // Reusable objects to avoid allocations
     reusable_consume_work: Vec<ConsumeWork<Tx>>,
     reusable_priority_ids: Vec<Vec<TransactionPriorityId>>,
-    reusable_batches_for_scheduling: Vec<(Vec<TransactionPriorityId>, bool)>,
 
     extra_checks_enabled: bool,
     bank_forks: Arc<RwLock<BankForks>>,
@@ -93,22 +85,18 @@ pub struct BamScheduler<Tx: TransactionWithMeta> {
 struct InflightBatchInfo {
     pub schedule_time: Instant,
     pub batch_priority_ids: Vec<TransactionPriorityId>,
-    pub worker_index: usize,
     pub slot: Slot,
 }
 
 impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
     pub fn new(
-        consume_work_senders: Vec<Sender<ConsumeWork<Tx>>>,
+        consume_work_sender: Sender<ConsumeWork<Tx>>,
         finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
         response_sender: Sender<BamOutboundMessage>,
-        max_scheduled_per_worker: usize,
-        max_txn_per_batch: usize,
         bank_forks: Arc<RwLock<BankForks>>,
     ) -> Self {
         Self {
-            workers_scheduled_count: vec![0; consume_work_senders.len()],
-            consume_work_senders,
+            consume_work_sender,
             finished_consume_work_receiver,
             response_sender,
             next_batch_id: 0,
@@ -120,11 +108,8 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             time_between_schedule_us: Histogram::new(),
             last_schedule_time: Instant::now(),
             slot: None,
-            max_scheduled_per_worker,
-            max_txn_per_batch,
             reusable_consume_work: Vec::new(),
             reusable_priority_ids: Vec::new(),
-            reusable_batches_for_scheduling: Vec::new(),
             extra_checks_enabled: true,
             bank_forks,
         }
@@ -155,12 +140,12 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         let working_bank = self.bank_forks.read().unwrap().working_bank();
 
         while let Some(next_batch_id) = container.pop() {
-            let Some((batch_ids, _, batch_slot)) = container.get_batch(next_batch_id.id) else {
+            let Some((batch_ids, _, max_schedule_slot)) = container.get_batch(next_batch_id.id) else {
                 error!("Batch {} not found in container", next_batch_id.id);
                 continue;
             };
 
-            if batch_slot != slot {
+            if max_schedule_slot < slot {
                 // If the slot has changed, we cannot schedule this batch
                 let seq_id = priority_to_seq_id(next_batch_id.priority);
                 self.send_no_leader_slot_bundle_result(seq_id);
@@ -209,21 +194,6 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         }
     }
 
-    fn get_best_available_worker(&mut self) -> Option<usize> {
-        let mut best_worker_index = None;
-        let mut best_worker_count = self.max_scheduled_per_worker;
-        for (worker_index, count) in self.workers_scheduled_count.iter_mut().enumerate() {
-            if *count == 0 {
-                return Some(worker_index);
-            }
-            if *count < best_worker_count {
-                best_worker_index = Some(worker_index);
-                best_worker_count = *count;
-            }
-        }
-        best_worker_index
-    }
-
     fn send_to_workers(
         &mut self,
         container: &mut impl StateContainer<Tx>,
@@ -234,76 +204,30 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             return;
         };
 
-        // Schedule any available transactions in prio-graph
-        let mut batches_for_scheduling = std::mem::take(&mut self.reusable_batches_for_scheduling);
-        while let Some(worker_index) = self.get_best_available_worker() {
-            self.get_batches_for_scheduling(&mut batches_for_scheduling, container, slot, self.extra_checks_enabled);
-            if batches_for_scheduling.is_empty() {
-                break;
-            }
-            for (priority_ids, revert_on_error) in batches_for_scheduling.drain(..) {
-                let len = priority_ids.len();
-                let batch_id = self.get_next_schedule_id();
-                let mut work = self.get_or_create_work_object();
-                Self::generate_work(
-                    &mut work,
-                    batch_id,
-                    &priority_ids,
-                    revert_on_error,
-                    container,
-                    slot,
-                );
-                self.send_to_worker(worker_index, priority_ids, work, slot);
-                *num_scheduled += len;
-            }
-        }
-        std::mem::swap(
-            &mut self.reusable_batches_for_scheduling,
-            &mut batches_for_scheduling,
-        );
-    }
-
-    /// Get batches of transactions for scheduling.
-    /// Build a normal txn batch up to a maximum of `MAX_TXN_PER_BATCH` transactions;
-    /// but if a 'revert_on_error' batch is encountered, the WIP batch is finalized
-    /// and the 'revert_on_error' batch is appended to the result.
-    fn get_batches_for_scheduling(
-        &mut self,
-        result: &mut Vec<(Vec<TransactionPriorityId>, bool)>,
-        container: &mut impl StateContainer<Tx>,
-        current_slot: Slot,
-        extra_checks_enabled: bool,
-    ) {
-        let working_bank = self.bank_forks.read().unwrap().working_bank();
-
         let now = Instant::now();
-        let mut current_batch_ids = self.get_or_create_priority_ids();
-        while let Some(next_batch_id) = self.prio_graph.pop() {
-            let Some((_, _, slot)) = container.get_batch(next_batch_id.id) else {
-                continue;
-            };
+        let working_bank = self.bank_forks.read().unwrap().working_bank();
+        while let Some(id) = self.prio_graph.pop() {
+            let (batch_ids, revert_on_error, max_schedule_slot) = container.get_batch(id.id).unwrap();
 
+            // Update time in prio-graph metric
             if let Some(insertion_time) = self.insertion_to_prio_graph_time
-                .remove(&priority_to_seq_id(next_batch_id.priority))
+                .remove(&priority_to_seq_id(id.priority))
             {
                 let _ = self.time_in_priograph_us.increment(now.duration_since(insertion_time).as_micros() as u64);
             };
 
-            // These should be cleared out earlier; but if not, we remove them here
-            if slot != current_slot {
-                container.remove_by_id(next_batch_id.id);
-                self.prio_graph.unblock(&next_batch_id);
-                self.send_no_leader_slot_bundle_result(priority_to_seq_id(next_batch_id.priority));
+            // Filter on slot
+            if max_schedule_slot < slot {
+                self.prio_graph.unblock(&id);
+                let seq_id = priority_to_seq_id(id.priority);
+                self.send_no_leader_slot_bundle_result(seq_id);
+                container.remove_by_id(id.id);
                 continue;
             }
-            
-            let Some((transaction_ids, revert_on_error, _)) = container.get_batch(next_batch_id.id) else {
-                error!("Batch {} not found in container", next_batch_id.id);
-                continue;
-            };
 
-            if extra_checks_enabled {
-                let sanitized_txs = transaction_ids.iter()
+            // Filter on check_transactions
+            if self.extra_checks_enabled {
+                let sanitized_txs = batch_ids.iter()
                     .filter_map(|txn_id| container.get_transaction(*txn_id))
                     .map(|txn| txn.borrow())
                     .collect::<Vec<_>>();
@@ -318,10 +242,10 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                     .find_position(|res| res.is_err())
                     .map(|(i, res)| (i, res.as_ref().err().unwrap().clone()))
                 {
-                    container.remove_by_id(next_batch_id.id);
-                    self.prio_graph.unblock(&next_batch_id);
+                    container.remove_by_id(id.id);
+                    self.prio_graph.unblock(&id);
 
-                    let seq_id = priority_to_seq_id(next_batch_id.priority);
+                    let seq_id = priority_to_seq_id(id.priority);
                     let result = atomic_txn_batch_result::Result::NotCommitted(
                         jito_protos::proto::bam_types::NotCommitted {
                             reason: Some(Self::convert_reason_to_proto(index, NotCommittedReason::Error(err))),
@@ -332,46 +256,38 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 };
             }
 
-            if revert_on_error {
-                if !current_batch_ids.is_empty() {
-                    result.push((std::mem::take(&mut current_batch_ids), false));
-                    current_batch_ids = self.get_or_create_priority_ids();
-                }
-                result.push((vec![next_batch_id], true));
-                break;
-            } else {
-                current_batch_ids.push(next_batch_id);
-            }
-
-            if current_batch_ids.len() >= self.max_txn_per_batch {
-                break;
-            }
-        }
-        if !current_batch_ids.is_empty() {
-            result.push((current_batch_ids, false));
+            // Schedulit
+            let mut work = self.get_or_create_work_object();
+            let batch_id = self.get_next_schedule_id();
+            *num_scheduled += batch_ids.len();
+            Self::generate_work(
+                &mut work,
+                batch_id,
+                &[id],
+                revert_on_error,
+                container,
+                slot,
+            );
+            self.send_to_worker(vec![id], work, slot);
         }
     }
 
     fn send_to_worker(
         &mut self,
-        worker_index: usize,
         priority_ids: Vec<TransactionPriorityId>,
         work: ConsumeWork<Tx>,
         slot: Slot,
     ) {
-        let consume_work_sender = &self.consume_work_senders[worker_index];
         let batch_id = work.batch_id;
-        let _ = consume_work_sender.send(work);
+        let _ = self.consume_work_sender.send(work);
         self.inflight_batch_info.insert(
             batch_id,
             InflightBatchInfo {
                 schedule_time: Instant::now(),
                 batch_priority_ids: priority_ids,
-                worker_index,
                 slot,
             },
         );
-        self.workers_scheduled_count[worker_index] += 1;
     }
 
     fn get_next_schedule_id(&mut self) -> TransactionBatchId {
@@ -387,12 +303,12 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             // These values will be overwritten by `generate_work`
             ConsumeWork {
                 batch_id: TransactionBatchId::new(0),
-                ids: Vec::with_capacity(MAX_TXN_PER_BATCH),
-                transactions: Vec::with_capacity(MAX_TXN_PER_BATCH),
-                max_ages: Vec::with_capacity(MAX_TXN_PER_BATCH),
+                ids: Vec::with_capacity(1),
+                transactions: Vec::with_capacity(5),
+                max_ages: Vec::with_capacity(5),
                 revert_on_error: false,
                 respond_with_extra_info: false,
-                schedulable_slot: None,
+                max_schedule_slot: None,
             }
         }
     }
@@ -403,14 +319,6 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         work.transactions.clear();
         work.max_ages.clear();
         self.reusable_consume_work.push(work);
-    }
-
-    fn get_or_create_priority_ids(&mut self) -> Vec<TransactionPriorityId> {
-        if let Some(priority_ids) = self.reusable_priority_ids.pop() {
-            priority_ids
-        } else {
-            Vec::with_capacity(MAX_TXN_PER_BATCH)
-        }
     }
 
     fn recycle_priority_ids(&mut self, mut priority_ids: Vec<TransactionPriorityId>) {
@@ -448,7 +356,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
 
         output.batch_id = batch_id;
         output.revert_on_error = revert_on_error;
-        output.schedulable_slot = Some(slot);
+        output.max_schedule_slot = Some(slot);
         output.respond_with_extra_info = true;
     }
 
@@ -713,7 +621,6 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
             let Some(inflight_batch_info) = self.inflight_batch_info.remove(&batch_id) else {
                 continue;
             };
-            self.workers_scheduled_count[inflight_batch_info.worker_index] -= 1;
 
             let _ = self.time_in_worker_us.increment(
                 now.duration_since(inflight_batch_info.schedule_time)
@@ -826,22 +733,21 @@ mod tests {
         num_threads: usize,
         bank_forks: &Arc<RwLock<BankForks>>,
     ) -> TestScheduler {
-        let (consume_work_senders, consume_work_receivers) =
-            (0..num_threads).map(|_| unbounded()).unzip();
+        let (consume_work_sender, consume_work_receiver) = unbounded();
         let (finished_consume_work_sender, finished_consume_work_receiver) = unbounded();
         let (response_sender, response_receiver) = unbounded();
         test_bank_forks();
         let scheduler = BamScheduler::new(
-            consume_work_senders,
+            consume_work_sender,
             finished_consume_work_receiver,
             response_sender,
-            5,
-            16,
             bank_forks.clone(),
         );
         TestScheduler {
             scheduler,
-            consume_work_receivers,
+            consume_work_receivers: (0..num_threads)
+                .map(|_| consume_work_receiver.clone())
+                .collect(),
             finished_consume_work_sender,
             response_receiver,
         }
@@ -943,6 +849,7 @@ mod tests {
         let keypair_a = Keypair::new();
 
         let first_recipient = Pubkey::new_unique();
+        let second_recipient = Pubkey::new_unique();
 
         let mut container = create_container(vec![
             (
@@ -965,7 +872,7 @@ mod tests {
             ),
             (
                 &Keypair::new(),
-                vec![Pubkey::new_unique()],
+                vec![second_recipient],
                 2000,
                 seq_id_to_priority(3),
             ),
@@ -1000,9 +907,11 @@ mod tests {
         // Only two should have been scheduled as one is blocked
         assert_eq!(result.num_scheduled, 2);
 
-        // First one scheduled to first worker
+        // Receive the scheduled work
         let work_1 = consume_work_receivers[0].try_recv().unwrap();
-        assert_eq!(work_1.ids.len(), 2);
+        assert_eq!(work_1.ids.len(), 1);
+        let work_2 = consume_work_receivers[0].try_recv().unwrap();
+        assert_eq!(work_2.ids.len(), 1);
 
         // Check that the first transaction is from keypair_a and first recipient is the first recipient
         assert_eq!(
@@ -1014,6 +923,16 @@ mod tests {
             first_recipient
         );
 
+        // Check that the second transaction is from the other keypair
+        assert_ne!(
+            work_2.transactions[0].message().account_keys()[0],
+            keypair_a.pubkey(),
+        );
+        assert_eq!(
+            work_2.transactions[0].message().account_keys()[1],
+            second_recipient
+        );
+
         // Try scheduling; nothing should be scheduled as the remaining transaction is blocked
         let result = scheduler
             .schedule(
@@ -1023,36 +942,37 @@ mod tests {
             )
             .unwrap();
         assert_eq!(result.num_scheduled, 0);
-        assert_eq!(scheduler.workers_scheduled_count[0], 1);
 
-        // Respond with finsihed work
-        let finished_work = FinishedConsumeWork {
-            work: work_1,
-            retryable_indexes: vec![],
-            extra_info: Some(
-                crate::banking_stage::scheduler_messages::FinishedConsumeWorkExtraInfo {
-                    processed_results: vec![
-                        TransactionResult::Committed(TransactionCommittedResult {
-                            cus_consumed: 100,
-                            feepayer_balance_lamports: 1000,
-                            loaded_accounts_data_size: 10,
-                            execution_success: true,
-                        }),
-                        TransactionResult::NotCommitted(NotCommittedReason::PohTimeout),
-                    ],
-                },
-            ),
-        };
-        let _ = finished_consume_work_sender.send(finished_work);
+        // Respond with finished work
+        let responses = [
+            (work_1, TransactionResult::Committed(TransactionCommittedResult {
+                cus_consumed: 100,
+                feepayer_balance_lamports: 1000,
+                loaded_accounts_data_size: 10,
+                execution_success: true,
+            })), // Committed
+            (work_2, TransactionResult::NotCommitted(NotCommittedReason::PohTimeout)), // Not committed
+        ];
+        for (work, response) in responses.into_iter() {
+            let finished_work = FinishedConsumeWork {
+                work,
+                retryable_indexes: vec![],
+                extra_info: Some(
+                    crate::banking_stage::scheduler_messages::FinishedConsumeWorkExtraInfo {
+                        processed_results: vec![response],
+                    },
+                ),
+            };
+            let _ = finished_consume_work_sender.send(finished_work);
+        }
 
         // Receive the finished work
         let (num_transactions, _) = scheduler
             .receive_completed(&mut container, &decision)
             .unwrap();
         assert_eq!(num_transactions, 2);
-        assert_eq!(scheduler.workers_scheduled_count[0], 0);
 
-        // Check the response for the first transaction (committed)
+        // Check the responses
         let response = response_receiver.try_recv().unwrap();
         let BamOutboundMessage::AtomicTxnBatchResult(bundle_result) = response else {
             panic!("Expected AtomicTxnBatchResult message");
@@ -1118,7 +1038,6 @@ mod tests {
         // Check that the remaining transaction is sent to the worker
         let work_2 = consume_work_receivers[0].try_recv().unwrap();
         assert_eq!(work_2.ids.len(), 1);
-        assert_eq!(scheduler.workers_scheduled_count[0], 1);
 
         // Try scheduling; nothing should be scheduled as the remaining transaction is blocked
         let result = scheduler
@@ -1154,7 +1073,6 @@ mod tests {
             .receive_completed(&mut container, &decision)
             .unwrap();
         assert_eq!(num_transactions, 1);
-        assert_eq!(scheduler.workers_scheduled_count[0], 0);
 
         // Check the response for the next transaction
         let response = response_receiver.try_recv().unwrap();

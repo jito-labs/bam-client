@@ -15,7 +15,7 @@ use {
             consume_worker::ConsumeWorker,
             packet_deserializer::PacketDeserializer,
             transaction_scheduler::{
-                bam_scheduler, prio_graph_scheduler::PrioGraphScheduler,
+                prio_graph_scheduler::PrioGraphScheduler,
                 scheduler_controller::SchedulerController, scheduler_error::SchedulerError,
             },
         },
@@ -659,20 +659,19 @@ impl BankingStage {
         if let Some(bam_dependencies) = bam_dependencies {
             // Spawn BAM workers
             // Create channels for communication between scheduler and workers
-            const NUM_BAM_WORKERS: usize = 12;
+            const NUM_BAM_WORKERS: usize = 8;
             let num_workers = NUM_BAM_WORKERS;
-            let (work_senders, work_receivers): (Vec<Sender<_>>, Vec<Receiver<_>>) =
-                (0..num_workers).map(|_| unbounded()).unzip();
+            let (work_sender, work_receiver) = unbounded();
             let (finished_work_sender, finished_work_receiver) = unbounded();
 
             // Spawn the worker threads
             let mut worker_metrics = Vec::with_capacity(num_workers);
-            for (index, work_receiver) in work_receivers.into_iter().enumerate() {
+            for index in 0..num_workers {
                 let id = index as u32;
                 let consume_worker = ConsumeWorker::new_with_tip_processing_deps(
                     id,
                     exit.clone(),
-                    work_receiver,
+                    work_receiver.clone(),
                     Consumer::new(
                         context.committer.clone(),
                         context.transaction_recorder.clone(),
@@ -704,11 +703,9 @@ impl BankingStage {
                     .spawn(move || {
                         let scheduler =
                             BamScheduler::<RuntimeTransaction<SanitizedTransaction>>::new(
-                                work_senders,
+                                work_sender,
                                 finished_work_receiver,
                                 bam_dependencies.outbound_sender.clone(),
-                                bam_scheduler::MAX_SCHEDULED_PER_WORKER,
-                                bam_scheduler::MAX_TXN_PER_BATCH,
                                 context.bank_forks.clone(),
                             );
                         let receive_and_buffer = BamReceiveAndBuffer::new(

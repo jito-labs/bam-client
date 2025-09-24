@@ -154,8 +154,8 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
                 .num_messages_processed
                 .fetch_add(1, Ordering::Relaxed);
 
-            if let Some(schedulable_slot) = work.schedulable_slot {
-                if bank.slot() != schedulable_slot {
+            if let Some(max_schedule_slot) = work.max_schedule_slot {
+                if max_schedule_slot < bank.slot() {
                     return self.retry(work);
                 }
             }
@@ -1215,7 +1215,7 @@ mod tests {
             max_ages: vec![max_age],
             revert_on_error: false,
             respond_with_extra_info: false,
-            schedulable_slot: None,
+            max_schedule_slot: None,
         };
         consume_sender.send(work).unwrap();
         let consumed = consumed_receiver.recv().unwrap();
@@ -1267,7 +1267,7 @@ mod tests {
             max_ages: vec![max_age],
             revert_on_error: false,
             respond_with_extra_info: false,
-            schedulable_slot: None,
+            max_schedule_slot: None,
         };
         consume_sender.send(work).unwrap();
         let consumed = consumed_receiver.recv().unwrap();
@@ -1322,7 +1322,7 @@ mod tests {
                 max_ages: vec![max_age, max_age],
                 revert_on_error: false,
                 respond_with_extra_info: false,
-                schedulable_slot: None,
+                max_schedule_slot: None,
             })
             .unwrap();
 
@@ -1395,7 +1395,7 @@ mod tests {
                 max_ages: vec![max_age],
                 revert_on_error: false,
                 respond_with_extra_info: false,
-                schedulable_slot: None,
+                max_schedule_slot: None,
             })
             .unwrap();
 
@@ -1407,7 +1407,7 @@ mod tests {
                 max_ages: vec![max_age],
                 revert_on_error: false,
                 respond_with_extra_info: false,
-                schedulable_slot: None,
+                max_schedule_slot: None,
             })
             .unwrap();
         let consumed = consumed_receiver.recv().unwrap();
@@ -1548,7 +1548,7 @@ mod tests {
                 ],
                 revert_on_error: false,
                 respond_with_extra_info: false,
-                schedulable_slot: None,
+                max_schedule_slot: None,
             })
             .unwrap();
 
@@ -1628,7 +1628,7 @@ mod tests {
                 max_ages: vec![MaxAge::MAX],
                 revert_on_error: false,
                 respond_with_extra_info: true,
-                schedulable_slot: None,
+                max_schedule_slot: None,
             })
             .unwrap();
 
