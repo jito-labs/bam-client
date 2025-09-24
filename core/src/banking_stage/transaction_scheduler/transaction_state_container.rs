@@ -260,6 +260,10 @@ impl<Tx: TransactionWithMeta> TransactionStateContainer<Tx> {
         self.push_ids_into_queue(std::iter::once(priority_id)) > 0
     }
 
+    /// Will try to insert a new batch of transactions if there is enough
+    /// capacity in the container. If successful, returns the batch id.
+    /// If there is not enough capacity, returns `None`.
+    /// Note: will not evict existing transactions to make room for the batch (unlike `insert_new_transaction`).
     pub(crate) fn insert_new_batch(
         &mut self,
         txns_max_age: Vec<(Tx, MaxAge)>,
@@ -268,6 +272,11 @@ impl<Tx: TransactionWithMeta> TransactionStateContainer<Tx> {
         revert_on_error: bool,
         valid_for_slot: u64,
     ) -> Option<usize> {
+        let capacity_required = self.id_to_transaction_state.len() + txns_max_age.len() + 1;
+        if capacity_required >= self.id_to_transaction_state.capacity() {
+            return None;
+        }
+
         let entry = self.get_vacant_map_entry();
         let batch_id = entry.key();
         entry.insert(BatchIdOrTransactionState::Batch(BatchInfo {
