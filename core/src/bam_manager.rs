@@ -155,7 +155,14 @@ impl BamManager {
                 if !bank.is_frozen() {
                     let leader_state = Self::generate_leader_state(&bank);
                     payment_sender.send_slot(leader_state.slot);
-                    fallback_manager.send_slot(leader_state.slot);
+
+                    match fallback_manager.send_slot(leader_state.slot) {
+                        Ok(()) => {}
+                        Err(e) => {
+                            error!("Failed to send slot to fallback manager: {}", e);
+                        }
+                    }
+
                     let _ = dependencies.outbound_sender.try_send(
                         crate::bam_dependencies::BamOutboundMessage::LeaderState(leader_state),
                     );

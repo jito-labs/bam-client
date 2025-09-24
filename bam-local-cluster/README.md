@@ -37,7 +37,7 @@ The configuration file specifies BAM service URLs, tip program IDs, and validato
 
 Key configuration options:
 - `bam_url`: BAM service endpoint
-- `bam_txns_per_slot_threshold`: Number of transactions per slot that must be met or exceed. Triggers fallback from BAM if slots do not meet this minimum transaction amount
+- `bam_transactions_per_slot_fallback_threshold`: Number of transactions from BAM per slot that must be met or exceed. Triggers fallback from BAM if slots do not meet this minimum transaction amount
 - `tip_payment_program_id` / `tip_distribution_program_id`: Tip manager programs
 - `faucet_address`: Faucet service for airdrops
 - `ledger_base_directory`: Base directory for validator ledgers

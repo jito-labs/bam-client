@@ -10,12 +10,12 @@ use {
     },
 };
 
-const CONSECUTIVE_SLOTS_THRESHOLD: u32 = 3;
+const MAX_FAIL_SLOTS_PER_CHECK: u32 = 3;
 
 pub struct BamFallbackManager {
     thread: std::thread::JoinHandle<()>,
     slot_sender: crossbeam_channel::Sender<u64>,
-    previous_slot: u64,
+    last_sent_slot: u64,
 }
 
 impl BamFallbackManager {
@@ -39,7 +39,7 @@ impl BamFallbackManager {
                 )
             }),
             slot_sender,
-            previous_slot: 0,
+            last_sent_slot: 0,
         }
     }
 
@@ -51,24 +51,18 @@ impl BamFallbackManager {
         bam_url: Arc<Mutex<Option<String>>>,
         dependencies: BamDependencies,
     ) {
-        let mut leader_slots_to_track: BTreeSet<Slot> = BTreeSet::new();
-        let mut consecutive_threshold_hits;
-        const MAX_TRACKED_SLOTS: usize = 64;
+        let mut scheduled_leader_slots: BTreeSet<Slot> = BTreeSet::new();
 
         // 400ms * 32 slots = ~12.8s; round to 15s
         const DURATION_BETWEEN_CHECKS: std::time::Duration = std::time::Duration::from_secs(15);
         let mut last_check_time = Instant::now();
 
+        // For checking if we're in a leader slot when we need to fallback
+        let shared_working_bank = poh_recorder.read().unwrap().shared_working_bank();
+
         while !exit.load(std::sync::atomic::Ordering::Relaxed) {
             while let Ok(slot) = slot_receiver.try_recv() {
-                leader_slots_to_track.insert(slot);
-
-                // Remove oldest if exceeding max tracked slots
-                while leader_slots_to_track.len() > MAX_TRACKED_SLOTS {
-                    if let Some(&oldest) = leader_slots_to_track.iter().next() {
-                        leader_slots_to_track.remove(&oldest);
-                    }
-                }
+                scheduled_leader_slots.insert(slot);
             }
 
             let now = Instant::now();
@@ -78,123 +72,114 @@ impl BamFallbackManager {
             }
             last_check_time = now;
 
-            let current_slot = poh_recorder.read().unwrap().current_poh_slot();
-            let slots_below_threshold = Self::check_txns_at_slot(
-                &mut leader_slots_to_track,
-                current_slot,
-                &dependencies.bank_forks,
-                *bam_txns_per_slot_threshold.read().unwrap(),
-            );
+            let slots_below_threshold = {
+                let current_slot = poh_recorder.read().unwrap().current_poh_slot();
+                Self::num_leader_slots_missing_txns(
+                    &mut scheduled_leader_slots,
+                    current_slot,
+                    &dependencies.bank_forks,
+                    *bam_txns_per_slot_threshold.read().unwrap(),
+                )
+            };
 
-            if slots_below_threshold > 0 {
-                consecutive_threshold_hits = slots_below_threshold;
-
-                if consecutive_threshold_hits >= CONSECUTIVE_SLOTS_THRESHOLD {
-                    error!("BAM Fallback triggered! Disconnecting from BAM");
-                    // Clear BAM URL to trigger fallback
-                    *bam_url.lock().unwrap() = None;
-                    leader_slots_to_track.clear();
-                    consecutive_threshold_hits = 0;
+            if slots_below_threshold > MAX_FAIL_SLOTS_PER_CHECK {
+                // Wait until not in a leader slot to disconnect from BAM
+                while let Some(bank) = shared_working_bank.load() {
+                    if !bank.is_frozen() {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    } else {
+                        break;
+                    }
                 }
-            } else {
-                // Reset on successful check
-                consecutive_threshold_hits = 0;
+                error!("BAM Fallback triggered! Disconnecting from BAM");
+                // Clear BAM URL to trigger fallback
+                *bam_url.lock().unwrap() = None;
+                scheduled_leader_slots.clear();
             }
 
             info!(
-                "slots_tracked={:?}, below_threshold={}",
-                leader_slots_to_track.len(),
-                consecutive_threshold_hits
+                "leader_slots_tracked={:?}, slots_below_threshold={}",
+                scheduled_leader_slots.len(),
+                slots_below_threshold
             );
         }
         warn!("BAM Fallback Manager thread exiting");
     }
 
     /// Check the tracked leader slots for non-vote transaction counts below the threshold.
-    /// Returns the count of slots that hit the threshold. Early-outs if the count reaches the consecutive_slots_threshold.
+    /// Returns the count of slots that hit the threshold. Early-outs if the count reaches the MAX_FAIL_SLOTS_PER_CHECK.
     /// Also cleans up old slots beyond the valid window (32-64 slots old).
-    fn check_txns_at_slot(
-        leader_slots_to_track: &mut BTreeSet<Slot>,
+    fn num_leader_slots_missing_txns(
+        scheduled_leader_slots: &mut BTreeSet<Slot>,
         current_slot: Slot,
         bank_forks: &Arc<RwLock<BankForks>>,
-        bam_txns_per_slot_threshold: Slot,
+        bam_txns_per_slot_threshold: u64,
     ) -> u32 {
         let mut threshold_hit_count = 0;
+        let mut slots_to_remove = Vec::new();
 
-        let bank_forks = bank_forks.read().unwrap();
-        let root = bank_forks.root();
+        let (root_slot, ancestors, min_valid_slot, max_valid_slot) = {
+            let bank_forks = bank_forks.read().unwrap();
+            let root_bank = bank_forks.root_bank();
+            let root_slot = root_bank.slot();
+            let ancestors = root_bank.proper_ancestors_set();
 
-        // Define the valid window for checking (32-64 slots old)
-        // Only want to check slots that have reached consensus
-        let min_valid_slot = current_slot.saturating_sub(64).max(root);
-        let max_valid_slot = current_slot.saturating_sub(32);
+            let min = current_slot.saturating_sub(64);
+            let max = current_slot.saturating_sub(32).max(root_slot);
 
-        let checkable_slots: Vec<Slot> = leader_slots_to_track
-            .range(min_valid_slot..=max_valid_slot)
-            .copied()
-            .collect();
+            (root_slot, ancestors, min, max)
+        };
 
-        for slot in &checkable_slots {
-            if let Some(slot_non_vote_txs) =
-                Self::check_bank_at_slot(&bank_forks, *slot, bam_txns_per_slot_threshold)
-            {
+        for &slot in scheduled_leader_slots.range(min_valid_slot..=max_valid_slot) {
+            if !ancestors.contains(&slot) && slot != root_slot {
+                // remove non-rooted slots
+                slots_to_remove.push(slot);
+                continue;
+            }
+
+            let slot_non_vote_txs = {
+                let bank_forks = bank_forks.read().unwrap();
+                bank_forks.get(slot).and_then(|bank| {
+                    let non_vote_tx_count = bank.non_vote_transaction_count_since_restart();
+                    let parent_count = bank
+                        .parent()
+                        .map(|p| p.non_vote_transaction_count_since_restart())
+                        .unwrap_or(0);
+
+                    let slot_txs = non_vote_tx_count.saturating_sub(parent_count);
+
+                    if slot_txs < bam_txns_per_slot_threshold {
+                        Some(slot_txs)
+                    } else {
+                        // Remove slots that are above the threshold
+                        slots_to_remove.push(slot);
+                        None
+                    }
+                })
+            };
+
+            if let Some(txs) = slot_non_vote_txs {
                 threshold_hit_count += 1;
                 warn!(
                     "BAM Fallback: Slot {} has non-vote tx count {} < threshold {}",
-                    slot, slot_non_vote_txs, bam_txns_per_slot_threshold
+                    slot, txs, bam_txns_per_slot_threshold
                 );
             }
         }
 
-        for slot in checkable_slots {
-            leader_slots_to_track.remove(&slot);
-        }
-
-        let stale_slots: Vec<Slot> = leader_slots_to_track
-            .range(..min_valid_slot)
-            .copied()
-            .collect();
-
-        for slot in stale_slots {
-            leader_slots_to_track.remove(&slot);
-        }
+        // Clean up stale, passing (above-threshold) and non-rooted slots
+        scheduled_leader_slots
+            .retain(|&slot| slot >= min_valid_slot && !slots_to_remove.contains(&slot));
 
         threshold_hit_count
     }
 
-    /// Check if the bank at the given slot has non-vote transaction count below the threshold.
-    /// Returns Some if the threshold is hit (i.e., non-vote tx count is below the threshold), with the count.
-    /// Returns None otherwise.
-    fn check_bank_at_slot(
-        bank_forks: &BankForks,
-        slot: u64,
-        bam_txns_per_slot_threshold: u64,
-    ) -> Option<u64> {
-        let Some(bank) = bank_forks.get(slot) else {
-            error!("Bank not found for slot {} in check_bank_at_slot", slot);
-            return None;
-        };
-
-        let non_vote_tx_count = bank.non_vote_transaction_count_since_restart();
-        let parent_non_vote_count = bank
-            .parent()
-            .map(|p| p.non_vote_transaction_count_since_restart())
-            .unwrap_or(0);
-
-        let slot_non_vote_txs = non_vote_tx_count.saturating_sub(parent_non_vote_count);
-
-        if slot_non_vote_txs < bam_txns_per_slot_threshold {
-            return Some(slot_non_vote_txs);
+    pub fn send_slot(&mut self, slot: Slot) -> Result<(), crossbeam_channel::TrySendError<Slot>> {
+        if slot <= self.last_sent_slot {
+            return Ok(());
         }
-        None
-    }
-
-    pub fn send_slot(&mut self, slot: Slot) -> bool {
-        if slot <= self.previous_slot {
-            return false;
-        }
-        self.previous_slot = slot;
-        self.slot_sender.try_send(slot).is_ok()
+        self.last_sent_slot = slot;
+        self.slot_sender.try_send(slot)
     }
 
     pub fn join(self) -> std::thread::Result<()> {
@@ -206,55 +191,159 @@ impl BamFallbackManager {
 mod tests {
     use {
         super::*,
-        solana_runtime::{bank::Bank, bank_forks::BankForks, genesis_utils::create_genesis_config},
-        solana_signer::Signer,
-        solana_system_interface::instruction::transfer as system_transfer,
-        solana_transaction::Transaction,
+        solana_runtime::{bank::Bank, genesis_utils::create_genesis_config},
+        solana_system_transaction as system_transaction,
     };
 
     #[test]
-    fn check_bank_at_slot_returns_count_when_below_threshold() {
-        let mut genesis = create_genesis_config(10_000_000_000);
-        genesis
-            .genesis_config
-            .fee_rate_governor
-            .lamports_per_signature = 5_000;
-        let parent = std::sync::Arc::new(Bank::new_for_tests(&genesis.genesis_config));
+    fn test_num_leader_slots_missing_txns_below_threshold() {
+        let genesis = create_genesis_config(10_000_000_000);
+        let parent = Arc::new(Bank::new_for_tests(&genesis.genesis_config));
         let slot = 100u64;
-        let bank = Bank::new_from_parent(parent, &solana_pubkey::Pubkey::new_unique(), slot);
+        let bank =
+            Bank::new_from_parent(parent.clone(), &solana_pubkey::Pubkey::new_unique(), slot);
+
         let bank_forks = BankForks::new_rw_arc(bank);
-        let bank_ref = bank_forks.read().unwrap().get(slot).unwrap().clone();
+        let bank_ref = bank_forks.read().unwrap().get(slot).unwrap();
 
         let payer = genesis.mint_keypair;
         let bh = bank_ref.last_blockhash();
-        let transfer_ix = system_transfer(&payer.pubkey(), &payer.pubkey(), 1);
-        let tx = Transaction::new_signed_with_payer(
-            &[transfer_ix],
-            Some(&payer.pubkey()),
-            &[&payer],
-            bh,
-        );
+
+        let tx = system_transaction::transfer(&payer, &solana_pubkey::Pubkey::new_unique(), 1, bh);
         let _results = bank_ref.process_transaction(&tx);
 
-        let threshold = 10u64;
-        let forks_read = bank_forks.read().unwrap();
-        let result = BamFallbackManager::check_bank_at_slot(&forks_read, slot, threshold);
+        assert!(bank_forks
+            .write()
+            .unwrap()
+            .set_root(slot, None, None)
+            .is_ok());
 
-        assert!(result.is_some());
-        assert!(result.unwrap() < threshold);
+        let mut scheduled_leader_slots = BTreeSet::new();
+        scheduled_leader_slots.insert(slot);
+
+        let current_slot = slot + 35;
+        let threshold = 10u64;
+
+        let result = BamFallbackManager::num_leader_slots_missing_txns(
+            &mut scheduled_leader_slots,
+            current_slot,
+            &bank_forks,
+            threshold,
+        );
+
+        assert_eq!(result, 1);
+        assert_eq!(scheduled_leader_slots.len(), 1);
     }
 
     #[test]
-    fn check_bank_at_slot_returns_none_for_missing_bank() {
-        let genesis = create_genesis_config(1_000_000).genesis_config;
-        let parent = std::sync::Arc::new(Bank::new_for_tests(&genesis));
-        let slot = 42u64;
-        let bank = Bank::new_from_parent(parent, &solana_pubkey::Pubkey::default(), slot);
+    fn test_num_leader_slots_missing_txns_above_threshold() {
+        let genesis = create_genesis_config(10_000_000_000);
+        let parent = Arc::new(Bank::new_for_tests(&genesis.genesis_config));
+        let slot = 100u64;
+        let bank =
+            Bank::new_from_parent(parent.clone(), &solana_pubkey::Pubkey::new_unique(), slot);
+
         let bank_forks = BankForks::new_rw_arc(bank);
-        let forks_read = bank_forks.read().unwrap();
+        let bank_ref = bank_forks.read().unwrap().get(slot).unwrap();
 
-        let result = BamFallbackManager::check_bank_at_slot(&forks_read, slot + 1, 10);
+        let payer = genesis.mint_keypair;
+        let bh = bank_ref.last_blockhash();
+        for _ in 0..20 {
+            let tx =
+                system_transaction::transfer(&payer, &solana_pubkey::Pubkey::new_unique(), 1, bh);
+            let _results = bank_ref.process_transaction(&tx);
+        }
 
-        assert!(result.is_none());
+        assert!(bank_forks
+            .write()
+            .unwrap()
+            .set_root(slot, None, None)
+            .is_ok());
+
+        let mut scheduled_leader_slots = BTreeSet::new();
+        scheduled_leader_slots.insert(slot);
+
+        let current_slot = slot + 35;
+        let threshold = 10u64;
+
+        let result = BamFallbackManager::num_leader_slots_missing_txns(
+            &mut scheduled_leader_slots,
+            current_slot,
+            &bank_forks,
+            threshold,
+        );
+
+        assert_eq!(result, 0);
+        assert!(scheduled_leader_slots.is_empty());
+    }
+
+    #[test]
+    fn test_num_leader_slots_missing_txns_non_rooted_slot() {
+        let genesis = create_genesis_config(10_000_000_000);
+        let parent = Arc::new(Bank::new_for_tests(&genesis.genesis_config));
+        let rooted_slot = 100u64;
+        let non_rooted_slot = 101u64;
+
+        let rooted_bank = Bank::new_from_parent(
+            parent.clone(),
+            &solana_pubkey::Pubkey::new_unique(),
+            rooted_slot,
+        );
+        let non_rooted_bank = Bank::new_from_parent(
+            parent.clone(),
+            &solana_pubkey::Pubkey::new_unique(),
+            non_rooted_slot,
+        );
+
+        let bank_forks = BankForks::new_rw_arc(rooted_bank);
+        bank_forks.write().unwrap().insert(non_rooted_bank);
+        // Only root the first bank
+        assert!(bank_forks
+            .write()
+            .unwrap()
+            .set_root(rooted_slot, None, None)
+            .is_ok());
+
+        let mut scheduled_leader_slots = BTreeSet::new();
+        scheduled_leader_slots.insert(non_rooted_slot);
+
+        let current_slot = non_rooted_slot + 35;
+        let threshold = 10u64;
+
+        let result = BamFallbackManager::num_leader_slots_missing_txns(
+            &mut scheduled_leader_slots,
+            current_slot,
+            &bank_forks,
+            threshold,
+        );
+
+        assert_eq!(result, 0);
+        assert!(scheduled_leader_slots.is_empty());
+    }
+
+    #[test]
+    fn test_num_leader_slots_missing_txns_stale_slots_cleanup() {
+        let genesis = create_genesis_config(10_000_000_000);
+        let bank = Bank::new_for_tests(&genesis.genesis_config);
+        let bank_forks = BankForks::new_rw_arc(bank);
+
+        let mut scheduled_leader_slots = BTreeSet::new();
+        // Add slots that will be outside the valid window
+        scheduled_leader_slots.insert(10);
+        scheduled_leader_slots.insert(20);
+        scheduled_leader_slots.insert(30);
+
+        let current_slot = 100u64;
+        let threshold = 10u64;
+
+        let result = BamFallbackManager::num_leader_slots_missing_txns(
+            &mut scheduled_leader_slots,
+            current_slot,
+            &bank_forks,
+            threshold,
+        );
+
+        assert_eq!(result, 0);
+        assert!(scheduled_leader_slots.is_empty());
     }
 }
