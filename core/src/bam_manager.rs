@@ -14,8 +14,7 @@ use std::{
 };
 use {
     crate::{
-        bam_connection::BamConnection,
-        bam_dependencies::BamDependencies,
+        bam_connection::BamConnection, bam_dependencies::BamDependencies,
         proxy::block_engine_stage::BlockBuilderFeeInfo,
     },
     jito_protos::proto::{
@@ -215,14 +214,6 @@ impl BamManager {
         let Some(bam_info) = config.bam_config.as_ref() else {
             return false;
         };
-
-        if bam_info.commission_bps != COMMISSION_PERCENTAGE.saturating_mul(100) {
-            error!(
-                "BAM commission bps mismatch: expected {}, got {}",
-                COMMISSION_PERCENTAGE, bam_info.commission_bps
-            );
-            return false;
-        }
 
         let Some(pubkey) = Pubkey::from_str(&bam_info.prio_fee_recipient_pubkey).ok() else {
             return false;
