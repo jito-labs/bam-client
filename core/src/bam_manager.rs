@@ -16,7 +16,6 @@ use {
     crate::{
         bam_connection::BamConnection,
         bam_dependencies::BamDependencies,
-        bam_payment::{BamPaymentSender, COMMISSION_PERCENTAGE},
         proxy::block_engine_stage::BlockBuilderFeeInfo,
     },
     jito_protos::proto::{
@@ -62,8 +61,6 @@ impl BamManager {
 
         let mut current_connection = None;
         let mut cached_builder_config = None;
-        let mut payment_sender =
-            BamPaymentSender::new(exit.clone(), poh_recorder.clone(), dependencies.clone());
 
         while !exit.load(Ordering::Relaxed) {
             // Update if bam is enabled
@@ -147,10 +144,6 @@ impl BamManager {
             // Sleep for a short duration to avoid busy-waiting
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-
-        payment_sender
-            .join()
-            .expect("Failed to join payment sender thread");
     }
 
     fn generate_leader_state(bank: &Bank) -> LeaderState {
