@@ -126,7 +126,7 @@ pub fn bam_url_argument() -> Arg<'static, 'static> {
 
 pub fn bam_transactions_per_slot_fallback_threshold_argument() -> Arg<'static, 'static> {
     Arg::with_name("bam_transactions_per_slot_fallback_threshold")
-        .long("bam-url")
+        .long("bam-transactions-per-slot-fallback-threshold")
         .help("Number of transactions per slot that must be met or exceed. Triggers fallback from BAM if slots do not meet this minimum transaction amount. Default: 0 (disabled)")
         .takes_value(true)
 }
