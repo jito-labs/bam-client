@@ -17,7 +17,6 @@ use {
         bam_connection::BamConnection,
         bam_dependencies::BamDependencies,
         bam_fallback_manager::BamFallbackManager,
-        bam_payment::{BamPaymentSender, COMMISSION_PERCENTAGE},
         proxy::block_engine_stage::BlockBuilderFeeInfo,
     },
     jito_protos::proto::{
@@ -71,8 +70,6 @@ impl BamManager {
 
         let mut current_connection = None;
         let mut cached_builder_config = None;
-        let mut payment_sender =
-            BamPaymentSender::new(exit.clone(), poh_recorder.clone(), dependencies.clone());
         let mut fallback_manager = BamFallbackManager::new(
             exit.clone(),
             poh_recorder.clone(),
@@ -150,12 +147,10 @@ impl BamManager {
                 }
             }
 
-            // Send leader state to BamPaymentSender and BamFallbackManager if we are in a leader slot
+            // Send leader state to BamFallbackManager if we are in a leader slot
             if let Some(bank) = shared_working_bank.load() {
                 if !bank.is_frozen() {
                     let leader_state = Self::generate_leader_state(&bank);
-                    payment_sender.send_slot(leader_state.slot);
-
                     match fallback_manager.send_slot(leader_state.slot) {
                         Ok(()) => {}
                         Err(e) => {
@@ -173,10 +168,6 @@ impl BamManager {
             // Sleep for a short duration to avoid busy-waiting
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-
-        payment_sender
-            .join()
-            .expect("Failed to join payment sender thread");
         fallback_manager
             .join()
             .expect("Failed to join fallback manager thread");
