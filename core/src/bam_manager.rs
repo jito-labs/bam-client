@@ -15,9 +15,7 @@ use std::{
 };
 use {
     crate::{
-        bam_connection::BamConnection,
-        bam_dependencies::BamDependencies,
-        bam_payment::{BamPaymentSender, COMMISSION_PERCENTAGE},
+        bam_connection::BamConnection, bam_dependencies::BamDependencies,
         proxy::block_engine_stage::BlockBuilderFeeInfo,
     },
     jito_protos::proto::{
@@ -62,8 +60,6 @@ impl BamManager {
 
         let mut current_connection = None;
         let mut cached_builder_config = None;
-        let mut payment_sender =
-            BamPaymentSender::new(exit.clone(), poh_recorder.clone(), dependencies.clone());
 
         let shared_working_bank = poh_recorder.read().unwrap().new_leader_bank_notifier();
 
@@ -143,7 +139,6 @@ impl BamManager {
             {
                 if !bank.is_frozen() {
                     let leader_state = Self::generate_leader_state(&bank);
-                    payment_sender.send_slot(leader_state.slot);
                     let _ = dependencies.outbound_sender.try_send(
                         crate::bam_dependencies::BamOutboundMessage::LeaderState(leader_state),
                     );
@@ -153,10 +148,6 @@ impl BamManager {
             // Sleep for a short duration to avoid busy-waiting
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-
-        payment_sender
-            .join()
-            .expect("Failed to join payment sender thread");
     }
 
     fn generate_leader_state(bank: &Bank) -> LeaderState {
@@ -230,14 +221,6 @@ impl BamManager {
         let Some(bam_info) = config.bam_config.as_ref() else {
             return false;
         };
-
-        if bam_info.commission_bps != COMMISSION_PERCENTAGE.saturating_mul(100) {
-            error!(
-                "BAM commission bps mismatch: expected {}, got {}",
-                COMMISSION_PERCENTAGE, bam_info.commission_bps
-            );
-            return false;
-        }
 
         let Some(pubkey) = Pubkey::from_str(&bam_info.prio_fee_recipient_pubkey).ok() else {
             return false;
