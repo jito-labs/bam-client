@@ -1651,7 +1651,10 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             ),
     )
     .arg(
-        bam::argument()
+        bam::bam_url_argument()
+    )
+    .arg(
+        bam::bam_transactions_per_slot_fallback_threshold_argument()
     )
     .arg(
         Arg::with_name("block_engine_url")

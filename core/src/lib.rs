@@ -11,6 +11,7 @@
 pub mod admin_rpc_post_init;
 pub mod bam_connection;
 pub mod bam_dependencies;
+pub mod bam_fallback_manager;
 pub mod bam_manager;
 pub mod banking_simulation;
 pub mod banking_stage;
