@@ -318,6 +318,28 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         environment: &TransactionProcessingEnvironment,
         config: &TransactionProcessingConfig,
     ) -> LoadAndExecuteSanitizedTransactionsOutput {
+        self.load_and_execute_sanitized_transactions_with_revert_on_error(
+            callbacks,
+            sanitized_txs,
+            check_results,
+            environment,
+            config,
+            false,
+        )
+    }
+
+    /// Main entrypoint to the SVM.
+    pub fn load_and_execute_sanitized_transactions_with_revert_on_error<
+        CB: TransactionProcessingCallback,
+    >(
+        &self,
+        callbacks: &CB,
+        sanitized_txs: &[impl SVMTransaction],
+        check_results: Vec<TransactionCheckResult>,
+        environment: &TransactionProcessingEnvironment,
+        config: &TransactionProcessingConfig,
+        revert_on_error: bool,
+    ) -> LoadAndExecuteSanitizedTransactionsOutput {
         // If `check_results` does not have the same length as `sanitized_txs`,
         // transactions could be truncated as a result of `.iter().zip()` in
         // many of the below methods.
@@ -406,7 +428,13 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         // With SIMD83, transactions must be executed in order, because transactions
         // in the same batch may modify the same accounts. Transaction order is
         // preserved within entries written to the ledger.
+        let mut will_revert_error: Option<TransactionError> = Option::None;
         for (tx, check_result) in sanitized_txs.iter().zip(check_results) {
+            if let Some(reverted_error) = will_revert_error.as_ref() {
+                processing_results.push(Err(reverted_error.clone()));
+                continue;
+            }
+
             let (validate_result, validate_fees_us) =
                 measure_us!(check_result.and_then(|tx_details| {
                     Self::validate_transaction_nonce_and_fee_payer(
@@ -513,6 +541,10 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
                 measure_us!(balance_collector.collect_post_balances(&mut account_loader, tx));
             execute_timings
                 .saturating_add_in_place(ExecuteTimingType::CollectBalancesUs, collect_balances_us);
+
+            if revert_on_error && processing_result.is_err() {
+                will_revert_error = Some(processing_result.as_ref().unwrap_err().clone());
+            }
 
             processing_results.push(processing_result);
         }

@@ -132,6 +132,39 @@ impl Consumer {
         }
     }
 
+    fn early_bailout_revert_on_error<'a>(
+        txn_count: usize,
+        transaction_errors: &[Result<(), TransactionError>],
+        error_counters: TransactionErrorMetrics,
+    ) -> ProcessTransactionBatchOutput {
+        let commit_transactions_result = Ok((0..txn_count)
+            .map(|index| {
+                CommitTransactionDetails::NotCommitted(
+                    transaction_errors
+                        .get(index)
+                        .map(|error| error.clone().unwrap_err())
+                        .unwrap_or(TransactionError::CommitCancelled),
+                )
+            })
+            .collect());
+        ProcessTransactionBatchOutput {
+            cost_model_throttled_transactions_count: 0,
+            cost_model_us: 0,
+            execute_and_commit_transactions_output: ExecuteAndCommitTransactionsOutput {
+                transaction_counts: LeaderProcessedTransactionCounts {
+                    attempted_processing_count: txn_count as u64,
+                    ..Default::default()
+                },
+                retryable_transaction_indexes: vec![],
+                commit_transactions_result,
+                execute_and_commit_timings: LeaderExecuteAndCommitTimings::default(),
+                error_counters,
+                min_prioritization_fees: 0,
+                max_prioritization_fees: 0,
+            },
+        }
+    }
+
     pub fn process_and_record_transactions(
         &self,
         bank: &Bank,
@@ -150,6 +183,13 @@ impl Consumer {
                 Err(err) => Err(err),
             })
             .collect();
+        if revert_on_error && check_results.iter().any(|res| res.is_err()) {
+            return Self::early_bailout_revert_on_error(
+                txs.len(),
+                &check_results,
+                error_counters,
+            );
+        }
 
         let mut output = self.process_and_record_transactions_with_pre_results(
             bank,
@@ -373,7 +413,7 @@ impl Consumer {
         }
 
         let (load_and_execute_transactions_output, load_execute_us) = measure_us!(bank
-            .load_and_execute_transactions(
+            .load_and_execute_transactions_with_revert_on_error(
                 batch,
                 MAX_PROCESSING_AGE,
                 &mut execute_and_commit_timings.execute_timings,
@@ -386,7 +426,8 @@ impl Consumer {
                     recording_config: ExecutionRecordingConfig::new_single_setting(
                         transaction_status_sender_enabled
                     ),
-                }
+                },
+                revert_on_error,
             ));
         execute_and_commit_timings.load_execute_us = load_execute_us;
         let successful_count = load_and_execute_transactions_output
