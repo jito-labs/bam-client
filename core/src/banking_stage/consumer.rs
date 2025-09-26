@@ -132,7 +132,7 @@ impl Consumer {
         }
     }
 
-    fn early_bailout_revert_on_error<'a>(
+    fn early_bailout_revert_on_error(
         txn_count: usize,
         transaction_errors: &[Result<(), TransactionError>],
         error_counters: TransactionErrorMetrics,
