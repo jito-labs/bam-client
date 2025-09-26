@@ -805,7 +805,23 @@ struct BamReceiveAndBufferMetrics {
 }
 
 impl BamReceiveAndBufferMetrics {
+    fn has_data(&self) -> bool {
+        self.total_us > 0
+            || self.deserialization_us > 0
+            || self.sanitization_us > 0
+            || self.lock_validation_us > 0
+            || self.fee_budget_extraction_us > 0
+            || self.check_transactions_us > 0
+            || self.fee_payer_check_us > 0
+            || self.blacklist_check_us > 0
+            || self.sigverify_metrics.total_packets_verified > 0
+    }
+
     fn report(&mut self) {
+        if !self.has_data() {
+            return;
+        }
+
         datapoint_info!(
             "bam-receive-and-buffer",
             ("total_us", self.total_us, i64),
