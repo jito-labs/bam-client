@@ -528,12 +528,12 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             container.remove_by_id(next_batch_id.id);
         }
 
+        self.insertion_to_prio_graph_time.clear();
+
         // Only report timing metrics when slot has ended
         if self.slot.is_none() {
-            self.insertion_to_prio_graph_time.clear();
+            self.report_histogram_metrics();
         }
-
-        self.report_histogram_metrics();
 
         self.last_schedule_time = Instant::now();
     }
