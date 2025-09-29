@@ -537,6 +537,15 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
 
         self.insertion_to_prio_graph_time.clear();
 
+        // Only report timing metrics when slot has ended
+        if self.slot.is_none() {
+            self.report_histogram_metrics();
+        }
+
+        self.last_schedule_time = Instant::now();
+    }
+
+    fn report_histogram_metrics(&mut self) {
         datapoint_info!(
             "bam_scheduler_bank_boundary-metrics",
             ("time_in_priograph_us_p50", self.time_in_priograph_us.percentile(50.0).unwrap_or_default(), i64),
@@ -566,7 +575,6 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             ("time_between_schedule_us_max", self.time_between_schedule_us.maximum().unwrap_or_default(), i64),
         );
         self.time_between_schedule_us.clear();
-        self.last_schedule_time = Instant::now();
     }
 }
 
