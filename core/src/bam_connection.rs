@@ -388,7 +388,23 @@ struct BamConnectionMetrics {
 }
 
 impl BamConnectionMetrics {
+    fn has_data(&self) -> bool {
+        self.bundle_received.load(Relaxed) > 0
+            || self.bundle_forward_to_scheduler_fail.load(Relaxed) > 0
+            || self.heartbeat_received.load(Relaxed) > 0
+            || self.builder_config_received.load(Relaxed) > 0
+            || self.unhealthy_connection_count.load(Relaxed) > 0
+            || self.leaderstate_sent.load(Relaxed) > 0
+            || self.bundleresult_sent.load(Relaxed) > 0
+            || self.heartbeat_sent.load(Relaxed) > 0
+            || self.outbound_sent.load(Relaxed) > 0
+            || self.outbound_fail.load(Relaxed) > 0
+    }
+
     pub fn report(&self) {
+        if !self.has_data() {
+            return;
+        }
         datapoint_info!(
             "bam_connection-metrics",
             (
