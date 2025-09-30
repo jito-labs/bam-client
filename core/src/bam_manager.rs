@@ -14,10 +14,8 @@ use std::{
 };
 use {
     crate::{
-        bam_connection::BamConnection,
-        bam_dependencies::BamDependencies,
-        bam_fallback_manager::BamFallbackManager,
-        proxy::block_engine_stage::BlockBuilderFeeInfo,
+        bam_connection::BamConnection, bam_dependencies::BamDependencies,
+        bam_fallback_manager::BamFallbackManager, proxy::block_engine_stage::BlockBuilderFeeInfo,
     },
     jito_protos::proto::{
         bam_api::ConfigResponse,
@@ -153,8 +151,12 @@ impl BamManager {
                     let leader_state = Self::generate_leader_state(&bank);
                     match fallback_manager.send_slot(leader_state.slot) {
                         Ok(()) => {}
-                        Err(e) => {
-                            error!("Failed to send slot to fallback manager: {}", e);
+                        Err(crossbeam_channel::TrySendError::Full(_)) => {
+                            warn!("Failed to send slot to fallback manager: channel full");
+                        }
+                        Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+                            error!("Failed to send slot to fallback manager: channel disconnected. Exiting...");
+                            break;
                         }
                     }
 
@@ -162,7 +164,6 @@ impl BamManager {
                         crate::bam_dependencies::BamOutboundMessage::LeaderState(leader_state),
                     );
                 }
-
             }
 
             // Sleep for a short duration to avoid busy-waiting
