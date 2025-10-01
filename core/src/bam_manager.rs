@@ -152,7 +152,7 @@ impl BamManager {
                     match fallback_manager.send_slot(leader_state.slot) {
                         Ok(()) => {}
                         Err(crossbeam_channel::TrySendError::Full(_)) => {
-                            warn!("Failed to send slot to fallback manager: channel full");
+                            error!("Failed to send slot to fallback manager: channel full");
                         }
                         Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
                             error!("Failed to send slot to fallback manager: channel disconnected. Exiting...");
