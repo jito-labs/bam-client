@@ -110,7 +110,11 @@ impl BamFallbackManager {
                         }
                     }
 
-                    let disconnect_url = bam_url.lock().unwrap().as_ref().map_or("None".to_string(), |u| u.clone());
+                    let disconnect_url = bam_url
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .map_or("None".to_string(), |u| u.clone());
                     datapoint_error!(
                         "bam-fallback-manager-disconnected",
                         ("count", 1, i64),
