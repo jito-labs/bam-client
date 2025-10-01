@@ -110,14 +110,17 @@ impl BamFallbackManager {
                         }
                     }
 
+                    let disconnect_url = bam_url.lock().unwrap().as_ref().map_or("None".to_string(), |u| u.clone());
                     datapoint_error!(
                         "bam-fallback-manager-disconnected",
                         ("count", 1, i64),
-                        ("triggered_by_slot", most_recent, i64)
+                        ("triggered_by_slot", most_recent, i64),
+                        ("bam_url", disconnect_url, String)
                     );
                     error!(
-                        "BAM Fallback triggered! Triggered by slot {}. Disconnecting from BAM",
-                        most_recent
+                        "BAM Fallback triggered! Triggered by slot {}. Disconnecting from BAM at url {:?}",
+                        most_recent,
+                        disconnect_url
                     );
                     *bam_url.lock().unwrap() = None;
                     scheduled_leader_slots.clear();
