@@ -1,14 +1,19 @@
 use {
     crossbeam_channel::{Receiver, Sender},
-    jito_protos::proto::bam_types::{AtomicTxnBatch, AtomicTxnBatchResult, Packet},
+    jito_protos::proto::bam_types::AtomicTxnBatchResult,
     solana_compute_budget_interface::ComputeBudgetInstruction,
-    solana_core::bam_dependencies::BamOutboundMessage,
+    solana_core::{
+        bam_dependencies::BamOutboundMessage,
+        verified_bam_packet_batch::{BamPacketBatchMeta, VerifiedBamPacketBatch},
+    },
     solana_hash::Hash,
     solana_keypair::Keypair,
-    solana_perf::packet::solana_packet,
+    solana_message::Message,
+    solana_perf::packet::{BytesPacket, PacketBatch},
     solana_poh::poh_recorder::SharedWorkingBank,
     solana_pubkey::Pubkey,
     solana_runtime::bank::Bank,
+    solana_signature::Signature,
     solana_signer::Signer,
     solana_system_interface::instruction::transfer,
     solana_transaction::Transaction,
@@ -36,30 +41,36 @@ fn make_transfer_transaction_with_compute_unit_price(
     recent_blockhash: Hash,
     compute_unit_price: u64,
 ) -> Transaction {
-    Transaction::new_signed_with_payer(
+    let mut message = Message::new(
         &[
             transfer(&from_keypair.pubkey(), to, lamports),
             ComputeBudgetInstruction::set_compute_unit_price(compute_unit_price),
             ComputeBudgetInstruction::set_compute_unit_limit(TRANSFER_TRANSACTION_COST),
         ],
         Some(&from_keypair.pubkey()),
-        &[from_keypair],
-        recent_blockhash,
-    )
+    );
+    message.recent_blockhash = recent_blockhash;
+
+    // skip signing because we are not sending the transaction to the network and it slows down tx sending
+    let mut tx = Transaction::new_unsigned(message);
+    tx.signatures = vec![Signature::new_unique(); 1];
+    tx
 }
 
 struct BamOutboundMessageResult {
-    time_received: Instant,
+    // time_received: Instant,
     result: AtomicTxnBatchResult,
 }
 
 struct BamTransactionInfo {
+    #[allow(dead_code)]
     time_sent: Instant,
     #[allow(dead_code)]
     transaction: Transaction,
 }
 
 struct BamTransactionAndResult {
+    #[allow(dead_code)]
     transaction: BamTransactionInfo,
     result: Option<BamOutboundMessageResult>,
 }
@@ -69,6 +80,7 @@ struct BankStats {
     start_time: Instant,
 
     sent_transactions_and_results: HashMap<u32, BamTransactionAndResult>,
+    num_received_results: usize,
 }
 
 impl BankStats {
@@ -77,29 +89,45 @@ impl BankStats {
             bank_slot,
             start_time: Instant::now(),
             sent_transactions_and_results: HashMap::with_capacity(50_000),
+            num_received_results: 0,
         }
     }
 
     fn print_stats(&self) {
-        let mut time_diffs = self
+        // let mut time_diffs = self
+        //     .sent_transactions_and_results
+        //     .values()
+        //     .map(|tx_and_result| {
+        //         tx_and_result
+        //             .result
+        //             .as_ref()
+        //             .unwrap()
+        //             .time_received
+        //             .duration_since(tx_and_result.transaction.time_sent)
+        //             .as_millis()
+        //     })
+        //     .collect::<Vec<_>>();
+        // time_diffs.sort();
+
+        let num_outside_leader_slot = self
             .sent_transactions_and_results
             .values()
-            .map(|tx_and_result| {
-                tx_and_result
-                    .result
-                    .as_ref()
-                    .unwrap()
-                    .time_received
-                    .duration_since(tx_and_result.transaction.time_sent)
-                    .as_millis()
+            .filter(|result| {
+                if let Some(res) = &result.result {
+                    if let Some(jito_protos::proto::bam_types::atomic_txn_batch_result::Result::NotCommitted(not_committed)) = &res.result.result {
+                        if let Some(jito_protos::proto::bam_types::not_committed::Reason::SchedulingError(error)) = &not_committed.reason {
+                            return *error == jito_protos::proto::bam_types::SchedulingError::OutsideLeaderSlot as i32;
+                        }
+                    }
+                }
+                false
             })
-            .collect::<Vec<_>>();
-        time_diffs.sort();
+            .count();
 
-        let median_time_diff = time_diffs[time_diffs.len() / 2];
-        let average_time_diff = time_diffs.iter().sum::<u128>() / time_diffs.len() as u128;
-        let max_time_diff = time_diffs.iter().max().unwrap();
-        let min_time_diff = time_diffs.iter().min().unwrap();
+        // let median_time_diff = time_diffs[time_diffs.len() / 2];
+        // let average_time_diff = time_diffs.iter().sum::<u128>() / time_diffs.len() as u128;
+        // let max_time_diff = time_diffs.iter().max().unwrap();
+        // let min_time_diff = time_diffs.iter().min().unwrap();
         let num_committed = self
             .sent_transactions_and_results
             .values()
@@ -116,16 +144,17 @@ impl BankStats {
             .count();
 
         println!(
-            "==> bank slot: {}, elapsed: {}ms, transactions sent: {} transactions landed: {}",
+            "==> bank slot: {}, elapsed: {}ms, transactions sent: {} transactions landed: {} outside leader slot: {}",
             self.bank_slot,
             self.start_time.elapsed().as_millis(),
             self.sent_transactions_and_results.len(),
-            num_committed
+            num_committed,
+            num_outside_leader_slot
         );
-        println!(
-            "==> rtt: median time diff: {}ms, average time diff: {}ms, max time diff: {}ms, min time diff: {}ms",
-            median_time_diff, average_time_diff, max_time_diff, min_time_diff
-        );
+        // println!(
+        //     "==> rtt: median time diff: {}ms, average time diff: {}ms, max time diff: {}ms, min time diff: {}ms",
+        //     median_time_diff, average_time_diff, max_time_diff, min_time_diff
+        // );
     }
 }
 
@@ -133,7 +162,7 @@ pub(crate) struct MockBamServer;
 
 impl MockBamServer {
     pub(crate) fn run(
-        batch_sender: Sender<AtomicTxnBatch>,
+        batch_sender: Sender<VerifiedBamPacketBatch>,
         outbound_receiver: Receiver<BamOutboundMessage>,
         shared_working_bank: SharedWorkingBank,
         exit: Arc<AtomicBool>,
@@ -185,9 +214,10 @@ impl MockBamServer {
                         .get_mut(&result.seq_id)
                         .unwrap();
                     transaction_info.result = Some(BamOutboundMessageResult {
-                        time_received: Instant::now(),
+                        // time_received: Instant::now(),
                         result,
                     });
+                    bank_stats.num_received_results += 1;
                 }
                 _msg => {
                     panic!("unexpected message");
@@ -200,19 +230,43 @@ impl MockBamServer {
         outbound_receiver: &Receiver<BamOutboundMessage>,
         bank_stats: &mut BankStats,
     ) {
-        while !bank_stats
-            .sent_transactions_and_results
-            .iter()
-            .all(|(_, result)| result.result.is_some())
-        {
+        let now = Instant::now();
+        let num_waiting =
+            bank_stats.sent_transactions_and_results.len() - bank_stats.num_received_results;
+        let num_messages_pending = outbound_receiver.len();
+        println!("waiting for {num_waiting} results, num_messages_pending: {num_messages_pending}");
+        while bank_stats.num_received_results < bank_stats.sent_transactions_and_results.len() {
             Self::handle_outbound_messages(outbound_receiver, bank_stats);
         }
+        println!(
+            "done waiting for results after {:?}ms",
+            now.elapsed().as_millis()
+        );
+
+        // if now.elapsed().as_millis() > 100 {
+        //     let mut ordered_seq_ids = bank_stats
+        //         .sent_transactions_and_results
+        //         .keys()
+        //         .collect::<Vec<_>>();
+        //     ordered_seq_ids.sort();
+        //     for seq_id in ordered_seq_ids {
+        //         let tx_and_result = bank_stats
+        //             .sent_transactions_and_results
+        //             .get(seq_id)
+        //             .unwrap();
+        //         println!(
+        //             "seq_id: {:?}, result: {:?}",
+        //             seq_id,
+        //             tx_and_result.result.as_ref().unwrap().result
+        //         );
+        //     }
+        // }
     }
 
     fn send_transactions(
         keypairs: &[Keypair],
         bank_stats: &mut BankStats,
-        batch_sender: &Sender<AtomicTxnBatch>,
+        batch_sender: &Sender<VerifiedBamPacketBatch>,
         bank: &Arc<Bank>,
         nonce: &mut u64,
         seq_id: &mut u32,
@@ -226,21 +280,18 @@ impl MockBamServer {
                 1,
             );
 
-            let packet = solana_packet::Packet::from_data(None, &tx).unwrap();
-            let data = packet.data(..).unwrap_or_default().to_vec();
-            let atomic_txn_batch = AtomicTxnBatch {
-                seq_id: *seq_id,
-                max_schedule_slot: bank.slot(),
-                packets: vec![Packet {
-                    data: data.to_vec(),
-                    meta: Some(jito_protos::proto::bam_types::Meta {
-                        size: data.len() as u64,
-                        flags: None,
-                    }),
-                }],
-            };
+            let packet = BytesPacket::from_data(None, &tx).unwrap();
+            let verfied_packet_batch = VerifiedBamPacketBatch::new(
+                PacketBatch::from(vec![packet]),
+                BamPacketBatchMeta {
+                    discard: false,
+                    seq_id: *seq_id,
+                    max_schedule_slot: bank.slot(),
+                    revert_on_error: false,
+                },
+            );
 
-            batch_sender.send(atomic_txn_batch).unwrap();
+            batch_sender.send(verfied_packet_batch).unwrap();
 
             bank_stats.sent_transactions_and_results.insert(
                 *seq_id,

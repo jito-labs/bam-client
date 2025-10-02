@@ -353,7 +353,7 @@ mod test {
             ),
         >,
     ) -> TransactionStateContainer<RuntimeTransaction<SanitizedTransaction>> {
-        let mut container = TransactionStateContainer::with_capacity(10 * 1024);
+        let mut container = TransactionStateContainer::with_capacity(10 * 1024, false);
         for (from_keypair, to_pubkeys, lamports, compute_unit_price) in tx_infos.into_iter() {
             let transaction = prioritized_tranfers(
                 from_keypair.borrow(),

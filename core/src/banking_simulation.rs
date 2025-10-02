@@ -1,6 +1,7 @@
 #![cfg(feature = "dev-context-only-utils")]
 use {
     crate::{
+        bam_response_handle::BamResponseHandle,
         banking_stage::{
             update_bank_forks_and_poh_recorder_for_new_tpu_bank, BankingStage, LikeClusterInfo,
         },
@@ -14,7 +15,7 @@ use {
     agave_banking_stage_ingress_types::BankingPacketBatch,
     assert_matches::assert_matches,
     bincode::deserialize_from,
-    crossbeam_channel::{unbounded, Sender},
+    crossbeam_channel::{bounded, unbounded, Sender},
     itertools::Itertools,
     log::*,
     solana_clock::{Slot, DEFAULT_MS_PER_SLOT, HOLD_TRANSACTIONS_SLOT_OFFSET},
@@ -43,8 +44,7 @@ use {
     solana_streamer::socket::SocketAddrSpace,
     solana_turbine::broadcast_stage::{BroadcastStage, BroadcastStageType},
     std::{
-        collections,
-        collections::BTreeMap,
+        collections::{self, BTreeMap},
         fmt::Display,
         fs::File,
         io::{self, BufRead, BufReader},
@@ -823,6 +823,7 @@ impl BankingSimulator {
 
         info!("Start banking stage!...");
         let prioritization_fee_cache = &Arc::new(PrioritizationFeeCache::new(0u64));
+        let bam_response = BamResponseHandle::new(bounded(1).0);
         let banking_stage = BankingStage::new_num_threads(
             block_production_method.clone(),
             transaction_struct.clone(),
@@ -841,7 +842,9 @@ impl BankingSimulator {
             BundleAccountLocker::default(),
             |_| 0,
             None,
-            None,
+            Arc::new(AtomicBool::new(false)),
+            bounded(1).1,
+            bam_response,
         );
 
         let (&_slot, &raw_base_event_time) = freeze_time_by_slot

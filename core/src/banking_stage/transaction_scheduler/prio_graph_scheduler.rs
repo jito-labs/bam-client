@@ -182,7 +182,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for PrioGraphScheduler<Tx> {
                         );
                     } else {
                         num_filtered_out += 1;
-                        container.remove_by_id(id.id);
+                        container.remove_batch_by_id(id.id);
                     }
                 }
 
@@ -425,6 +425,7 @@ fn try_schedule_transaction<Tx: TransactionWithMeta>(
 
 #[cfg(test)]
 mod tests {
+    use crate::banking_stage::decision_maker::BufferedPacketsDecision;
     use {
         super::*,
         crate::banking_stage::{
@@ -444,7 +445,6 @@ mod tests {
         solana_transaction::{sanitized::SanitizedTransaction, Transaction},
         std::borrow::Borrow,
     };
-    use crate::banking_stage::decision_maker::BufferedPacketsDecision;
 
     #[allow(clippy::type_complexity)]
     fn create_test_frame(
@@ -513,7 +513,7 @@ mod tests {
             ),
         >,
     ) -> TransactionStateContainer<RuntimeTransaction<SanitizedTransaction>> {
-        let mut container = TransactionStateContainer::with_capacity(capacity);
+        let mut container = TransactionStateContainer::with_capacity(capacity, false);
         for (from_keypair, to_pubkeys, lamports, compute_unit_price) in tx_infos.into_iter() {
             let transaction = prioritized_tranfers(
                 from_keypair.borrow(),

@@ -10,19 +10,22 @@ use {
         packet_receiver::PacketReceiver, qos_service::QosService, vote_storage::VoteStorage,
     },
     crate::{
-        bam_dependencies::BamDependencies,
+        bam_response_handle::BamResponseHandle,
         banking_stage::{
             consume_worker::ConsumeWorker,
             packet_deserializer::PacketDeserializer,
             transaction_scheduler::{
                 prio_graph_scheduler::PrioGraphScheduler,
                 scheduler_controller::SchedulerController, scheduler_error::SchedulerError,
+                transaction_state_container::SharedBytes,
             },
         },
         bundle_stage::bundle_account_locker::BundleAccountLocker,
         validator::{BlockProductionMethod, TransactionStructure},
+        verified_bam_packet_batch::VerifiedBamPacketBatch,
     },
     agave_banking_stage_ingress_types::BankingPacketReceiver,
+    agave_transaction_view::resolved_transaction_view::ResolvedTransactionView,
     conditional_mod::conditional_vis_mod,
     consumer::TipProcessingDependencies,
     crossbeam_channel::{unbounded, Receiver, Sender},
@@ -38,7 +41,6 @@ use {
     },
     solana_runtime_transaction::runtime_transaction::RuntimeTransaction,
     solana_time_utils::AtomicInterval,
-    solana_transaction::sanitized::SanitizedTransaction,
     std::{
         collections::HashSet,
         num::{NonZeroUsize, Saturating},
@@ -386,7 +388,9 @@ impl BankingStage {
         bundle_account_locker: BundleAccountLocker,
         block_cost_limit_reservation_cb: impl Fn(&Bank) -> u64 + Clone + Send + 'static,
         tip_processing_dependencies: Option<TipProcessingDependencies>,
-        bam_dependencies: Option<BamDependencies>,
+        bam_enabled: Arc<AtomicBool>,
+        verified_bam_batch_receiver: Receiver<VerifiedBamPacketBatch>,
+        bam_response_handle: BamResponseHandle,
     ) -> Self {
         let committer = Committer::new(
             transaction_status_sender,
@@ -428,7 +432,9 @@ impl BankingStage {
             block_cost_limit_reservation_cb.clone(),
             blacklisted_accounts,
             tip_processing_dependencies,
-            bam_dependencies,
+            bam_enabled,
+            verified_bam_batch_receiver,
+            bam_response_handle,
         );
 
         Self {
@@ -448,7 +454,9 @@ impl BankingStage {
         block_cost_limit_reservation_cb: impl Fn(&Bank) -> u64 + Clone + Send + 'static,
         blacklisted_accounts: HashSet<Pubkey>,
         tip_processing_dependencies: Option<TipProcessingDependencies>,
-        bam_dependencies: Option<BamDependencies>,
+        bam_enabled: Arc<AtomicBool>,
+        verified_bam_batch_receiver: Receiver<VerifiedBamPacketBatch>,
+        bam_response_handle: BamResponseHandle,
     ) -> Vec<JoinHandle<()>> {
         match transaction_struct {
             TransactionStructure::Sdk => {
@@ -465,8 +473,10 @@ impl BankingStage {
                     bundle_account_locker,
                     block_cost_limit_reservation_cb,
                     tip_processing_dependencies,
-                    bam_dependencies,
                     blacklisted_accounts,
+                    bam_enabled,
+                    verified_bam_batch_receiver,
+                    bam_response_handle,
                 )
             }
             TransactionStructure::View => {
@@ -483,8 +493,10 @@ impl BankingStage {
                     bundle_account_locker,
                     block_cost_limit_reservation_cb,
                     tip_processing_dependencies,
-                    bam_dependencies,
                     blacklisted_accounts,
+                    bam_enabled,
+                    verified_bam_batch_receiver,
+                    bam_response_handle,
                 )
             }
         }
@@ -499,8 +511,10 @@ impl BankingStage {
         bundle_account_locker: BundleAccountLocker,
         block_cost_limit_reservation_cb: impl Fn(&Bank) -> u64 + Clone + Send + 'static,
         tip_processing_dependencies: Option<TipProcessingDependencies>,
-        bam_dependencies: Option<BamDependencies>,
         blacklisted_accounts: HashSet<Pubkey>,
+        bam_enabled: Arc<AtomicBool>,
+        verified_bam_batch_receiver: Receiver<VerifiedBamPacketBatch>,
+        bam_response_handle: BamResponseHandle,
     ) -> Vec<JoinHandle<()>> {
         assert!(num_workers <= BankingStage::max_num_workers());
         let num_workers = num_workers.get();
@@ -581,10 +595,6 @@ impl BankingStage {
         }
 
         // Spawn the central scheduler thread
-        let bam_enabled = bam_dependencies
-            .as_ref()
-            .map(|bam| bam.bam_enabled.clone())
-            .unwrap_or(Arc::new(AtomicBool::new(false)));
         let scheduler_worker_senders = work_senders.clone();
         let scheduler_finished_work_receiver = finished_work_receiver.clone();
         let scheduler_decision_maker = decision_maker.clone();
@@ -656,89 +666,91 @@ impl BankingStage {
             );
         }
 
-        if let Some(bam_dependencies) = bam_dependencies {
-            // Spawn BAM workers
-            // Create channels for communication between scheduler and workers
-            const NUM_BAM_WORKERS: usize = 8;
-            let num_workers = NUM_BAM_WORKERS;
-            let (work_sender, work_receiver) = unbounded();
-            let (finished_work_sender, finished_work_receiver) = unbounded();
+        // Spawn BAM workers
+        // Create channels for communication between scheduler and workers
+        const NUM_BAM_WORKERS: usize = 12;
+        let num_workers = NUM_BAM_WORKERS;
 
-            // Spawn the worker threads
-            let mut worker_metrics = Vec::with_capacity(num_workers);
-            for index in 0..num_workers {
-                let id = index as u32;
-                let consume_worker = ConsumeWorker::new_with_tip_processing_deps(
-                    id,
-                    exit.clone(),
-                    work_receiver.clone(),
-                    Consumer::new(
-                        context.committer.clone(),
-                        context.transaction_recorder.clone(),
-                        QosService::new(id),
-                        context.log_messages_bytes_limit,
-                        bundle_account_locker.clone(),
-                    ),
-                    finished_work_sender.clone(),
-                    context.poh_recorder.read().unwrap().shared_working_bank(),
-                    tip_processing_dependencies.clone(),
-                );
+        // It's very important these channels are unbounded because if not, you can end up in a deadlock inside the consume worker
+        let (work_sender, work_receiver) = unbounded();
+        let (finished_work_sender, finished_work_receiver) = unbounded();
 
-                worker_metrics.push(consume_worker.metrics_handle());
-                thread_hdls.push(
-                    Builder::new()
-                        .name(format!("solCoWorker{id:02}"))
-                        .spawn(move || {
-                            let _ = consume_worker.run(|_| 0);
-                        })
-                        .unwrap(),
-                )
-            }
+        // Spawn the worker threads
+        let mut worker_metrics = Vec::with_capacity(num_workers);
+        for index in 0..num_workers {
+            let id = index as u32;
 
-            // Spawn the BAM scheduler thread
-            let bam_scheduler_exit = exit.clone();
+            let consume_worker = ConsumeWorker::new_with_tip_processing_deps(
+                id,
+                exit.clone(),
+                work_receiver.clone(),
+                Consumer::new(
+                    context.committer.clone(),
+                    context.transaction_recorder.clone(),
+                    QosService::new(id),
+                    context.log_messages_bytes_limit,
+                    bundle_account_locker.clone(),
+                ),
+                finished_work_sender.clone(),
+                context.poh_recorder.read().unwrap().shared_working_bank(),
+                tip_processing_dependencies.clone(),
+            );
+
+            worker_metrics.push(consume_worker.metrics_handle());
+
             thread_hdls.push(
                 Builder::new()
-                    .name("solBamSched".to_string())
+                    .name(format!("solBamCoWorker{id:02}"))
                     .spawn(move || {
-                        let scheduler =
-                            BamScheduler::<RuntimeTransaction<SanitizedTransaction>>::new(
-                                work_sender,
-                                finished_work_receiver,
-                                bam_dependencies.outbound_sender.clone(),
-                                context.bank_forks.clone(),
-                            );
-                        let receive_and_buffer = BamReceiveAndBuffer::new(
-                            bam_scheduler_exit.clone(),
-                            bam_dependencies.bam_enabled.clone(),
-                            bam_dependencies.batch_receiver.clone(),
-                            bam_dependencies.outbound_sender.clone(),
-                            context.bank_forks.clone(),
-                            blacklisted_accounts,
-                        );
-
-                        let scheduler_controller = SchedulerController::new(
-                            bam_scheduler_exit,
-                            decision_maker.clone(),
-                            receive_and_buffer,
-                            context.bank_forks,
-                            scheduler,
-                            worker_metrics,
-                            true,
-                            bam_enabled,
-                        );
-
-                        match scheduler_controller.run() {
-                            Ok(_) => {}
-                            Err(SchedulerError::DisconnectedRecvChannel(_)) => {}
-                            Err(SchedulerError::DisconnectedSendChannel(_)) => {
-                                warn!("Unexpected worker disconnect from scheduler")
-                            }
-                        }
+                        let _ = consume_worker.run(|_| 0);
                     })
                     .unwrap(),
-            );
+            )
         }
+
+        // Spawn the BAM scheduler thread
+        let bam_scheduler_exit = exit.clone();
+        thread_hdls.push(
+            Builder::new()
+                .name("solBamSched".to_string())
+                .spawn(move || {
+                    let scheduler = BamScheduler::<
+                        RuntimeTransaction<ResolvedTransactionView<SharedBytes>>,
+                    >::new(
+                        work_sender,
+                        finished_work_receiver,
+                        bam_response_handle.clone(),
+                        context.bank_forks.clone(),
+                    );
+                    let receive_and_buffer = BamReceiveAndBuffer::new(
+                        bam_enabled.clone(),
+                        verified_bam_batch_receiver,
+                        bam_response_handle.clone(),
+                        context.bank_forks.clone(),
+                        blacklisted_accounts,
+                    );
+
+                    let scheduler_controller = SchedulerController::new(
+                        bam_scheduler_exit,
+                        decision_maker.clone(),
+                        receive_and_buffer,
+                        context.bank_forks,
+                        scheduler,
+                        worker_metrics,
+                        true,
+                        bam_enabled,
+                    );
+
+                    match scheduler_controller.run() {
+                        Ok(_) => {}
+                        Err(SchedulerError::DisconnectedRecvChannel(_)) => {}
+                        Err(SchedulerError::DisconnectedSendChannel(_)) => {
+                            warn!("Unexpected worker disconnect from scheduler")
+                        }
+                    }
+                })
+                .unwrap(),
+        );
 
         thread_hdls
     }
@@ -922,7 +934,9 @@ mod tests {
             BundleAccountLocker::default(),
             |_| 0,
             None,
-            None,
+            Arc::new(AtomicBool::new(false)),
+            unbounded().1,
+            BamResponseHandle::new(unbounded().0),
         );
         drop(non_vote_sender);
         drop(tpu_vote_sender);
@@ -983,7 +997,9 @@ mod tests {
             BundleAccountLocker::default(),
             |_| 0,
             None,
-            None,
+            Arc::new(AtomicBool::new(false)),
+            unbounded().1,
+            BamResponseHandle::new(unbounded().0),
         );
         trace!("sending bank");
         drop(non_vote_sender);
@@ -1053,7 +1069,9 @@ mod tests {
             BundleAccountLocker::default(),
             |_| 0,
             None,
-            None,
+            Arc::new(AtomicBool::new(false)),
+            unbounded().1,
+            BamResponseHandle::new(unbounded().0),
         );
 
         // good tx, and no verify
@@ -1209,7 +1227,9 @@ mod tests {
                 BundleAccountLocker::default(),
                 |_| 0,
                 None,
-                None,
+                Arc::new(AtomicBool::new(false)),
+                unbounded().1,
+                BamResponseHandle::new(unbounded().0),
             );
 
             // wait for banking_stage to eat the packets
@@ -1412,7 +1432,9 @@ mod tests {
             BundleAccountLocker::default(),
             |_| 0,
             None,
-            None,
+            Arc::new(AtomicBool::new(false)),
+            unbounded().1,
+            BamResponseHandle::new(unbounded().0),
         );
 
         let keypairs = (0..100).map(|_| Keypair::new()).collect_vec();
@@ -1544,7 +1566,9 @@ mod tests {
                         BundleAccountLocker::default(),
                         |_| 0,
                         None,
-                        None,
+                        Arc::new(AtomicBool::default()),
+                        unbounded().1,
+                        BamResponseHandle::new(unbounded().0),
                     );
 
                     // bad tx

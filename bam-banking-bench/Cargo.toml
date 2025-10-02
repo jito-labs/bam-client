@@ -37,7 +37,7 @@ solana-perf = { workspace = true }
 solana-poh = { workspace = true, features = ["dev-context-only-utils"] }
 solana-pubkey = { workspace = true }
 solana-runtime = { workspace = true, features = ["dev-context-only-utils"] }
-solana-signature = { workspace = true }
+solana-signature = { workspace = true, features = ["rand"] }
 solana-signer = { workspace = true }
 solana-streamer = { workspace = true }
 solana-system-interface = { workspace = true }
@@ -46,3 +46,6 @@ solana-time-utils = { workspace = true }
 solana-tpu-client = { workspace = true }
 solana-transaction = { workspace = true }
 solana-version = { workspace = true }
+
+[target.'cfg(not(any(target_env = "msvc", target_os = "freebsd")))'.dependencies]
+jemallocator = { workspace = true }

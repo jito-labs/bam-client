@@ -4,27 +4,24 @@
 /// - Updates TPU config
 /// - Updates block builder fee info
 /// - Sets `bam_enabled` flag that is used everywhere
-use std::{
-    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    str::FromStr,
-    sync::{
+use {
+    crate::{
+        bam_connection::BamConnection, bam_dependencies::BamOutboundMessage,
+        bam_response_handle::BamResponseHandle, proxy::block_engine_stage::BlockBuilderFeeInfo,
+        verified_bam_packet_batch::BamPacketBatchMeta,
+    },
+    jito_protos::proto::{bam_api::ConfigResponse, bam_types::Socket},
+    solana_gossip::cluster_info::ClusterInfo,
+    solana_perf::packet::PacketBatch,
+    solana_poh::poh_recorder::PohRecorder,
+    solana_pubkey::Pubkey,
+    solana_runtime::bank_forks::BankForks,
+    std::net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+    std::str::FromStr,
+    std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, RwLock,
     },
-};
-use {
-    crate::{
-        bam_connection::BamConnection, bam_dependencies::BamDependencies,
-        proxy::block_engine_stage::BlockBuilderFeeInfo,
-    },
-    jito_protos::proto::{
-        bam_api::ConfigResponse,
-        bam_types::{LeaderState, Socket},
-    },
-    solana_gossip::cluster_info::ClusterInfo,
-    solana_poh::poh_recorder::PohRecorder,
-    solana_pubkey::Pubkey,
-    solana_runtime::bank::Bank,
 };
 
 pub struct BamManager {
@@ -35,12 +32,31 @@ impl BamManager {
     pub fn new(
         exit: Arc<AtomicBool>,
         bam_url: Arc<Mutex<Option<String>>>,
-        dependencies: BamDependencies,
         poh_recorder: Arc<RwLock<PohRecorder>>,
+        bam_enabled: Arc<AtomicBool>,
+        cluster_info: Arc<ClusterInfo>,
+        bank_forks: Arc<RwLock<BankForks>>,
+        batch_sender: crossbeam_channel::Sender<(PacketBatch, BamPacketBatchMeta)>,
+        outbound_receiver: crossbeam_channel::Receiver<BamOutboundMessage>,
+        block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
+        bam_node_pubkey: Arc<Mutex<Pubkey>>,
+        bam_response_handle: BamResponseHandle,
     ) -> Self {
         Self {
             thread: std::thread::spawn(move || {
-                Self::run(exit, bam_url, dependencies, poh_recorder)
+                Self::run(
+                    exit,
+                    bam_url,
+                    poh_recorder,
+                    bam_enabled,
+                    cluster_info,
+                    bank_forks,
+                    batch_sender,
+                    outbound_receiver,
+                    block_builder_fee_info,
+                    bam_node_pubkey,
+                    bam_response_handle,
+                )
             }),
         }
     }
@@ -48,8 +64,15 @@ impl BamManager {
     fn run(
         exit: Arc<AtomicBool>,
         bam_url: Arc<Mutex<Option<String>>>,
-        dependencies: BamDependencies,
         poh_recorder: Arc<RwLock<PohRecorder>>,
+        bam_enabled: Arc<AtomicBool>,
+        cluster_info: Arc<ClusterInfo>,
+        bank_forks: Arc<RwLock<BankForks>>,
+        batch_sender: crossbeam_channel::Sender<(PacketBatch, BamPacketBatchMeta)>,
+        outbound_receiver: crossbeam_channel::Receiver<BamOutboundMessage>,
+        block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
+        bam_node_pubkey: Arc<Mutex<Pubkey>>,
+        bam_response_handle: BamResponseHandle,
     ) {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(8)
@@ -63,7 +86,7 @@ impl BamManager {
 
         while !exit.load(Ordering::Relaxed) {
             // Update if bam is enabled
-            dependencies.bam_enabled.store(
+            bam_enabled.store(
                 current_connection.is_some() && cached_builder_config.is_some(),
                 Ordering::Relaxed,
             );
@@ -74,9 +97,10 @@ impl BamManager {
                 if let Some(url) = url {
                     let result = runtime.block_on(BamConnection::try_init(
                         url,
-                        dependencies.cluster_info.clone(),
-                        dependencies.batch_sender.clone(),
-                        dependencies.outbound_receiver.clone(),
+                        cluster_info.clone(),
+                        batch_sender.clone(),
+                        outbound_receiver.clone(),
+                        bank_forks.clone(),
                     ));
                     match result {
                         Ok(connection) => {
@@ -117,15 +141,12 @@ impl BamManager {
             // Check if block builder info has changed
             if let Some(builder_config) = connection.get_latest_config() {
                 if Some(&builder_config) != cached_builder_config.as_ref() {
-                    Self::update_tpu_config(Some(&builder_config), &dependencies.cluster_info);
+                    Self::update_tpu_config(Some(&builder_config), &cluster_info);
                     Self::update_block_engine_key_and_commission(
                         Some(&builder_config),
-                        &dependencies.block_builder_fee_info,
+                        &block_builder_fee_info,
                     );
-                    Self::update_bam_recipient_and_commission(
-                        &builder_config,
-                        &dependencies.bam_node_pubkey,
-                    );
+                    Self::update_bam_recipient_and_commission(&builder_config, &bam_node_pubkey);
                     cached_builder_config = Some(builder_config);
                 }
             }
@@ -133,26 +154,12 @@ impl BamManager {
             // Send leader state if we are in a leader slot
             if let Some(bank) = shared_working_bank.load() {
                 if !bank.is_frozen() {
-                    let leader_state = Self::generate_leader_state(&bank);
-                    let _ = dependencies.outbound_sender.try_send(
-                        crate::bam_dependencies::BamOutboundMessage::LeaderState(leader_state),
-                    );
+                    bam_response_handle.send_leader_state(&bank);
                 }
             }
 
             // Sleep for a short duration to avoid busy-waiting
             std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-    }
-
-    fn generate_leader_state(bank: &Bank) -> LeaderState {
-        let max_block_cu = bank.read_cost_tracker().unwrap().block_cost_limit();
-        let consumed_block_cu = bank.read_cost_tracker().unwrap().block_cost();
-        let slot_cu_budget_remaining = max_block_cu.saturating_sub(consumed_block_cu) as u32;
-        LeaderState {
-            slot: bank.slot(),
-            tick: (bank.tick_height() % bank.ticks_per_slot()) as u32,
-            slot_cu_budget_remaining,
         }
     }
 
