@@ -158,12 +158,13 @@ impl BamReceiveAndBuffer {
                     continue;
                 }
             }
-    
+
             let ((deserialized_batches_results, deserialize_stats), duration_us) =
                 measure_us!(Self::batch_deserialize_and_verify(
                     &recv_buffer,
                     bank_forks.read().unwrap().working_bank().slot(),
-                    &mut metrics));
+                    &mut metrics
+                ));
             stats.accumulate(deserialize_stats);
             metrics.increment_total_us(duration_us);
             recv_buffer.clear();
@@ -493,9 +494,10 @@ impl BamReceiveAndBuffer {
             .map(|atomic_txn_batch| {
                 if atomic_txn_batch.max_schedule_slot < current_slot {
                     stats.num_dropped_without_parsing += 1;
-                    return Err((Reason::SchedulingError(
-                        SchedulingError::OutsideLeaderSlot as i32,
-                    ), atomic_txn_batch.seq_id));
+                    return Err((
+                        Reason::SchedulingError(SchedulingError::OutsideLeaderSlot as i32),
+                        atomic_txn_batch.seq_id,
+                    ));
                 }
 
                 if atomic_txn_batch.packets.is_empty() {
@@ -562,7 +564,7 @@ impl BamReceiveAndBuffer {
     fn batch_deserialize_and_verify(
         atomic_txn_batches: &[AtomicTxnBatch],
         current_slot: Slot,
-        metrics: &mut BamReceiveAndBufferMetrics
+        metrics: &mut BamReceiveAndBufferMetrics,
     ) -> DeserializationOutput {
         fn proto_packet_to_packet(from_packet: &Packet) -> solana_packet::Packet {
             let mut to_packet = solana_packet::Packet::default();
@@ -635,7 +637,8 @@ impl BamReceiveAndBuffer {
 
         let mut stats = ReceivingStats::default();
 
-        let (pre_validated, preverify_stats) = Self::prevalidate_batches(atomic_txn_batches, current_slot);
+        let (pre_validated, preverify_stats) =
+            Self::prevalidate_batches(atomic_txn_batches, current_slot);
         stats.accumulate(preverify_stats);
 
         let mut packet_batches: Vec<solana_perf::packet::PacketBatch> = Vec::new();
@@ -1170,7 +1173,8 @@ mod tests {
         };
 
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&[bundle], Slot::MAX, &mut stats);
+        let (results, _batch_stats) =
+            BamReceiveAndBuffer::batch_deserialize_and_verify(&[bundle], Slot::MAX, &mut stats);
 
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
@@ -1190,7 +1194,8 @@ mod tests {
         };
 
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], Slot::MAX, &mut stats);
+        let (results, batch_stats) =
+            BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], Slot::MAX, &mut stats);
 
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err());
@@ -1214,8 +1219,9 @@ mod tests {
         };
 
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], Slot::MAX, &mut stats);
-        
+        let (results, _batch_stats) =
+            BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], Slot::MAX, &mut stats);
+
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err());
         if let Err((reason, seq_id)) = &results[0] {
@@ -1244,8 +1250,9 @@ mod tests {
         };
 
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], Slot::MAX, &mut stats);
-        
+        let (results, _batch_stats) =
+            BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], Slot::MAX, &mut stats);
+
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
 
@@ -1304,7 +1311,8 @@ mod tests {
         };
 
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&[bundle], Slot::MAX, &mut stats);
+        let (results, batch_stats) =
+            BamReceiveAndBuffer::batch_deserialize_and_verify(&[bundle], Slot::MAX, &mut stats);
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err());
         assert_eq!(batch_stats.num_dropped_without_parsing, 1);
@@ -1336,8 +1344,9 @@ mod tests {
         };
 
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], Slot::MAX, &mut stats);
-        
+        let (results, _batch_stats) =
+            BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], Slot::MAX, &mut stats);
+
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
 
@@ -1401,8 +1410,9 @@ mod tests {
         };
 
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], Slot::MAX, &mut stats);
-        
+        let (results, _batch_stats) =
+            BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], Slot::MAX, &mut stats);
+
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
 
@@ -1446,8 +1456,9 @@ mod tests {
         };
 
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], Slot::MAX, &mut stats);
-        
+        let (results, _batch_stats) =
+            BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], Slot::MAX, &mut stats);
+
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err());
     }
