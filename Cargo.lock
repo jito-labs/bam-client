@@ -1427,6 +1427,7 @@ dependencies = [
  "solana-tpu-client",
  "solana-transaction",
  "solana-version",
+ "tikv-jemallocator",
 ]
 
 [[package]]
