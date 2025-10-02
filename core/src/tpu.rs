@@ -7,8 +7,9 @@ pub use {
 use {
     crate::{
         admin_rpc_post_init::{KeyUpdaterType, KeyUpdaters},
-        bam_dependencies::BamDependencies,
         bam_manager::BamManager,
+        bam_response_handle::BamResponseHandle,
+        bam_sigverify_stage::BamSigverifyStage,
         banking_stage::{consumer::TipProcessingDependencies, BankingStage},
         banking_trace::{Channels, TracerThread},
         bundle_stage::{bundle_account_locker::BundleAccountLocker, BundleStage},
@@ -140,6 +141,7 @@ pub struct Tpu {
     fetch_stage_manager: FetchStageManager,
     bundle_stage: BundleStage,
     bam_manager: BamManager,
+    bam_sigverify_stage: BamSigverifyStage,
 }
 
 impl Tpu {
@@ -424,19 +426,15 @@ impl Tpu {
             .saturating_mul(8)
             .saturating_div(10);
 
-        let (bam_batch_sender, bam_batch_receiver) = bounded(100_000);
+        // BAM configuration
+        let (unverified_bam_batch_sender, unverified_bam_unbatch_receiver) = bounded(100_000);
+        let (verified_bam_batch_sender, verified_bam_batch_receiver) = bounded(100_000);
         let (bam_outbound_sender, bam_outbound_receiver) = bounded(100_000);
-        let bam_dependencies = BamDependencies {
-            bam_enabled: bam_enabled.clone(),
-            batch_sender: bam_batch_sender,
-            batch_receiver: bam_batch_receiver,
-            outbound_sender: bam_outbound_sender,
-            outbound_receiver: bam_outbound_receiver,
-            cluster_info: cluster_info.clone(),
-            block_builder_fee_info: Arc::new(Mutex::new(BlockBuilderFeeInfo::default())),
-            bam_node_pubkey: Arc::new(Mutex::new(Pubkey::default())),
-            bank_forks: bank_forks.clone(),
-        };
+        let bam_response_handle = BamResponseHandle::new(bam_outbound_sender);
+        // to be used by the payment sending mechanism
+        let bam_node_pubkey = Arc::new(Mutex::new(Pubkey::default()));
+        // different from the normal block builder fee info
+        let bam_block_builder_fee_info = Arc::new(Mutex::new(BlockBuilderFeeInfo::default()));
 
         let mut blacklisted_accounts = HashSet::new();
         blacklisted_accounts.insert(tip_manager.tip_payment_program_id());
@@ -467,10 +465,12 @@ impl Tpu {
             Some(TipProcessingDependencies {
                 tip_manager: tip_manager.clone(),
                 last_tip_updated_slot: Arc::new(Mutex::new(0)),
-                block_builder_fee_info: bam_dependencies.block_builder_fee_info.clone(),
+                block_builder_fee_info: bam_block_builder_fee_info.clone(),
                 cluster_info: cluster_info.clone(),
             }),
-            Some(bam_dependencies.clone()),
+            bam_enabled.clone(),
+            verified_bam_batch_receiver,
+            bam_response_handle.clone(),
         );
 
         let SpawnForwardingStageResult {
@@ -503,9 +503,22 @@ impl Tpu {
         let bam_manager = BamManager::new(
             exit.clone(),
             bam_url,
-            bam_dependencies,
             poh_recorder.clone(),
             key_notifiers.clone(),
+            bam_enabled.clone(),
+            cluster_info.clone(),
+            bank_forks.clone(),
+            unverified_bam_batch_sender,
+            bam_outbound_receiver,
+            block_builder_fee_info.clone(),
+            bam_node_pubkey.clone(),
+            bam_response_handle.clone(),
+        );
+
+        let bam_sigverify_stage = BamSigverifyStage::new(
+            unverified_bam_unbatch_receiver,
+            verified_bam_batch_sender,
+            exit.clone(),
         );
 
         let (entry_receiver, tpu_entry_notifier) =
@@ -567,6 +580,7 @@ impl Tpu {
             fetch_stage_manager,
             bundle_stage,
             bam_manager,
+            bam_sigverify_stage,
         }
     }
 
@@ -587,6 +601,7 @@ impl Tpu {
             self.block_engine_stage.join(),
             self.fetch_stage_manager.join(),
             self.bam_manager.join(),
+            self.bam_sigverify_stage.join(),
         ];
         let broadcast_result = self.broadcast_stage.join();
         for result in results {

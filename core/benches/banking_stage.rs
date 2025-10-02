@@ -4,11 +4,13 @@
 use {
     agave_banking_stage_ingress_types::BankingPacketBatch,
     solana_core::{
+        bam_response_handle::BamResponseHandle,
         banking_trace::Channels,
         validator::{BlockProductionMethod, TransactionStructure},
     },
     solana_vote::vote_transaction::new_tower_sync_transaction,
     solana_vote_program::vote_state::TowerSync,
+    std::sync::atomic::AtomicBool,
 };
 
 extern crate test;
@@ -257,7 +259,9 @@ fn bench_banking(
         BundleAccountLocker::default(),
         |_| 0,
         None,
-        None,
+        Arc::new(AtomicBool::new(false)),
+        unbounded().1,
+        BamResponseHandle::new(unbounded().0),
     );
 
     let chunk_len = verified.len() / CHUNKS;
