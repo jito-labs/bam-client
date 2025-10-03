@@ -8,7 +8,6 @@ use {
         bam_types,
     },
     solana_gossip::cluster_info::ClusterInfo,
-    solana_pubkey::Pubkey,
     solana_runtime::bank_forks::BankForks,
     std::sync::RwLock,
 };
@@ -32,7 +31,6 @@ pub struct BamDependencies {
     pub cluster_info: Arc<ClusterInfo>,
     pub block_builder_fee_info: Arc<Mutex<BlockBuilderFeeInfo>>,
     pub bank_forks: Arc<RwLock<BankForks>>,
-    pub bam_node_pubkey: Arc<Mutex<Pubkey>>,
 }
 
 pub fn v0_to_versioned_proto(v0: SchedulerMessageV0) -> SchedulerMessage {

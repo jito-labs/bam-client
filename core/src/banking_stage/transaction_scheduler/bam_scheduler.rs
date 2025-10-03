@@ -1,4 +1,4 @@
-use crate::bam_dependencies::BamOutboundMessage;
+use crate::bam_response_handle::BamResponseHandle;
 /// A Scheduler implementation that pulls batches off the container, and then
 /// schedules them to workers in a FIFO, account-aware manner. This is facilitated by the
 /// `PrioGraph` data structure, which is a directed graph that tracks the dependencies.
@@ -35,9 +35,7 @@ use {
     },
     ahash::HashMap,
     crossbeam_channel::{Receiver, Sender},
-    jito_protos::proto::bam_types::{
-        atomic_txn_batch_result, not_committed::Reason, SchedulingError,
-    },
+    jito_protos::proto::bam_types::{atomic_txn_batch_result, SchedulingError},
     prio_graph::{AccessKind, GraphNode, PrioGraph},
     solana_pubkey::Pubkey,
     solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
@@ -62,7 +60,7 @@ fn passthrough_priority(
 pub struct BamScheduler<Tx: TransactionWithMeta> {
     consume_work_sender: Sender<ConsumeWork<Tx>>,
     finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
-    response_sender: Sender<BamOutboundMessage>,
+    bam_response_handle: BamResponseHandle,
 
     next_batch_id: u64,
     inflight_batch_info: HashMap<TransactionBatchId, InflightBatchInfo>,
@@ -95,13 +93,13 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
     pub fn new(
         consume_work_sender: Sender<ConsumeWork<Tx>>,
         finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
-        response_sender: Sender<BamOutboundMessage>,
+        bam_response_handle: BamResponseHandle,
         bank_forks: Arc<RwLock<BankForks>>,
     ) -> Self {
         Self {
             consume_work_sender,
             finished_consume_work_receiver,
-            response_sender,
+            bam_response_handle,
             next_batch_id: 0,
             inflight_batch_info: HashMap::default(),
             prio_graph: PrioGraph::new(passthrough_priority),
@@ -151,8 +149,10 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
 
             if max_schedule_slot < slot {
                 // If the slot has changed, we cannot schedule this batch
-                let seq_id = priority_to_seq_id(next_batch_id.priority);
-                self.send_no_leader_slot_bundle_result(seq_id);
+                self.bam_response_handle
+                    .send_outside_leader_slot_bundle_result(priority_to_seq_id(
+                        next_batch_id.priority,
+                    ));
                 container.remove_by_id(next_batch_id.id);
                 continue;
             }
@@ -231,8 +231,8 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             // Filter on slot
             if max_schedule_slot < slot {
                 self.prio_graph.unblock(&id);
-                let seq_id = priority_to_seq_id(id.priority);
-                self.send_no_leader_slot_bundle_result(seq_id);
+                self.bam_response_handle
+                    .send_outside_leader_slot_bundle_result(priority_to_seq_id(id.priority));
                 container.remove_by_id(id.id);
                 continue;
             }
@@ -372,32 +372,15 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         output.respond_with_extra_info = true;
     }
 
-    fn send_no_leader_slot_bundle_result(&self, seq_id: u32) {
-        let _ = self
-            .response_sender
-            .try_send(BamOutboundMessage::AtomicTxnBatchResult(
-                jito_protos::proto::bam_types::AtomicTxnBatchResult {
-                    seq_id,
-                    result: Some(atomic_txn_batch_result::Result::NotCommitted(
-                        jito_protos::proto::bam_types::NotCommitted {
-                            reason: Some(Reason::SchedulingError(
-                                SchedulingError::OutsideLeaderSlot as i32,
-                            )),
-                        },
-                    )),
-                },
-            ));
-    }
-
-    fn send_back_result(&self, seq_id: u32, result: atomic_txn_batch_result::Result) {
-        let _ = self
-            .response_sender
-            .try_send(BamOutboundMessage::AtomicTxnBatchResult(
-                jito_protos::proto::bam_types::AtomicTxnBatchResult {
-                    seq_id,
-                    result: Some(result),
-                },
-            ));
+    fn send_back_result(&self, _seq_id: u32, _result: atomic_txn_batch_result::Result) {
+        // let _ = self
+        //     .response_sender
+        //     .try_send(BamOutboundMessage::AtomicTxnBatchResult(
+        //         jito_protos::proto::bam_types::AtomicTxnBatchResult {
+        //             seq_id,
+        //             result: Some(result),
+        //         },
+        //     ));
     }
 
     /// Generates a `bundle_result::Result` based on the processed results for 'revert_on_error' batches.
@@ -512,8 +495,10 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         // Drain container and send back 'retryable'
         if self.slot.is_none() {
             while let Some(next_batch_id) = container.pop() {
-                let seq_id = priority_to_seq_id(next_batch_id.priority);
-                self.send_no_leader_slot_bundle_result(seq_id);
+                self.bam_response_handle
+                    .send_outside_leader_slot_bundle_result(priority_to_seq_id(
+                        next_batch_id.priority,
+                    ));
                 container.remove_by_id(next_batch_id.id);
             }
         }

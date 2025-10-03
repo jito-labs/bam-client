@@ -2,7 +2,10 @@
 // Keeps track of last received heartbeat 'behind the scenes' and will mark itself as unhealthy if no heartbeat is received
 
 use {
-    crate::bam_dependencies::{v0_to_versioned_proto, BamOutboundMessage},
+    crate::{
+        bam_dependencies::{v0_to_versioned_proto, BamOutboundMessage},
+        bam_packet_batch::{BamPacketBatch, BamPacketBatchMeta},
+    },
     jito_protos::proto::{
         bam_api::{
             bam_node_api_client::BamNodeApiClient, scheduler_message_v0::Msg,
@@ -10,15 +13,17 @@ use {
             ConfigRequest, ConfigResponse, SchedulerMessage, SchedulerMessageV0, SchedulerResponse,
             SchedulerResponseV0,
         },
-        bam_types::{AtomicTxnBatch, AuthProof, ValidatorHeartBeat},
+        bam_types::{AuthProof, ValidatorHeartBeat},
     },
     solana_gossip::cluster_info::ClusterInfo,
     solana_keypair::Keypair,
+    solana_perf::packet::PacketBatch,
+    solana_runtime::bank_forks::BankForks,
     solana_signer::Signer,
     std::{
         sync::{
             atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
-            Arc, Mutex,
+            Arc, Mutex, RwLock,
         },
         time::SystemTime,
     },
@@ -45,8 +50,9 @@ impl BamConnection {
     pub async fn try_init(
         url: String,
         cluster_info: Arc<ClusterInfo>,
-        batch_sender: crossbeam_channel::Sender<AtomicTxnBatch>,
+        batch_sender: crossbeam_channel::Sender<(PacketBatch, BamPacketBatchMeta)>,
         outbound_receiver: crossbeam_channel::Receiver<BamOutboundMessage>,
+        _bank_forks: Arc<RwLock<BankForks>>,
     ) -> Result<Self, TryInitError> {
         let backend_endpoint = tonic::transport::Endpoint::from_shared(url.clone())?;
         let connection_timeout = std::time::Duration::from_secs(5);
@@ -100,7 +106,7 @@ impl BamConnection {
         outbound_sender: mpsc::Sender<SchedulerMessage>,
         mut validator_client: BamNodeApiClient<tonic::transport::channel::Channel>,
         config: Arc<Mutex<Option<ConfigResponse>>>,
-        batch_sender: crossbeam_channel::Sender<AtomicTxnBatch>,
+        batch_sender: crossbeam_channel::Sender<(PacketBatch, BamPacketBatchMeta)>,
         cluster_info: Arc<ClusterInfo>,
         metrics: Arc<BamConnectionMetrics>,
         is_healthy: Arc<AtomicBool>,
@@ -202,7 +208,13 @@ impl BamConnection {
                         SchedulerResponseV0 { resp: Some(Resp::MultipleAtomicTxnBatch(batches)), .. } => {
                             for batch in batches.batches {
                                 metrics.bundle_received.fetch_add(1, Relaxed);
-                                let _ = batch_sender.try_send(batch).inspect_err(|_| {
+                                // TODO: slot
+                                let Ok((packet_batch, meta)) = BamPacketBatch::validate_and_split(batch, 0) else {
+                                    // metrics.bundle_forward_to_scheduler_fail.fetch_add(1, Relaxed);
+                                    continue;
+                                };
+
+                                let _ = batch_sender.try_send((packet_batch, meta)).inspect_err(|_| {
                                     metrics.bundle_forward_to_scheduler_fail.fetch_add(1, Relaxed);
                                 });
                             }

@@ -13,6 +13,7 @@ pub mod bam_connection;
 pub mod bam_dependencies;
 pub mod bam_manager;
 pub mod bam_packet_batch;
+pub mod bam_response_handle;
 pub mod bam_sigverify_stage;
 pub mod banking_simulation;
 pub mod banking_stage;
