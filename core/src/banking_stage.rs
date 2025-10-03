@@ -717,7 +717,7 @@ impl BankingStage {
                     );
                     let receive_and_buffer = BamReceiveAndBuffer::new(
                         bam_scheduler_exit.clone(),
-                        bam_enabled,
+                        bam_enabled.clone(),
                         verified_bam_batch_receiver,
                         bam_response_handle.clone(),
                         context.bank_forks.clone(),

@@ -2,14 +2,13 @@
 //! and buffers from into the the `TransactionStateContainer`. Key thing to note:
 //! this implementation only functions during the `Consume/Hold` phase; otherwise it will send them back
 //! to BAM with a `Retryable` result.
+use crate::bam_packet_batch::BamPacketBatch;
+use crate::bam_response_handle::BamResponseHandle;
 use crate::banking_stage::scheduler_messages::MaxAge;
 use crate::banking_stage::transaction_scheduler::receive_and_buffer::DisconnectedError;
-use crate::{
-    bam_dependencies::BamOutboundMessage,
-    banking_stage::transaction_scheduler::receive_and_buffer::ReceivingStats,
-};
-use crossbeam_channel::{RecvTimeoutError, TryRecvError};
-use solana_clock::{Slot, MAX_PROCESSING_AGE};
+use crate::banking_stage::transaction_scheduler::receive_and_buffer::ReceivingStats;
+use crossbeam_channel::{Receiver, RecvTimeoutError, TryRecvError};
+use solana_clock::Slot;
 use solana_measure::{measure::Measure, measure_us};
 use solana_packet::{PacketFlags, PACKET_DATA_SIZE};
 
@@ -35,9 +34,8 @@ use {
         consumer::Consumer,
         decision_maker::BufferedPacketsDecision,
         immutable_deserialized_packet::{DeserializedPacketError, ImmutableDeserializedPacket},
-        transaction_scheduler::{
-            bam_utils::{convert_deserialize_error_to_proto, convert_txn_error_to_proto},
-            receive_and_buffer::{calculate_max_age, calculate_priority_and_cost},
+        transaction_scheduler::receive_and_buffer::{
+            calculate_max_age, calculate_priority_and_cost,
         },
     },
     crossbeam_channel::Sender,
@@ -64,7 +62,7 @@ type DeserializationOutput = (Vec<DeserializationResult>, ReceivingStats);
 
 pub struct BamReceiveAndBuffer {
     bam_enabled: Arc<AtomicBool>,
-    response_sender: Sender<BamOutboundMessage>,
+    bam_response_handle: BamResponseHandle,
     parsed_batch_receiver: crossbeam_channel::Receiver<ParsedBatch>,
     recv_stats_receiver: crossbeam_channel::Receiver<ReceivingStats>,
     parsing_thread: Option<std::thread::JoinHandle<()>>,
@@ -83,379 +81,344 @@ impl BamReceiveAndBuffer {
     pub fn new(
         exit: Arc<AtomicBool>,
         bam_enabled: Arc<AtomicBool>,
-        bundle_receiver: crossbeam_channel::Receiver<AtomicTxnBatch>,
-        response_sender: Sender<BamOutboundMessage>,
+        bundle_receiver: Receiver<BamPacketBatch>,
+        bam_response_handle: BamResponseHandle,
         bank_forks: Arc<RwLock<BankForks>>,
         blacklisted_accounts: HashSet<Pubkey>,
     ) -> Self {
-        let (parsed_batch_sender, parsed_batch_receiver) =
+        let (_parsed_batch_sender, parsed_batch_receiver) =
             crossbeam_channel::unbounded::<ParsedBatch>();
-        let (recv_stats_sender, recv_stats_receiver) =
+        let (_recv_stats_sender, recv_stats_receiver) =
             crossbeam_channel::unbounded::<ReceivingStats>();
 
-        let response_sender_clone = response_sender.clone();
-        let parsing_thread = std::thread::spawn(move || {
-            Self::run_parsing(
-                exit,
-                bundle_receiver,
-                parsed_batch_sender,
-                recv_stats_sender,
-                response_sender_clone,
-                bank_forks,
-                blacklisted_accounts,
-            )
-        });
+        // let parsing_thread = std::thread::spawn(move || {
+        //     Self::run_parsing(
+        //         exit,
+        //         bundle_receiver,
+        //         parsed_batch_sender,
+        //         recv_stats_sender,
+        //         bam_response_handle.clone(),
+        //         bank_forks,
+        //         blacklisted_accounts,
+        //     )
+        // });
 
         Self {
             bam_enabled,
-            response_sender,
+            bam_response_handle,
             parsed_batch_receiver,
             recv_stats_receiver,
-            parsing_thread: Some(parsing_thread),
+            parsing_thread: None,
         }
     }
 
-    fn run_parsing(
-        exit: Arc<AtomicBool>,
-        bundle_receiver: crossbeam_channel::Receiver<AtomicTxnBatch>,
-        parsed_batch_sender: crossbeam_channel::Sender<ParsedBatch>,
-        recv_stats_sender: crossbeam_channel::Sender<ReceivingStats>,
-        response_sender: Sender<BamOutboundMessage>,
-        bank_forks: Arc<RwLock<BankForks>>,
-        blacklisted_accounts: HashSet<Pubkey>,
-    ) {
-        let mut last_metrics_report = Instant::now();
-        let mut metrics = BamReceiveAndBufferMetrics::default();
-        let mut stats = ReceivingStats::default();
-        const METRICS_REPORT_INTERVAL: Duration = Duration::from_millis(20);
-        let mut recv_buffer = Vec::with_capacity(ATOMIC_TXN_BATCH_BURST * 2);
+    // fn run_parsing(
+    //     exit: Arc<AtomicBool>,
+    //     bundle_receiver: crossbeam_channel::Receiver<AtomicTxnBatch>,
+    //     parsed_batch_sender: crossbeam_channel::Sender<ParsedBatch>,
+    //     recv_stats_sender: crossbeam_channel::Sender<ReceivingStats>,
+    //     response_sender: Sender<BamOutboundMessage>,
+    //     bank_forks: Arc<RwLock<BankForks>>,
+    //     blacklisted_accounts: HashSet<Pubkey>,
+    // ) {
+    //     let mut last_metrics_report = Instant::now();
+    //     let mut metrics = BamReceiveAndBufferMetrics::default();
+    //     let mut stats = ReceivingStats::default();
+    //     const METRICS_REPORT_INTERVAL: Duration = Duration::from_millis(20);
+    //     let mut recv_buffer = Vec::with_capacity(ATOMIC_TXN_BATCH_BURST * 2);
 
-        while !exit.load(Ordering::Relaxed) {
-            if last_metrics_report.elapsed() > METRICS_REPORT_INTERVAL {
-                metrics.report();
-                last_metrics_report = Instant::now();
-                let _ = recv_stats_sender.try_send(stats);
-                stats = ReceivingStats::default();
-            }
+    //     while !exit.load(Ordering::Relaxed) {
+    //         if last_metrics_report.elapsed() > METRICS_REPORT_INTERVAL {
+    //             metrics.report();
+    //             last_metrics_report = Instant::now();
+    //             let _ = recv_stats_sender.try_send(stats);
+    //             stats = ReceivingStats::default();
+    //         }
 
-            let start = Instant::now();
-            let (recv_info, receive_time_us) = measure_us!(Self::batch_receive_until(
-                &bundle_receiver,
-                &mut recv_buffer,
-                &start,
-                TIMEOUT,
-                ATOMIC_TXN_BATCH_BURST
-            ));
-            stats.receive_time_us += receive_time_us;
+    //         let start = Instant::now();
+    //         let (recv_info, receive_time_us) = measure_us!(Self::batch_receive_until(
+    //             &bundle_receiver,
+    //             &mut recv_buffer,
+    //             &start,
+    //             TIMEOUT,
+    //             ATOMIC_TXN_BATCH_BURST
+    //         ));
+    //         stats.receive_time_us += receive_time_us;
 
-            match recv_info {
-                Ok((_, num_batches_received)) => {
-                    stats.num_received += num_batches_received;
-                }
-                Err(RecvTimeoutError::Disconnected) => return,
-                Err(RecvTimeoutError::Timeout) => {
-                    // No more work to do
-                    continue;
-                }
-            }
+    //         match recv_info {
+    //             Ok((_, num_batches_received)) => {
+    //                 stats.num_received += num_batches_received;
+    //             }
+    //             Err(RecvTimeoutError::Disconnected) => return,
+    //             Err(RecvTimeoutError::Timeout) => {
+    //                 // No more work to do
+    //                 continue;
+    //             }
+    //         }
 
-            let ((deserialized_batches_results, deserialize_stats), duration_us) =
-                measure_us!(Self::batch_deserialize_and_verify(
-                    &recv_buffer,
-                    bank_forks.read().unwrap().working_bank().slot(),
-                    &mut metrics
-                ));
-            stats.accumulate(deserialize_stats);
-            metrics.increment_total_us(duration_us);
-            recv_buffer.clear();
+    //         let ((deserialized_batches_results, deserialize_stats), duration_us) =
+    //             measure_us!(Self::batch_deserialize_and_verify(
+    //                 &recv_buffer,
+    //                 bank_forks.read().unwrap().working_bank().slot(),
+    //                 &mut metrics
+    //             ));
+    //         stats.accumulate(deserialize_stats);
+    //         metrics.increment_total_us(duration_us);
+    //         recv_buffer.clear();
 
-            for result in deserialized_batches_results {
-                match result {
-                    Ok((deserialized_batch, revert_on_error, seq_id, max_schedule_slot)) => {
-                        metrics
-                            .sigverify_metrics
-                            .increment_total_batches_verified(1);
-                        let ((parse_result, parse_stats), duration_us) =
-                            measure_us!(Self::parse_deserialized_batch(
-                                deserialized_batch,
-                                seq_id,
-                                revert_on_error,
-                                max_schedule_slot,
-                                &bank_forks,
-                                &blacklisted_accounts,
-                                &mut metrics,
-                            ));
-                        stats.accumulate(parse_stats);
-                        metrics.increment_total_us(duration_us);
+    //         for result in deserialized_batches_results {
+    //             match result {
+    //                 Ok((deserialized_batch, revert_on_error, seq_id, max_schedule_slot)) => {
+    //                     metrics
+    //                         .sigverify_metrics
+    //                         .increment_total_batches_verified(1);
+    //                     let ((parse_result, parse_stats), duration_us) =
+    //                         measure_us!(Self::parse_deserialized_batch(
+    //                             deserialized_batch,
+    //                             seq_id,
+    //                             revert_on_error,
+    //                             max_schedule_slot,
+    //                             &bank_forks,
+    //                             &blacklisted_accounts,
+    //                             &mut metrics,
+    //                         ));
+    //                     stats.accumulate(parse_stats);
+    //                     metrics.increment_total_us(duration_us);
 
-                        if let Err(reason) = parse_result {
-                            let _ =
-                                response_sender.try_send(BamOutboundMessage::AtomicTxnBatchResult(
-                                    jito_protos::proto::bam_types::AtomicTxnBatchResult {
-                                        seq_id,
-                                        result: Some(
-                                            atomic_txn_batch_result::Result::NotCommitted(
-                                                jito_protos::proto::bam_types::NotCommitted {
-                                                    reason: Some(reason),
-                                                },
-                                            ),
-                                        ),
-                                    },
-                                ));
-                            continue;
-                        }
+    //                     if let Err(reason) = parse_result {
+    //                         let _ =
+    //                             response_sender.try_send(BamOutboundMessage::AtomicTxnBatchResult(
+    //                                 jito_protos::proto::bam_types::AtomicTxnBatchResult {
+    //                                     seq_id,
+    //                                     result: Some(
+    //                                         atomic_txn_batch_result::Result::NotCommitted(
+    //                                             jito_protos::proto::bam_types::NotCommitted {
+    //                                                 reason: Some(reason),
+    //                                             },
+    //                                         ),
+    //                                     ),
+    //                                 },
+    //                             ));
+    //                         continue;
+    //                     }
 
-                        let parsed_batch = parse_result.unwrap();
+    //                     let parsed_batch = parse_result.unwrap();
 
-                        stats.num_buffered = stats
-                            .num_buffered
-                            .saturating_add(parsed_batch.txns_max_age.len());
-                        let _ = parsed_batch_sender.try_send(parsed_batch);
-                    }
-                    Err((reason, seq_id)) => {
-                        let _ = response_sender.try_send(BamOutboundMessage::AtomicTxnBatchResult(
-                            jito_protos::proto::bam_types::AtomicTxnBatchResult {
-                                seq_id,
-                                result: Some(atomic_txn_batch_result::Result::NotCommitted(
-                                    jito_protos::proto::bam_types::NotCommitted {
-                                        reason: Some(reason),
-                                    },
-                                )),
-                            },
-                        ));
-                        continue;
-                    }
-                }
-            }
-        }
-    }
+    //                     stats.num_buffered = stats
+    //                         .num_buffered
+    //                         .saturating_add(parsed_batch.txns_max_age.len());
+    //                     let _ = parsed_batch_sender.try_send(parsed_batch);
+    //                 }
+    //                 Err((reason, seq_id)) => {
+    //                     let _ = response_sender.try_send(BamOutboundMessage::AtomicTxnBatchResult(
+    //                         jito_protos::proto::bam_types::AtomicTxnBatchResult {
+    //                             seq_id,
+    //                             result: Some(atomic_txn_batch_result::Result::NotCommitted(
+    //                                 jito_protos::proto::bam_types::NotCommitted {
+    //                                     reason: Some(reason),
+    //                                 },
+    //                             )),
+    //                         },
+    //                     ));
+    //                     continue;
+    //                 }
+    //             }
+    //         }
+    //     }
+    // }
 
-    fn send_no_leader_slot_txn_batch_result(&self, seq_id: u32) {
-        let _ = self
-            .response_sender
-            .try_send(BamOutboundMessage::AtomicTxnBatchResult(
-                jito_protos::proto::bam_types::AtomicTxnBatchResult {
-                    seq_id,
-                    result: Some(atomic_txn_batch_result::Result::NotCommitted(
-                        jito_protos::proto::bam_types::NotCommitted {
-                            reason: Some(Reason::SchedulingError(
-                                SchedulingError::OutsideLeaderSlot as i32,
-                            )),
-                        },
-                    )),
-                },
-            ));
-    }
+    // fn parse_deserialized_batch(
+    //     deserialized_batch: Vec<ImmutableDeserializedPacket>,
+    //     seq_id: u32,
+    //     revert_on_error: bool,
+    //     max_schedule_slot: u64,
+    //     bank_forks: &Arc<RwLock<BankForks>>,
+    //     blacklisted_accounts: &HashSet<Pubkey>,
+    //     metrics: &mut BamReceiveAndBufferMetrics,
+    // ) -> (Result<ParsedBatch, Reason>, ReceivingStats) {
+    //     let mut stats = ReceivingStats::default();
 
-    fn send_container_full_txn_batch_result(&self, seq_id: u32) {
-        let _ = self
-            .response_sender
-            .try_send(BamOutboundMessage::AtomicTxnBatchResult(
-                jito_protos::proto::bam_types::AtomicTxnBatchResult {
-                    seq_id,
-                    result: Some(atomic_txn_batch_result::Result::NotCommitted(
-                        jito_protos::proto::bam_types::NotCommitted {
-                            reason: Some(Reason::SchedulingError(
-                                SchedulingError::ContainerFull as i32,
-                            )),
-                        },
-                    )),
-                },
-            ));
-    }
+    //     let (root_bank, working_bank) = {
+    //         let bank_forks = bank_forks.read().unwrap();
+    //         let root_bank = bank_forks.root_bank();
+    //         let working_bank = bank_forks.working_bank();
+    //         (root_bank, working_bank)
+    //     };
+    //     let alt_resolved_slot = root_bank.slot();
+    //     let sanitized_epoch = root_bank.epoch();
+    //     let transaction_account_lock_limit = working_bank.get_transaction_account_lock_limit();
+    //     let vote_only = working_bank.vote_only_bank();
 
-    fn parse_deserialized_batch(
-        deserialized_batch: Vec<ImmutableDeserializedPacket>,
-        seq_id: u32,
-        revert_on_error: bool,
-        max_schedule_slot: u64,
-        bank_forks: &Arc<RwLock<BankForks>>,
-        blacklisted_accounts: &HashSet<Pubkey>,
-        metrics: &mut BamReceiveAndBufferMetrics,
-    ) -> (Result<ParsedBatch, Reason>, ReceivingStats) {
-        let mut stats = ReceivingStats::default();
+    //     let mut packets = vec![];
+    //     let mut cost: u64 = 0;
+    //     let mut txns_max_age = vec![];
 
-        let (root_bank, working_bank) = {
-            let bank_forks = bank_forks.read().unwrap();
-            let root_bank = bank_forks.root_bank();
-            let working_bank = bank_forks.working_bank();
-            (root_bank, working_bank)
-        };
-        let alt_resolved_slot = root_bank.slot();
-        let sanitized_epoch = root_bank.epoch();
-        let transaction_account_lock_limit = working_bank.get_transaction_account_lock_limit();
-        let vote_only = working_bank.vote_only_bank();
+    //     // Checks are taken from receive_and_buffer.rs:
+    //     // SanitizedTransactionReceiveAndBuffer::buffer_packets
+    //     for (index, parsed_packet) in deserialized_batch.into_iter().enumerate() {
+    //         // Check 0: Reject vote transactions
+    //         if parsed_packet.is_simple_vote() {
+    //             stats.num_dropped_on_parsing_and_sanitization += 1;
+    //             return (
+    //                 Err(Reason::DeserializationError(
+    //                     jito_protos::proto::bam_types::DeserializationError {
+    //                         index: index as u32,
+    //                         reason: DeserializationErrorReason::VoteTransactionFailure as i32,
+    //                     },
+    //                 )),
+    //                 stats,
+    //             );
+    //         }
 
-        let mut packets = vec![];
-        let mut cost: u64 = 0;
-        let mut txns_max_age = vec![];
+    //         // Check 1: Ensure the transaction is valid
+    //         let (Some((tx, deactivation_slot)), duration_us) = measure_us!(parsed_packet
+    //             .build_sanitized_transaction(
+    //                 vote_only,
+    //                 root_bank.as_ref(),
+    //                 root_bank.get_reserved_account_keys(),
+    //             ))
+    //         else {
+    //             stats.num_dropped_on_parsing_and_sanitization += 1;
+    //             return (
+    //                 Err(Reason::DeserializationError(
+    //                     jito_protos::proto::bam_types::DeserializationError {
+    //                         index: 0,
+    //                         reason: DeserializationErrorReason::SanitizeError as i32,
+    //                     },
+    //                 )),
+    //                 stats,
+    //             );
+    //         };
+    //         metrics.increment_sanitization_us(duration_us);
 
-        // Checks are taken from receive_and_buffer.rs:
-        // SanitizedTransactionReceiveAndBuffer::buffer_packets
-        for (index, parsed_packet) in deserialized_batch.into_iter().enumerate() {
-            // Check 0: Reject vote transactions
-            if parsed_packet.is_simple_vote() {
-                stats.num_dropped_on_parsing_and_sanitization += 1;
-                return (
-                    Err(Reason::DeserializationError(
-                        jito_protos::proto::bam_types::DeserializationError {
-                            index: index as u32,
-                            reason: DeserializationErrorReason::VoteTransactionFailure as i32,
-                        },
-                    )),
-                    stats,
-                );
-            }
+    //         // Check 2: Ensure no duplicates and valid number of account locks
+    //         let start = Instant::now();
+    //         if let Err(err) =
+    //             validate_account_locks(tx.message().account_keys(), transaction_account_lock_limit)
+    //         {
+    //             let reason = convert_txn_error_to_proto(err);
+    //             stats.num_dropped_on_lock_validation += 1;
+    //             return (
+    //                 Err(Reason::TransactionError(
+    //                     jito_protos::proto::bam_types::TransactionError {
+    //                         index: index as u32,
+    //                         reason: reason as i32,
+    //                     },
+    //                 )),
+    //                 stats,
+    //             );
+    //         }
+    //         metrics.increment_lock_validation_us(start.elapsed().as_micros() as u64);
 
-            // Check 1: Ensure the transaction is valid
-            let (Some((tx, deactivation_slot)), duration_us) = measure_us!(parsed_packet
-                .build_sanitized_transaction(
-                    vote_only,
-                    root_bank.as_ref(),
-                    root_bank.get_reserved_account_keys(),
-                ))
-            else {
-                stats.num_dropped_on_parsing_and_sanitization += 1;
-                return (
-                    Err(Reason::DeserializationError(
-                        jito_protos::proto::bam_types::DeserializationError {
-                            index: 0,
-                            reason: DeserializationErrorReason::SanitizeError as i32,
-                        },
-                    )),
-                    stats,
-                );
-            };
-            metrics.increment_sanitization_us(duration_us);
+    //         // Check 3: Ensure the compute budget limits are valid
+    //         let (result, duration_us) = measure_us!(tx
+    //             .compute_budget_instruction_details()
+    //             .sanitize_and_convert_to_compute_budget_limits(&working_bank.feature_set));
+    //         metrics.increment_fee_budget_extraction_us(duration_us);
+    //         let fee_budget_limits = match result {
+    //             Ok(fee_budget_limits) => fee_budget_limits,
+    //             Err(err) => {
+    //                 let reason = convert_txn_error_to_proto(err);
+    //                 stats.num_dropped_on_compute_budget += 1;
+    //                 return (
+    //                     Err(Reason::TransactionError(
+    //                         jito_protos::proto::bam_types::TransactionError {
+    //                             index: index as u32,
+    //                             reason: reason as i32,
+    //                         },
+    //                     )),
+    //                     stats,
+    //                 );
+    //             }
+    //         };
 
-            // Check 2: Ensure no duplicates and valid number of account locks
-            let start = Instant::now();
-            if let Err(err) =
-                validate_account_locks(tx.message().account_keys(), transaction_account_lock_limit)
-            {
-                let reason = convert_txn_error_to_proto(err);
-                stats.num_dropped_on_lock_validation += 1;
-                return (
-                    Err(Reason::TransactionError(
-                        jito_protos::proto::bam_types::TransactionError {
-                            index: index as u32,
-                            reason: reason as i32,
-                        },
-                    )),
-                    stats,
-                );
-            }
-            metrics.increment_lock_validation_us(start.elapsed().as_micros() as u64);
+    //         // Check 4: Ensure valid blockhash and blockhash is not too old
+    //         let lock_results: [_; 1] = core::array::from_fn(|_| Ok(()));
+    //         let (check_results, duration_us) = measure_us!(working_bank.check_transactions(
+    //             std::slice::from_ref(&tx),
+    //             &lock_results,
+    //             MAX_PROCESSING_AGE,
+    //             &mut TransactionErrorMetrics::default(),
+    //         ));
+    //         metrics.increment_check_transactions_us(duration_us);
+    //         if let Some(Err(err)) = check_results.first() {
+    //             let reason = convert_txn_error_to_proto(err.clone());
+    //             stats.num_dropped_on_age += 1;
+    //             return (
+    //                 Err(Reason::TransactionError(
+    //                     jito_protos::proto::bam_types::TransactionError {
+    //                         index: index as u32,
+    //                         reason: reason as i32,
+    //                     },
+    //                 )),
+    //                 stats,
+    //             );
+    //         }
 
-            // Check 3: Ensure the compute budget limits are valid
-            let (result, duration_us) = measure_us!(tx
-                .compute_budget_instruction_details()
-                .sanitize_and_convert_to_compute_budget_limits(&working_bank.feature_set));
-            metrics.increment_fee_budget_extraction_us(duration_us);
-            let fee_budget_limits = match result {
-                Ok(fee_budget_limits) => fee_budget_limits,
-                Err(err) => {
-                    let reason = convert_txn_error_to_proto(err);
-                    stats.num_dropped_on_compute_budget += 1;
-                    return (
-                        Err(Reason::TransactionError(
-                            jito_protos::proto::bam_types::TransactionError {
-                                index: index as u32,
-                                reason: reason as i32,
-                            },
-                        )),
-                        stats,
-                    );
-                }
-            };
+    //         // Check 5: Ensure the fee payer has enough to pay for the transaction fee
+    //         let (result, duration_us) = measure_us!(Consumer::check_fee_payer_unlocked(
+    //             &working_bank,
+    //             &tx,
+    //             &mut TransactionErrorMetrics::default(),
+    //         ));
+    //         metrics.increment_fee_payer_check_us(duration_us);
+    //         if let Err(err) = result {
+    //             let reason = convert_txn_error_to_proto(err);
+    //             stats.num_dropped_on_fee_payer += 1;
+    //             return (
+    //                 Err(Reason::TransactionError(
+    //                     jito_protos::proto::bam_types::TransactionError {
+    //                         index: index as u32,
+    //                         reason: reason as i32,
+    //                     },
+    //                 )),
+    //                 stats,
+    //             );
+    //         }
 
-            // Check 4: Ensure valid blockhash and blockhash is not too old
-            let lock_results: [_; 1] = core::array::from_fn(|_| Ok(()));
-            let (check_results, duration_us) = measure_us!(working_bank.check_transactions(
-                std::slice::from_ref(&tx),
-                &lock_results,
-                MAX_PROCESSING_AGE,
-                &mut TransactionErrorMetrics::default(),
-            ));
-            metrics.increment_check_transactions_us(duration_us);
-            if let Some(Err(err)) = check_results.first() {
-                let reason = convert_txn_error_to_proto(err.clone());
-                stats.num_dropped_on_age += 1;
-                return (
-                    Err(Reason::TransactionError(
-                        jito_protos::proto::bam_types::TransactionError {
-                            index: index as u32,
-                            reason: reason as i32,
-                        },
-                    )),
-                    stats,
-                );
-            }
+    //         // Check 6: Ensure none of the accounts touch blacklisted accounts
+    //         let (contains_blacklisted_account, duration_us) = measure_us!(tx
+    //             .message()
+    //             .account_keys()
+    //             .iter()
+    //             .any(|key| blacklisted_accounts.contains(key)));
+    //         metrics.increment_blacklist_check_us(duration_us);
+    //         if contains_blacklisted_account {
+    //             stats.num_dropped_on_blacklisted_account += 1;
+    //             return (
+    //                 Err(Reason::TransactionError(
+    //                     jito_protos::proto::bam_types::TransactionError {
+    //                         index: index as u32,
+    //                         reason: DeserializationErrorReason::SanitizeError as i32,
+    //                     },
+    //                 )),
+    //                 stats,
+    //             );
+    //         }
 
-            // Check 5: Ensure the fee payer has enough to pay for the transaction fee
-            let (result, duration_us) = measure_us!(Consumer::check_fee_payer_unlocked(
-                &working_bank,
-                &tx,
-                &mut TransactionErrorMetrics::default(),
-            ));
-            metrics.increment_fee_payer_check_us(duration_us);
-            if let Err(err) = result {
-                let reason = convert_txn_error_to_proto(err);
-                stats.num_dropped_on_fee_payer += 1;
-                return (
-                    Err(Reason::TransactionError(
-                        jito_protos::proto::bam_types::TransactionError {
-                            index: index as u32,
-                            reason: reason as i32,
-                        },
-                    )),
-                    stats,
-                );
-            }
+    //         let max_age = calculate_max_age(sanitized_epoch, deactivation_slot, alt_resolved_slot);
 
-            // Check 6: Ensure none of the accounts touch blacklisted accounts
-            let (contains_blacklisted_account, duration_us) = measure_us!(tx
-                .message()
-                .account_keys()
-                .iter()
-                .any(|key| blacklisted_accounts.contains(key)));
-            metrics.increment_blacklist_check_us(duration_us);
-            if contains_blacklisted_account {
-                stats.num_dropped_on_blacklisted_account += 1;
-                return (
-                    Err(Reason::TransactionError(
-                        jito_protos::proto::bam_types::TransactionError {
-                            index: index as u32,
-                            reason: DeserializationErrorReason::SanitizeError as i32,
-                        },
-                    )),
-                    stats,
-                );
-            }
+    //         let (_, txn_cost) =
+    //             calculate_priority_and_cost(&tx, &fee_budget_limits.into(), &working_bank);
+    //         cost = cost.saturating_add(txn_cost);
+    //         txns_max_age.push((tx, max_age));
+    //         packets.push(Arc::new(parsed_packet));
+    //     }
 
-            let max_age = calculate_max_age(sanitized_epoch, deactivation_slot, alt_resolved_slot);
+    //     let priority = seq_id_to_priority(seq_id);
 
-            let (_, txn_cost) =
-                calculate_priority_and_cost(&tx, &fee_budget_limits.into(), &working_bank);
-            cost = cost.saturating_add(txn_cost);
-            txns_max_age.push((tx, max_age));
-            packets.push(Arc::new(parsed_packet));
-        }
-
-        let priority = seq_id_to_priority(seq_id);
-
-        (
-            Ok(ParsedBatch {
-                txns_max_age,
-                cost,
-                priority,
-                revert_on_error,
-                max_schedule_slot,
-                seq_id,
-            }),
-            stats,
-        )
-    }
+    //     (
+    //         Ok(ParsedBatch {
+    //             txns_max_age,
+    //             cost,
+    //             priority,
+    //             revert_on_error,
+    //             max_schedule_slot,
+    //             seq_id,
+    //         }),
+    //         stats,
+    //     )
+    // }
 
     fn batch_receive_until(
         bundle_receiver: &crossbeam_channel::Receiver<AtomicTxnBatch>,
@@ -749,7 +712,8 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
                     .is_none()
                 {
                     stats.num_dropped_on_capacity += 1;
-                    self.send_container_full_txn_batch_result(seq_id);
+                    self.bam_response_handle
+                        .send_container_full_txn_batch_result(seq_id);
                     continue;
                 };
             },
@@ -768,7 +732,8 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
                             break;
                         }
                     };
-                    self.send_no_leader_slot_txn_batch_result(batch.seq_id);
+                    self.bam_response_handle
+                        .send_outside_leader_slot_bundle_result(batch.seq_id);
                     stats.num_dropped_without_parsing += 1;
                 }
             }

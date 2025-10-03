@@ -31,7 +31,6 @@ use {
             ConsumeWork, FinishedConsumeWork, NotCommittedReason, TransactionBatchId,
             TransactionResult,
         },
-        transaction_scheduler::bam_utils::convert_txn_error_to_proto,
     },
     ahash::HashMap,
     crossbeam_channel::{Receiver, Sender},
@@ -514,17 +513,15 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         }
         let now = Instant::now();
         while let Some((next_batch_id, _)) = self.prio_graph.pop_and_unblock() {
-            if let Some(insertion_time) = self
-                .insertion_to_prio_graph_time
-                .remove(&priority_to_seq_id(next_batch_id.priority))
-            {
+            let seq_id = priority_to_seq_id(next_batch_id.priority);
+            if let Some(insertion_time) = self.insertion_to_prio_graph_time.remove(&seq_id) {
                 let _ = self
                     .time_in_priograph_us
                     .increment(now.duration_since(insertion_time).as_micros() as u64);
             };
 
-            let seq_id = priority_to_seq_id(next_batch_id.priority);
-            self.send_no_leader_slot_bundle_result(seq_id);
+            self.bam_response_handle
+                .send_outside_leader_slot_bundle_result(seq_id);
             container.remove_by_id(next_batch_id.id);
         }
 
