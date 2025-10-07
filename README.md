@@ -10,8 +10,8 @@
 
 This repository contains Jito's fork of the Solana validator.
 
-We recommend checking out our [Gitbook](https://jito-foundation.gitbook.io/mev/jito-solana/building-the-software) for
-more detailed instructions on building and running Jito-Solana.
+We recommend checking out our [Docs](https://bam.dev/validators/) for
+more detailed instructions on building and running the BAM validator client.
 
 ---
 
