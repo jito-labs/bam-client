@@ -12,7 +12,7 @@ By accessing any Services, you agree to these Terms as governing your use of the
 
 2. **The Services & Third Party Technology**
 
-   a. <u>The Services</u>
+a. <u>The Services</u>
 
 The Site provides information about BAM, a network that allows for block building on the Solana blockchain network (“Solana”).  Your use, review or access of the Site does not authorize you to become a BAM Node Operator (as defined below), but does allow you to request to participate in BAM, as a node operator.   
 
@@ -48,7 +48,7 @@ We also reserve the right, in our sole discretion, to modify the Services at any
 
 4. **Your Responsibilities and Representations**
 
-   a. <u>Your Representations</u>
+a. <u>Your Representations</u>
 
 *General Disclaimer of Liability.*  You acknowledge and agree that:
 
@@ -117,7 +117,7 @@ You acknowledge and agree that we will own all right, title, and interest in and
 
 5. **Intellectual Property Rights**
 
-   a. <u>Ownership & License</u>
+a. <u>Ownership & License</u>
 
 The Services and their entire contents, features, and functionality (including but not limited to all information, software, text, displays, images, video, and audio, and the design, selection, and arrangement thereof), other than third-party content, are owned by Jito, its licensors, or other providers of such material and are protected by United States and international copyright, trademark, patent, trade secret, and other intellectual property or proprietary rights laws.
 
