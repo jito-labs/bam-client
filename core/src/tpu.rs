@@ -192,6 +192,7 @@ impl Tpu {
         shred_receiver_address: Arc<RwLock<Option<SocketAddr>>>,
         preallocated_bundle_cost: u64,
         bam_url: Arc<Mutex<Option<String>>>,
+        bam_txns_per_slot_threshold: Arc<RwLock<u64>>,
     ) -> Self {
         let TpuSockets {
             transactions: transactions_sockets,
@@ -500,6 +501,7 @@ impl Tpu {
         let bam_manager = BamManager::new(
             exit.clone(),
             bam_url,
+            bam_txns_per_slot_threshold,
             bam_dependencies,
             poh_recorder.clone(),
         );

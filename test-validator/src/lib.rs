@@ -140,6 +140,7 @@ pub struct TestValidatorGenesis {
     pub geyser_plugin_manager: Arc<RwLock<GeyserPluginManager>>,
     admin_rpc_service_post_init: Arc<RwLock<Option<AdminRpcRequestMetadataPostInit>>>,
     pub bam_url: Arc<Mutex<Option<String>>>,
+    pub bam_txns_per_slot_threshold: Arc<RwLock<u64>>,
 }
 
 impl Default for TestValidatorGenesis {
@@ -177,6 +178,7 @@ impl Default for TestValidatorGenesis {
             admin_rpc_service_post_init:
                 Arc::<RwLock<Option<AdminRpcRequestMetadataPostInit>>>::default(),
             bam_url: Arc::new(Mutex::new(None)),
+            bam_txns_per_slot_threshold: Arc::new(RwLock::new(0)),
         }
     }
 }
@@ -1142,6 +1144,7 @@ impl TestValidator {
             accounts_db_config,
             runtime_config,
             bam_url: config.bam_url.clone(),
+            bam_txns_per_slot_threshold: config.bam_txns_per_slot_threshold.clone(),
             ..ValidatorConfig::default_for_test()
         };
         if let Some(ref tower_storage) = config.tower_storage {
