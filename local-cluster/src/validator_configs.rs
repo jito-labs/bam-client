@@ -88,6 +88,7 @@ pub fn safe_clone_config(config: &ValidatorConfig) -> ValidatorConfig {
         tip_manager_config: config.tip_manager_config.clone(),
         preallocated_bundle_cost: config.preallocated_bundle_cost,
         bam_url: config.bam_url.clone(),
+        bam_txns_per_slot_threshold: config.bam_txns_per_slot_threshold.clone(),
     }
 }
 

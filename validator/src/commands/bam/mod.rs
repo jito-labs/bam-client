@@ -117,17 +117,24 @@ pub fn extract_bam_url(matches: &ArgMatches) -> Result<Option<String>, BamUrlErr
     }
 }
 
-pub fn argument() -> Arg<'static, 'static> {
+pub fn bam_url_argument() -> Arg<'static, 'static> {
     Arg::with_name("bam_url")
         .long("bam-url")
         .help("URL of BAM Node; leave empty to disable BAM.")
         .takes_value(true)
 }
 
+pub fn bam_transactions_per_slot_fallback_threshold_argument() -> Arg<'static, 'static> {
+    Arg::with_name("bam_transactions_per_slot_fallback_threshold")
+        .long("bam-transactions-per-slot-fallback-threshold")
+        .help("Number of transactions per slot that must be met or exceed. Triggers fallback from BAM if slots do not meet this minimum transaction amount. Default: 0 (disabled)")
+        .takes_value(true)
+}
+
 pub fn command(_default_args: &DefaultArgs) -> App<'_, '_> {
     SubCommand::with_name("set-bam-config")
         .about("Set configuration for connection to a BAM node")
-        .arg(argument())
+        .arg(bam_url_argument())
 }
 
 pub fn execute(subcommand_matches: &ArgMatches, ledger_path: &Path) -> crate::commands::Result<()> {
@@ -144,7 +151,7 @@ mod tests {
     use {super::*, test_case::test_case};
 
     fn create_test_matches(bam_url: Option<&str>) -> ArgMatches {
-        let app = clap::App::new("test-app").arg(argument());
+        let app = clap::App::new("test-app").arg(bam_url_argument());
 
         let args = if let Some(url) = bam_url {
             vec!["test-app", "--bam-url", url]

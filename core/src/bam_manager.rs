@@ -15,7 +15,7 @@ use std::{
 use {
     crate::{
         bam_connection::BamConnection, bam_dependencies::BamDependencies,
-        proxy::block_engine_stage::BlockBuilderFeeInfo,
+        bam_fallback_manager::BamFallbackManager, proxy::block_engine_stage::BlockBuilderFeeInfo,
     },
     jito_protos::proto::{
         bam_api::ConfigResponse,
@@ -35,12 +35,19 @@ impl BamManager {
     pub fn new(
         exit: Arc<AtomicBool>,
         bam_url: Arc<Mutex<Option<String>>>,
+        bam_txns_per_slot_threshold: Arc<RwLock<u64>>,
         dependencies: BamDependencies,
         poh_recorder: Arc<RwLock<PohRecorder>>,
     ) -> Self {
         Self {
             thread: std::thread::spawn(move || {
-                Self::run(exit, bam_url, dependencies, poh_recorder)
+                Self::run(
+                    exit,
+                    bam_url,
+                    bam_txns_per_slot_threshold,
+                    dependencies,
+                    poh_recorder,
+                )
             }),
         }
     }
@@ -48,6 +55,7 @@ impl BamManager {
     fn run(
         exit: Arc<AtomicBool>,
         bam_url: Arc<Mutex<Option<String>>>,
+        bam_txns_per_slot_threshold: Arc<RwLock<u64>>,
         dependencies: BamDependencies,
         poh_recorder: Arc<RwLock<PohRecorder>>,
     ) {
@@ -60,6 +68,13 @@ impl BamManager {
         let mut current_connection = None;
         let mut cached_builder_config = None;
         let shared_working_bank = poh_recorder.read().unwrap().shared_working_bank();
+        let mut fallback_manager = BamFallbackManager::new(
+            exit.clone(),
+            poh_recorder.clone(),
+            bam_txns_per_slot_threshold,
+            bam_url.clone(),
+            dependencies.clone(),
+        );
 
         while !exit.load(Ordering::Relaxed) {
             // Update if bam is enabled
@@ -130,10 +145,21 @@ impl BamManager {
                 }
             }
 
-            // Send leader state if we are in a leader slot
+            // Send leader state to BamFallbackManager if we are in a leader slot
             if let Some(bank) = shared_working_bank.load() {
                 if !bank.is_frozen() {
                     let leader_state = Self::generate_leader_state(&bank);
+                    match fallback_manager.send_slot(leader_state.slot) {
+                        Ok(()) => {}
+                        Err(crossbeam_channel::TrySendError::Full(_)) => {
+                            error!("Failed to send slot to fallback manager: channel full");
+                        }
+                        Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+                            error!("Failed to send slot to fallback manager: channel disconnected. Exiting...");
+                            break;
+                        }
+                    }
+
                     let _ = dependencies.outbound_sender.try_send(
                         crate::bam_dependencies::BamOutboundMessage::LeaderState(leader_state),
                     );
@@ -143,6 +169,10 @@ impl BamManager {
             // Sleep for a short duration to avoid busy-waiting
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
+        fallback_manager
+            .join()
+            .expect("Failed to join fallback manager thread");
+        info!("BAM Manager thread exiting");
     }
 
     fn generate_leader_state(bank: &Bank) -> LeaderState {

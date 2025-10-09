@@ -316,6 +316,7 @@ pub struct ValidatorConfig {
     pub tip_manager_config: TipManagerConfig,
     pub preallocated_bundle_cost: u64,
     pub bam_url: Arc<Mutex<Option<String>>>,
+    pub bam_txns_per_slot_threshold: Arc<RwLock<u64>>,
 }
 
 impl ValidatorConfig {
@@ -404,6 +405,7 @@ impl ValidatorConfig {
             tip_manager_config: TipManagerConfig::default(),
             preallocated_bundle_cost: 0,
             bam_url: Arc::new(Mutex::new(None)),
+            bam_txns_per_slot_threshold: Arc::new(RwLock::new(0)),
         }
     }
 
@@ -1699,6 +1701,7 @@ impl Validator {
             config.shred_receiver_address.clone(),
             config.preallocated_bundle_cost,
             config.bam_url.clone(),
+            config.bam_txns_per_slot_threshold.clone(),
         );
 
         datapoint_info!(
