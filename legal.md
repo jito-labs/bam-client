@@ -1,4 +1,4 @@
-**Terms of Use** 
+<u>**Terms of Use**</u>
 
 Last Updated: October 9, 2025
 
@@ -8,11 +8,11 @@ These Terms of Use provide the terms and conditions under which you, whether per
 
 By accessing any Services, you agree to these Terms as governing your use of the Services. These Terms apply to use of the Services, regardless of where or how they are accessed (including outside of or other than via the Site), and regardless of which device is used for access.
 
-NOTICE: PLEASE REVIEW THE TERMS CAREFULLY.  BY ACCESSING, INTERACTING WITH OR USING ANY OF THE SERVICES, YOU AGREE THAT YOU ARE ABLE TO ENTER INTO A BINDING AGREEMENT AND, AS SUCH, HAVE READ, UNDERSTOOD, AND AGREE TO BE BOUND BY THE TERMS, INCLUDING THE BINDING, INDIVIDUAL ARBITRATION AGREEMENT AND CLASS ACTION WAIVER BELOW (SEE SECTION 8).  IF YOU DO NOT AGREE TO ALL OF THE TERMS, YOU ARE NOT AUTHORIZED TO INTERACT WITH, ACCESS OR USE ANY OF THE SERVICES.
+<u>NOTICE</u>: PLEASE REVIEW THE TERMS CAREFULLY.  BY ACCESSING, INTERACTING WITH OR USING ANY OF THE SERVICES, YOU AGREE THAT YOU ARE ABLE TO ENTER INTO A BINDING AGREEMENT AND, AS SUCH, HAVE READ, UNDERSTOOD, AND AGREE TO BE BOUND BY THE TERMS, INCLUDING THE BINDING, INDIVIDUAL ARBITRATION AGREEMENT AND CLASS ACTION WAIVER BELOW (SEE SECTION 8).  IF YOU DO NOT AGREE TO ALL OF THE TERMS, YOU ARE NOT AUTHORIZED TO INTERACT WITH, ACCESS OR USE ANY OF THE SERVICES.
 
 2. **The Services & Third Party Technology**
 
-1. The Services
+   a. <u>The Services</u>
 
 The Site provides information about BAM, a network that allows for block building on the Solana blockchain network (“Solana”).  Your use, review or access of the Site does not authorize you to become a BAM Node Operator (as defined below), but does allow you to request to participate in BAM, as a node operator.   
 
@@ -32,7 +32,7 @@ If you build a Plugin to work within BAM, there will be separate terms that appl
 
 For the avoidance of doubt, these Terms apply only to this Site and the forms submitted through it. Any information submitted to us via forms on the Site is subject to the Privacy Policy.
 
-2. Third Party Technology
+b. <u>Third Party Technology</u>
 
 *Solana.*  As noted above, BAM is technology that allows for transparent, efficient, private and verifiable block building on Solana.  Solana is an open, decentralized and permissionless blockchain.  We do not have any control, management or administrative capabilities over Solana and are not responsible for your transactions thereon.  For the avoidance of doubt, Solana is not part of the Site or the Services made available by us under these Terms or otherwise.  We have no ability to monitor or control any use of Solana by you or any third party and expressly disclaim any liability for losses or damages arising from or relating to interaction with, or actions taken on, Solana through BAM or otherwise.  We make no representations or warranties about Solana’s functionality, and expressly disclaim any liability relating to any malfunction or failure of the network. 
 
@@ -48,7 +48,7 @@ We also reserve the right, in our sole discretion, to modify the Services at any
 
 4. **Your Responsibilities and Representations**
 
-   1. Your Representations
+   a. <u>Your Representations</u>
 
 *General Disclaimer of Liability.*  You acknowledge and agree that:
 
@@ -75,7 +75,7 @@ We also reserve the right, in our sole discretion, to modify the Services at any
 
 *Financial Risks.*  Use of the Services may carry financial risk. You acknowledge and understand that blockchains and the applications built thereon are inherently risky and highly experimental by their nature and could result in the loss of the full amount supplied. Transactions entered into in connection with Solana are irreversible and final. You acknowledge and agree that you will access and use the Services at your own risk. The risk of loss in transacting in cryptoassets can be substantial. 
 
-2. Your Responsibilities & Prohibited Conduct
+b. <u>Your Responsibilities & Prohibited Conduct</u>
 
 You agree to access, use or otherwise interact with the Services only in an authorized, proper and appropriate manner and in accordance with these Terms and with all applicable laws.
 
@@ -109,7 +109,7 @@ We are not obligated to monitor access to or use of the Services or to review or
 
 You also acknowledge and agree that we may terminate or suspend your access to all or part of the Services for any or no reason, including without limitation, any violation of these Terms.
 
-3. Your Feedback
+c. <u>Your Feedback</u>
 
 We appreciate feedback, comments, ideas, proposals, and suggestions for improvements to the Services as well as any information on forms you submit through the Site (collectively, “Feedback”). If you choose to submit Feedback, you agree that we are free to use it without any restriction or compensation to you, and you grant us and our affiliates and service providers, and each of their and our respective licensees, successors, and assigns the right to use, reproduce, modify, perform, display, distribute, and otherwise disclose to third parties any such material for any purpose. 
 
@@ -117,7 +117,7 @@ You acknowledge and agree that we will own all right, title, and interest in and
 
 5. **Intellectual Property Rights**
 
-   1. Ownership & License
+   a. <u>Ownership & License</u>
 
 The Services and their entire contents, features, and functionality (including but not limited to all information, software, text, displays, images, video, and audio, and the design, selection, and arrangement thereof), other than third-party content, are owned by Jito, its licensors, or other providers of such material and are protected by United States and international copyright, trademark, patent, trade secret, and other intellectual property or proprietary rights laws.
 
@@ -125,7 +125,7 @@ Subject to these Terms, we hereby grant you a personal, limited, revocable, non-
 
 You acknowledge and agree that you do not receive any other rights to the Services other than those specified in the Terms.  Certain tools or services may be provided to you under a separate license; third-party features or applications integrated into the Services may be subject to other or additional intellectual property licenses and thus, you must review any terms relevant to those third party features or applications to determine the relevant licenses applicable thereto.  You agree you will not violate the terms of any such separate license.
 
-2. Reciprocal License
+b. <u>Reciprocal License</u>
 
 By using the Services, you grant us a limited, non-exclusive, sublicensable, worldwide royalty free license to use, copy, modify and display any content or Feedback you provide to us or that you post on or through any of the Services solely for our business purposes, including but not limited to the purpose of providing the Services for so long as is necessary to do so.
 
@@ -141,39 +141,39 @@ Separately, you may link to the Site, provided you do so in a way that is fair a
 
 7. **Indemnification**
 
-   1. General
+a. <u>General</u>
 
 You agree to defend, indemnify and hold harmless us and our licensors, and each of our and their respective employees, officers, directors, agents and representatives (collectively, the “Jito Parties”) from and against all liability for monetary damages, contractual claims of any nature, economic loss (including direct, incidental or consequential damages), loss of income or profits, fines, penalties, exemplary or punitive damages, and any other injury, damage, or harm, including reasonable attorney’s fees (collectively, “Damages”) that relate in any way to any demand, claim, regulatory action, proceeding or lawsuit, regardless of the cause or alleged cause, whether the allegations are groundless, fraudulent, false or lack merit and regardless of the theory of recovery (“Claims” and each, a “Claim”) arising out of or relating to: (i) your access to or use of the Services; (ii) violation or breach of the Terms or violation of applicable law by you, your customers, users, employees, agents and other associated persons; (iii) a dispute between you and any third party; (iv) your alleged or actual infringement or misappropriation of any third party’s intellectual property or other rights; and (v) your Feedback.  In the event we receive a third party subpoena or other compulsory legal order or process associated with Claims described in (i) through (v) above, then, in addition to the indemnification set forth above, you will reimburse us for the time, effort and expenditures we expended responding to such matters at our then-current hourly rates as well as our reasonable attorneys’ fees.
 
-2. Process
+   b. <u>Process</u>
 
 If you are obligated to indemnify us, then you agree that we will have the right in our sole discretion, to control any action or proceeding and to determine whether we wish to settle and if so, on what terms, and you agree to fully cooperate with us in the defense or settlement of such Claim.
 
 8. **Disclaimers and Limitations of Liability**
 
-   1. Services
+a. <u>Services</u>
 
 By accessing the Services, you hereby acknowledge and agree that we cannot and do not guarantee the functionality, security or availability of the Services.  The technologies on which the Services rely may be subject to sudden changes and we cannot and do not guarantee that your access to or use of the Services will be uninterrupted or error free.  You assume all risks related thereto.  We make no claims that the Services or any of its content is accessible or appropriate in your country. 
 
-2. No Representations or Warranties
+b. <u>No Representations or Warranties</u>
 
 THE SERVICES ARE PROVIDED “AS IS,” EXCEPT TO THE EXTENT PROHIBITED BY LAW, OR TO THE EXTENT ANY STATUTORY RIGHTS APPLY THAT CANNOT BE EXCLUDED, LIMITED OR WAIVED, NEITHER WE NOR ANY OTHER JITO PARTY MAKES ANY REPRESENTATION OR WARRANTIES OF ANY KIND, WHETHER EXPRESS, IMPLIED, STATUTORY OR OTHERWISE REGARDING THE SERVICES, AND THE JITO PARTIES EXPRESSLY DISCLAIM ALL WARRANTIES, INCLUDING ANY IMPLIED OR EXPRESS WARRANTIES (i) OF MERCHANTABILITY, SATISFACTORY QUALITY, FITNESS FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT, OR QUIET ENJOYMENT; (ii) ARISING OUT OF ANY COURSE OF DEALING OR USAGE OR TRADE; (iii) THAT THE SERVICES WILL BE ACCURATE, UNINTERRUPTED, ERROR FREE OR FREE OF HARMFUL COMPONENTS; AND (iv) THAT ANY CONTENT OR FEEDBACK WILL BE SECURE OR NOT OTHERWISE LOST OR ALTERED.
 
-3. Limitations of Liability
+c. <u>Limitations of Liability</u>
 
 THE JITO PARTIES WILL NOT BE LIABLE TO YOU FOR ANY INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, OR EXEMPLARY DAMAGES (INCLUDING DAMAGES FOR LOSS OF PROFITS, REVENUES, CUSTOMERS OR USERS, OPPORTUNITIES, GOODWILL, USE, DATA, CONTENT OR OTHER ASSETS), EVEN IF ANY OF THE JITO PARTIES HAVE BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.  FURTHER, NONE OF THE JITO PARTIES WILL BE RESPONSIBLE FOR ANY COMPENSATION, REIMBURSEMENT, OR DAMAGES ARISING IN CONNECTION WITH (i) YOUR INABILITY TO USE, OR ANY DELAY IN THE USE OF, THE SERVICES, INCLUDING AS A RESULT OF ANY (A) TERMINATION OF THE TERMS OR YOUR USE OF OR ACCESS TO THE SERVICES, (B) OUR SUSPENSION OR DISCONTINUATION OF ANY OF THE SERVICES, OR (C) ANY UNANTICIPATED OR UNSCHEDULED DOWNTIME OF ALL OR A PORTION OF THE SERVICES FOR ANY REASON; (ii) COST OF PROCUREMENT OF SUBSTITUTE SERVICES; (iii) INVESTMENTS, EXPENDITURES, OR COMMITEMENTS BY YOU IN CONNECTION WITH THE TERMS OR YOUR USE OF OR ACCESS TO THE SERVICES; (iv) UNAUTHORIZED ACCESS TO, ALTERATION OF, OR THE DELETION, DESTRUCTION, DAMAGE, LOSS OR FAILURE TO STORE ANY OF YOUR DATA; OR (v) CHANGE IN VALUE OF ANY CRYPTOASSET. IN ANY CASE, THE JITO LABS PARTIES’ AGGREGATE LIABILITY UNDER THESE TERMS WILL NOT EXCEED $100. THE LIMITATIONS IN THIS SECTION APPLY ONLY TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW.
 
 9. **Governing Law, Dispute Resolution & Class Action Waiver**
 
-   1. Governing Law
+a. <u>Governing Law</u>
 
 These Terms, and your use of the Services, are governed by the laws of the State of Delaware, without regard to conflict of laws rules. The exclusive jurisdiction for all Claims, to the extent applicable given the mandatory arbitration provisions in the Terms, will be the courts located in the state of Delaware, and you acknowledge and agree that any Claims are subject to the jurisdiction of such courts, and waive any objection to the laying of such venue.
 
-2. Dispute Resolution
+b. <u>Dispute Resolution</u>
 
 Prior to commencing any legal proceeding of any kind against us, including an arbitration, you and we agree that we will attempt to resolve any Claim by engaging in good faith negotiations.  Such negotiation requires that the aggrieved party provide written notice to the other party specifying the nature and details of the dispute (the “Initial Notice”). The party receiving such notice shall have 20 days to respond, and within 45 days after the Initial Notice was sent, the parties shall meet and confer in good faith to try and resolve the Claim. If the parties are unable to do so within 90 days of the Initial Notice, the parties may agree to mediate their dispute or either party may submit to arbitration according to these Terms.
 
-3. Mandatory Arbitration
+c. <u>Mandatory Arbitration</u>
 
 Any Claim arising out of or relating to these Terms or the Services, or the breach, termination, enforcement, interpretation or validity of the Terms, including the determination of the scope or applicability of this agreement to arbitrate, will be determined by arbitration in Delaware before a single arbitrator.  This Section will not preclude parties from seeking provisional remedies in aid of arbitration from a court of appropriate jurisdiction.
 
@@ -181,7 +181,7 @@ Any arbitration will be conducted by JAMS pursuant to its rules then in effect, 
 
 YOU UNDERSTAND THAT BY AGREEING TO THE TERMS, THE PARTIES ARE EACH WAIVING THE RIGHT TO TRIAL BY JURY OR TO PARTICIPATE IN A CLASS ACTION OR CLASS ARBITRATION.
 
-4. Class Action Waiver
+d. <u>Class Action Waiver</u>
 
 Any arbitration under the Terms shall take place on an individual basis – class arbitrations and class actions are not permitted.
 
@@ -191,27 +191,27 @@ Any arbitration will not be permitted to be consolidated or aggregated with any 
 
 10. **General Provisions**
 
-    1. No Relationship 
+a. <u>No Relationship</u>
 
 Nothing in the Terms shall be construed to create any relationship between you and us other than as defined herein.  Neither you nor we are an agent of each other under these Terms or otherwise, and you shall have no right to hold yourself out as in any way having a relationship with us other than as someone using, accessing or otherwise interfacing with the Services.
 
-2. Assignments
+b. <u>Assignments</u>
 
 You agree you are not permitted to assign or otherwise transfer any of your rights and obligations under the Terms, but Jito may assign or transfer the Terms, in whole or in part, without restriction.  Any assignment or transfer by you in violation of this Section will be void. Subject to the foregoing, the Terms will be binding upon, and inure to the benefit of, the parties and their respective permitted successors and assigns.
 
-3. Entire Agreement
+c. <u>Entire Agreement</u>
 
 The Terms, including any policies that expressly or impliedly incorporate the Terms by reference, constitute the entire agreement between you and us regarding the subject matter herein.  The Terms supersede all prior or contemporaneous representations, understandings, agreements, or communications between you and us, if any, whether written or verbal, regarding the subject matter of the Terms.
 
-4. No Waiver
+d. <u>No Waiver</u>
 
 The failure by us to enforce any provision of the Terms will not constitute a present or future waiver of such provision nor limit our right to enforce such provision at a later time. All waivers by us must be in writing to be effective.
 
-5. Severability
+e. <u>Severability</u>
 
 If any portion of the Terms are held to be unenforceable or invalid, the remainder of the Terms will continue in full force and effect. Any invalid or unenforceable portions will be interpreted to effectuate the intent of the original portion. If such construction is not possible, the invalid or unenforceable portion will be severed from the Terms, but the rest of the Terms will remain in full force and effect.
 
-6. Notice
+f. <u>Notice</u>
 
 Any notices or other communications provided by us under these Terms will be given: (i) via email; or (ii) by posting to the Services. For notices made by email, the date of receipt will be deemed the date on which such notice is transmitted.
 

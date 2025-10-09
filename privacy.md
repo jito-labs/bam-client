@@ -20,37 +20,37 @@ We may collect automatically certain limited information when you access, use, o
 
 * Device type, browser type and version
 
-  * Operating system and version
+* Operating system and version
 
-    * Internet Protocol (“IP”) address and other location information
+* Internet Protocol (“IP”) address and other location information
 
-      * Internet service provider information
+* Internet service provider information
 
-      * API keys
+* API keys
 
-      * Unique Universal Identifier (“UUID”) keys
+* Unique Universal Identifier (“UUID”) keys
 
-      * Publicly available blockchain data, including time stamps and number of packets sent
+* Publicly available blockchain data, including time stamps and number of packets sent
 
-      * Blockchain account information or wallet addresses, including signer and auth pubkeys as well as transaction signatures
+* Blockchain account information or wallet addresses, including signer and auth pubkeys as well as transaction signatures
 
-      * Device user agent, client library version
+* Device user agent, client library version
 
-      * Analytics about aggregate numbers of users and usage types (*e.g.*, number of page views, event counts, and aggregate acquisition metrics), and information such as how many users in the aggregate are using certain features; and aggregate location data across users including countries and regions from which users access the Site
+* Analytics about aggregate numbers of users and usage types (*e.g.*, number of page views, event counts, and aggregate acquisition metrics), and information such as how many users in the aggregate are using certain features; and aggregate location data across users including countries and regions from which users access the Site
 
 When you access the Site, we may collect the following information:
 
 * Contact information, such as name, email address, profile picture, user name or social media information; or your preferences for receiving marketing information and communication from us when you opt in to various programs, sign up to receive information from us, submit forms via the Site or forms that are available on the Site, request information about the Site, send in support requests/provide feedback or otherwise voluntarily interact with the Site
 
-  * Personal information from individuals when we attend or host conferences, trade shows, and other events
+* Personal information from individuals when we attend or host conferences, trade shows, and other events
 
-    * Personal information from individuals and third parties to assess and pursue potential business opportunities
+* Personal information from individuals and third parties to assess and pursue potential business opportunities
 
-      * Personal information, such as your application, CV, cover letter, and/or any other information you provide to us,  if you respond to a job opening or opportunities on our Site
+* Personal information, such as your application, CV, cover letter, and/or any other information you provide to us,  if you respond to a job opening or opportunities on our Site
 
-      * Any information you voluntarily provide to us
+* Any information you voluntarily provide to us
 
-      * Any information about you provided to us by third parties with whom we work (including contractors, service providers and analytics providers)
+* Any information about you provided to us by third parties with whom we work (including contractors, service providers and analytics providers)
 
 For information about how we use tracking technology, please see our Cookie Policy.
 
@@ -152,7 +152,7 @@ If you interact with the Site on behalf of or through your organization, then yo
 
 9. **Additional Information for Certain Jurisdictions**
 
-*California*
+<u>*California*</u>
 
 If you are a California resident, you have certain additional rights with respect to personal information about you under the California Consumer Privacy Act of 2018 (“CCPA”).
 
@@ -174,7 +174,7 @@ You may exercise these rights yourself or you may designate an authorized agent 
 
 If you would like to exercise any of these rights, please contact us at privacy@bam.dev..
 
-*European Economic Area, the United Kingdom, and Switzerland*
+<u>*European Economic Area, the United Kingdom, and Switzerland*</u>
 
 If you are a data subject in the European Economic Area, the United Kingdom, or Switzerland, you have certain rights with respect to your personal data pursuant to the General Data Protection Regulation of the European Union (“GDPR”) and similar laws. This section applies to you.
 
