@@ -9,10 +9,7 @@ use solana_transaction_error::TransactionError;
 
 use crate::{
     bam_dependencies::BamOutboundMessage,
-    banking_stage::{
-        immutable_deserialized_packet::DeserializedPacketError,
-        scheduler_messages::NotCommittedReason,
-    },
+    banking_stage::immutable_deserialized_packet::DeserializedPacketError,
 };
 
 #[derive(Clone)]
@@ -70,6 +67,17 @@ impl BamResponseHandle {
             .is_ok()
     }
 
+    pub fn send_bad_signature(&self, seq_id: u32) -> bool {
+        self.sender
+            .try_send(BamOutboundMessage::AtomicTxnBatchResult(
+                jito_protos::proto::bam_types::AtomicTxnBatchResult {
+                    seq_id,
+                    result: None, // TODO (LB): something bad
+                },
+            ))
+            .is_ok()
+    }
+
     fn generate_leader_state(bank: &Bank) -> LeaderState {
         let max_block_cu = bank.read_cost_tracker().unwrap().block_cost_limit();
         let consumed_block_cu = bank.read_cost_tracker().unwrap().block_cost();
@@ -81,26 +89,26 @@ impl BamResponseHandle {
         }
     }
 
-    fn convert_reason_to_proto(
-        index: usize,
-        reason: NotCommittedReason,
-    ) -> jito_protos::proto::bam_types::not_committed::Reason {
-        match reason {
-            NotCommittedReason::PohTimeout => {
-                jito_protos::proto::bam_types::not_committed::Reason::SchedulingError(
-                    SchedulingError::PohTimeout as i32,
-                )
-            }
-            NotCommittedReason::Error(err) => {
-                jito_protos::proto::bam_types::not_committed::Reason::TransactionError(
-                    jito_protos::proto::bam_types::TransactionError {
-                        index: index as u32,
-                        reason: Self::convert_txn_error_to_proto(err) as i32,
-                    },
-                )
-            }
-        }
-    }
+    // fn convert_reason_to_proto(
+    //     index: usize,
+    //     reason: NotCommittedReason,
+    // ) -> jito_protos::proto::bam_types::not_committed::Reason {
+    //     match reason {
+    //         NotCommittedReason::PohTimeout => {
+    //             jito_protos::proto::bam_types::not_committed::Reason::SchedulingError(
+    //                 SchedulingError::PohTimeout as i32,
+    //             )
+    //         }
+    //         NotCommittedReason::Error(err) => {
+    //             jito_protos::proto::bam_types::not_committed::Reason::TransactionError(
+    //                 jito_protos::proto::bam_types::TransactionError {
+    //                     index: index as u32,
+    //                     reason: Self::convert_txn_error_to_proto(err) as i32,
+    //                 },
+    //             )
+    //         }
+    //     }
+    // }
 
     pub fn convert_txn_error_to_proto(err: TransactionError) -> TransactionErrorReason {
         match err {

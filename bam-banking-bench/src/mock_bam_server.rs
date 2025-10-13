@@ -1,11 +1,14 @@
 use {
     crossbeam_channel::{Receiver, Sender},
-    jito_protos::proto::bam_types::{AtomicTxnBatch, AtomicTxnBatchResult, Packet},
+    jito_protos::proto::bam_types::AtomicTxnBatchResult,
     solana_compute_budget_interface::ComputeBudgetInstruction,
-    solana_core::bam_dependencies::BamOutboundMessage,
+    solana_core::{
+        bam_dependencies::BamOutboundMessage,
+        verified_bam_packet_batch::{BamPacketBatchMeta, VerifiedBamPacketBatch},
+    },
     solana_hash::Hash,
     solana_keypair::Keypair,
-    solana_perf::packet::solana_packet,
+    solana_perf::packet::{BytesPacket, PacketBatch},
     solana_poh::poh_recorder::SharedWorkingBank,
     solana_pubkey::Pubkey,
     solana_runtime::bank::Bank,
@@ -133,7 +136,7 @@ pub(crate) struct MockBamServer;
 
 impl MockBamServer {
     pub(crate) fn run(
-        batch_sender: Sender<AtomicTxnBatch>,
+        batch_sender: Sender<VerifiedBamPacketBatch>,
         outbound_receiver: Receiver<BamOutboundMessage>,
         shared_working_bank: SharedWorkingBank,
         exit: Arc<AtomicBool>,
@@ -212,7 +215,7 @@ impl MockBamServer {
     fn send_transactions(
         keypairs: &[Keypair],
         bank_stats: &mut BankStats,
-        batch_sender: &Sender<AtomicTxnBatch>,
+        batch_sender: &Sender<VerifiedBamPacketBatch>,
         bank: &Arc<Bank>,
         nonce: &mut u64,
         seq_id: &mut u32,
@@ -226,21 +229,18 @@ impl MockBamServer {
                 1,
             );
 
-            let packet = solana_packet::Packet::from_data(None, &tx).unwrap();
-            let data = packet.data(..).unwrap_or_default().to_vec();
-            let atomic_txn_batch = AtomicTxnBatch {
-                seq_id: *seq_id,
-                max_schedule_slot: bank.slot(),
-                packets: vec![Packet {
-                    data: data.to_vec(),
-                    meta: Some(jito_protos::proto::bam_types::Meta {
-                        size: data.len() as u64,
-                        flags: None,
-                    }),
-                }],
-            };
+            let packet = BytesPacket::from_data(None, &tx).unwrap();
+            let verfied_packet_batch = VerifiedBamPacketBatch::new(
+                PacketBatch::from(vec![packet]),
+                BamPacketBatchMeta {
+                    discard: false,
+                    seq_id: *seq_id,
+                    max_schedule_slot: bank.slot(),
+                    revert_on_error: false,
+                },
+            );
 
-            batch_sender.send(atomic_txn_batch).unwrap();
+            batch_sender.send(verfied_packet_batch).unwrap();
 
             bank_stats.sent_transactions_and_results.insert(
                 *seq_id,

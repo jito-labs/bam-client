@@ -2,7 +2,13 @@
 //! to construct a software pipeline. The stage uses all available CPU cores and
 //! can do its processing in parallel with signature verification on the GPU.
 
-use crate::{bam_packet_batch::BamPacketBatch, bam_response_handle::BamResponseHandle};
+use crate::{
+    bam_response_handle::BamResponseHandle,
+    banking_stage::transaction_scheduler::transaction_state_container::SharedBytes,
+    verified_bam_packet_batch::VerifiedBamPacketBatch,
+};
+use agave_transaction_view::resolved_transaction_view::ResolvedTransactionView;
+use crossbeam_channel::bounded;
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
 
@@ -39,7 +45,6 @@ use {
     },
     solana_runtime_transaction::runtime_transaction::RuntimeTransaction,
     solana_time_utils::AtomicInterval,
-    solana_transaction::sanitized::SanitizedTransaction,
     std::{
         collections::HashSet,
         num::{NonZeroUsize, Saturating},
@@ -388,7 +393,7 @@ impl BankingStage {
         block_cost_limit_reservation_cb: impl Fn(&Bank) -> u64 + Clone + Send + 'static,
         tip_processing_dependencies: Option<TipProcessingDependencies>,
         bam_enabled: Arc<AtomicBool>,
-        verified_bam_batch_receiver: Receiver<BamPacketBatch>,
+        verified_bam_batch_receiver: Receiver<VerifiedBamPacketBatch>,
         bam_response_handle: BamResponseHandle,
     ) -> Self {
         let committer = Committer::new(
@@ -454,7 +459,7 @@ impl BankingStage {
         blacklisted_accounts: HashSet<Pubkey>,
         tip_processing_dependencies: Option<TipProcessingDependencies>,
         bam_enabled: Arc<AtomicBool>,
-        verified_bam_batch_receiver: Receiver<BamPacketBatch>,
+        verified_bam_batch_receiver: Receiver<VerifiedBamPacketBatch>,
         bam_response_handle: BamResponseHandle,
     ) -> Vec<JoinHandle<()>> {
         match transaction_struct {
@@ -512,7 +517,7 @@ impl BankingStage {
         tip_processing_dependencies: Option<TipProcessingDependencies>,
         blacklisted_accounts: HashSet<Pubkey>,
         bam_enabled: Arc<AtomicBool>,
-        verified_bam_batch_receiver: Receiver<BamPacketBatch>,
+        verified_bam_batch_receiver: Receiver<VerifiedBamPacketBatch>,
         bam_response_handle: BamResponseHandle,
     ) -> Vec<JoinHandle<()>> {
         assert!(num_workers <= BankingStage::max_num_workers());
@@ -667,19 +672,25 @@ impl BankingStage {
 
         // Spawn BAM workers
         // Create channels for communication between scheduler and workers
-        const NUM_BAM_WORKERS: usize = 8;
+        const NUM_BAM_WORKERS: usize = 12;
         let num_workers = NUM_BAM_WORKERS;
-        let (work_sender, work_receiver) = unbounded();
-        let (finished_work_sender, finished_work_receiver) = unbounded();
+        let mut work_senders = Vec::with_capacity(num_workers);
+        let mut finished_work_receivers = Vec::with_capacity(num_workers);
 
         // Spawn the worker threads
         let mut worker_metrics = Vec::with_capacity(num_workers);
         for index in 0..num_workers {
             let id = index as u32;
+
+            let (work_sender, work_receiver) = bounded(100_000);
+            let (finished_work_sender, finished_work_receiver) = bounded(100_000);
+            work_senders.push(work_sender);
+            finished_work_receivers.push(finished_work_receiver);
+
             let consume_worker = ConsumeWorker::new_with_tip_processing_deps(
                 id,
                 exit.clone(),
-                work_receiver.clone(),
+                work_receiver,
                 Consumer::new(
                     context.committer.clone(),
                     context.transaction_recorder.clone(),
@@ -687,12 +698,13 @@ impl BankingStage {
                     context.log_messages_bytes_limit,
                     bundle_account_locker.clone(),
                 ),
-                finished_work_sender.clone(),
+                finished_work_sender,
                 context.poh_recorder.read().unwrap().shared_working_bank(),
                 tip_processing_dependencies.clone(),
             );
 
             worker_metrics.push(consume_worker.metrics_handle());
+
             thread_hdls.push(
                 Builder::new()
                     .name(format!("solCoWorker{id:02}"))
@@ -709,14 +721,15 @@ impl BankingStage {
             Builder::new()
                 .name("solBamSched".to_string())
                 .spawn(move || {
-                    let scheduler = BamScheduler::<RuntimeTransaction<SanitizedTransaction>>::new(
-                        work_sender,
-                        finished_work_receiver,
+                    let scheduler = BamScheduler::<
+                        RuntimeTransaction<ResolvedTransactionView<SharedBytes>>,
+                    >::new(
+                        work_senders,
+                        finished_work_receivers,
                         bam_response_handle.clone(),
                         context.bank_forks.clone(),
                     );
                     let receive_and_buffer = BamReceiveAndBuffer::new(
-                        bam_scheduler_exit.clone(),
                         bam_enabled.clone(),
                         verified_bam_batch_receiver,
                         bam_response_handle.clone(),

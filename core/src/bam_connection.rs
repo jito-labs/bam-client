@@ -4,7 +4,7 @@
 use {
     crate::{
         bam_dependencies::{v0_to_versioned_proto, BamOutboundMessage},
-        bam_packet_batch::{BamPacketBatch, BamPacketBatchMeta},
+        verified_bam_packet_batch::{BamPacketBatchMeta, VerifiedBamPacketBatch},
     },
     jito_protos::proto::{
         bam_api::{
@@ -209,7 +209,7 @@ impl BamConnection {
                             for batch in batches.batches {
                                 metrics.bundle_received.fetch_add(1, Relaxed);
                                 // TODO: slot
-                                let Ok((packet_batch, meta)) = BamPacketBatch::validate_and_split(batch, 0) else {
+                                let Ok((packet_batch, meta)) = VerifiedBamPacketBatch::validate_and_split(batch, 0) else {
                                     // metrics.bundle_forward_to_scheduler_fail.fetch_add(1, Relaxed);
                                     continue;
                                 };

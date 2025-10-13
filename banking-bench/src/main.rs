@@ -3,12 +3,13 @@ use {
     agave_banking_stage_ingress_types::BankingPacketBatch,
     assert_matches::assert_matches,
     clap::{crate_description, crate_name, Arg, ArgEnum, Command},
-    crossbeam_channel::{unbounded, Receiver},
+    crossbeam_channel::{bounded, unbounded, Receiver},
     log::*,
     rand::{thread_rng, Rng},
     rayon::prelude::*,
     solana_compute_budget_interface::ComputeBudgetInstruction,
     solana_core::{
+        bam_response_handle::BamResponseHandle,
         banking_stage::{update_bank_forks_and_poh_recorder_for_new_tpu_bank, BankingStage},
         banking_trace::{BankingTracer, Channels, BANKING_TRACE_DIR_DEFAULT_BYTE_LIMIT},
         bundle_stage::bundle_account_locker::BundleAccountLocker,
@@ -39,7 +40,7 @@ use {
     std::{
         collections::HashSet,
         num::NonZeroUsize,
-        sync::{atomic::Ordering, Arc, RwLock},
+        sync::{atomic::{AtomicBool, Ordering}, Arc, RwLock},
         thread::sleep,
         time::{Duration, Instant},
     },
@@ -458,6 +459,8 @@ fn main() {
         gossip_vote_sender,
         gossip_vote_receiver,
     } = banking_tracer.create_channels(false);
+    let (_batch_sender, batch_receiver) = unbounded();
+    let bam_response_handle = BamResponseHandle::new(bounded(1).0);
     let banking_stage = BankingStage::new_num_threads(
         block_production_method,
         transaction_struct,
@@ -476,7 +479,9 @@ fn main() {
         BundleAccountLocker::default(),
         |_| 0,
         None,
-        None,
+        Arc::new(AtomicBool::new(false)),
+        batch_receiver,
+        bam_response_handle,
     );
 
     // This is so that the signal_receiver does not go out of scope after the closure.

@@ -21,12 +21,12 @@ pub struct BamPacketBatchMeta {
     pub revert_on_error: bool,
 }
 
-pub struct BamPacketBatch {
-    meta: BamPacketBatchMeta,
+pub struct VerifiedBamPacketBatch {
     packet_batch: PacketBatch,
+    meta: BamPacketBatchMeta,
 }
 
-impl BamPacketBatch {
+impl VerifiedBamPacketBatch {
     pub fn new(packet_batch: PacketBatch, meta: BamPacketBatchMeta) -> Self {
         Self { packet_batch, meta }
     }

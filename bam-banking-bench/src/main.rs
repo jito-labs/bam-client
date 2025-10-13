@@ -8,14 +8,12 @@ use {
     crossbeam_channel::{unbounded, Receiver},
     log::*,
     solana_core::{
-        bam_dependencies::BamDependencies,
+        bam_response_handle::BamResponseHandle,
         banking_stage::{update_bank_forks_and_poh_recorder_for_new_tpu_bank, BankingStage},
         banking_trace::{BankingTracer, Channels},
         bundle_stage::bundle_account_locker::BundleAccountLocker,
-        proxy::block_engine_stage::BlockBuilderFeeInfo,
         validator::{BlockProductionMethod, TransactionStructure},
     },
-    solana_gossip::{cluster_info::ClusterInfo, contact_info::ContactInfo},
     solana_keypair::Keypair,
     solana_ledger::{
         blockstore::Blockstore,
@@ -24,19 +22,16 @@ use {
         leader_schedule_cache::LeaderScheduleCache,
     },
     solana_poh::poh_recorder::{create_test_recorder, PohRecorder, WorkingBankEntry},
-    solana_pubkey::Pubkey,
     solana_runtime::{
         bank::Bank, bank_forks::BankForks, prioritization_fee_cache::PrioritizationFeeCache,
     },
     solana_signer::Signer,
-    solana_streamer::socket::SocketAddrSpace,
     solana_system_transaction as system_transaction,
-    solana_time_utils::timestamp,
     std::{
         collections::HashSet,
         sync::{
             atomic::{AtomicBool, Ordering},
-            Arc, Mutex, RwLock,
+            Arc, RwLock,
         },
         thread::{sleep, spawn},
         time::{Duration, Instant},
@@ -67,6 +62,9 @@ fn main() {
         .get_matches();
 
     let test_duration = matches.value_of_t::<u64>("test_duration").unwrap();
+    let keypairs = (0..matches.value_of_t::<usize>("num_keypairs").unwrap())
+        .map(|_| Keypair::new())
+        .collect::<Vec<_>>();
 
     let mint_total = 10_000 * 1_000_000_000; // 10k SOL
     let GenesisConfigInfo {
@@ -103,25 +101,9 @@ fn main() {
     // create a mock bam server
     let (batch_sender, batch_receiver) = unbounded();
     let (outbound_sender, outbound_receiver) = unbounded();
-    let keypair = Keypair::new();
-    let bam_dependencies = BamDependencies {
-        bam_enabled: Arc::new(AtomicBool::new(true)),
-        batch_sender: batch_sender.clone(),
-        batch_receiver,
-        outbound_sender,
-        outbound_receiver: outbound_receiver.clone(), // unused
-        cluster_info: Arc::new(ClusterInfo::new(
-            ContactInfo::new_localhost(&keypair.pubkey(), timestamp()),
-            Arc::new(keypair),
-            SocketAddrSpace::new(true),
-        )),
-        block_builder_fee_info: Arc::new(Mutex::new(BlockBuilderFeeInfo::default())),
-        bank_forks: bank_forks.clone(),
-    };
+    let bam_enabled = Arc::new(AtomicBool::new(true));
 
-    let keypairs = (0..matches.value_of_t::<usize>("num_keypairs").unwrap())
-        .map(|_| Keypair::new())
-        .collect::<Vec<_>>();
+    let bam_response_handle = BamResponseHandle::new(outbound_sender);
 
     keypairs.iter().for_each(|k: &Keypair| {
         bank.process_transaction(&system_transaction::transfer(
@@ -172,7 +154,9 @@ fn main() {
         BundleAccountLocker::default(),
         |_| 0,
         None,
-        Some(bam_dependencies),
+        bam_enabled,
+        batch_receiver,
+        bam_response_handle,
     );
 
     let bank_setting_thread = {

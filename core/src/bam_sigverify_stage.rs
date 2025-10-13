@@ -13,22 +13,22 @@ use solana_measure::measure_us;
 use solana_perf::{packet::PacketBatch, sigverify::ed25519_verify_cpu};
 use std::num::Saturating;
 
-use crate::bam_packet_batch::{BamPacketBatch, BamPacketBatchMeta};
+use crate::verified_bam_packet_batch::{BamPacketBatchMeta, VerifiedBamPacketBatch};
 
 struct BamSigverifyStageMetrics {
     last_update: Instant,
 
-    total_batches: Saturating<u64>,
+    num_batches: Saturating<u64>,
 
-    total_packets: Saturating<u64>,
+    num_packets: Saturating<u64>,
 
-    total_discard_batches: Saturating<u64>,
-    total_discard_packets: Saturating<u64>,
+    num_discard_batches: Saturating<u64>,
+    num_discard_packets: Saturating<u64>,
 
-    total_non_discard_batches: Saturating<u64>,
-    total_non_discard_packets: Saturating<u64>,
+    num_non_discard_batches: Saturating<u64>,
+    num_non_discard_packets: Saturating<u64>,
 
-    total_verify_elapsed_us: Saturating<u64>,
+    verify_elapsed_us: Saturating<u64>,
 
     receiver_watermark: u64,
 }
@@ -38,17 +38,17 @@ impl Default for BamSigverifyStageMetrics {
         Self {
             last_update: Instant::now(),
 
-            total_batches: Saturating(0),
+            num_batches: Saturating(0),
 
-            total_packets: Saturating(0),
+            num_packets: Saturating(0),
 
-            total_discard_batches: Saturating(0),
-            total_discard_packets: Saturating(0),
+            num_discard_batches: Saturating(0),
+            num_discard_packets: Saturating(0),
 
-            total_non_discard_batches: Saturating(0),
-            total_non_discard_packets: Saturating(0),
+            num_non_discard_batches: Saturating(0),
+            num_non_discard_packets: Saturating(0),
 
-            total_verify_elapsed_us: Saturating(0),
+            verify_elapsed_us: Saturating(0),
 
             receiver_watermark: 0,
         }
@@ -57,36 +57,32 @@ impl Default for BamSigverifyStageMetrics {
 
 impl BamSigverifyStageMetrics {
     fn maybe_report(&mut self, report_interval: Duration) {
-        if self.total_packets.0 > 0 && self.last_update.elapsed() > report_interval {
+        if self.num_packets.0 > 0 && self.last_update.elapsed() > report_interval {
             datapoint_info!(
                 "bam_sigverify_stage",
-                ("total_batches", self.total_batches.0 as i64, i64),
-                ("total_packets", self.total_packets.0 as i64, i64),
+                ("num_batches", self.num_batches.0 as i64, i64),
+                ("num_packets", self.num_packets.0 as i64, i64),
                 (
-                    "total_discard_batches",
-                    self.total_discard_batches.0 as i64,
+                    "num_discard_batches",
+                    self.num_discard_batches.0 as i64,
                     i64
                 ),
                 (
-                    "total_discard_packets",
-                    self.total_discard_packets.0 as i64,
+                    "num_discard_packets",
+                    self.num_discard_packets.0 as i64,
                     i64
                 ),
                 (
-                    "total_non_discard_batches",
-                    self.total_non_discard_batches.0 as i64,
+                    "num_non_discard_batches",
+                    self.num_non_discard_batches.0 as i64,
                     i64
                 ),
                 (
-                    "total_non_discard_packets",
-                    self.total_non_discard_packets.0 as i64,
+                    "num_non_discard_packets",
+                    self.num_non_discard_packets.0 as i64,
                     i64
                 ),
-                (
-                    "total_verify_elapsed_us",
-                    self.total_verify_elapsed_us.0 as i64,
-                    i64
-                ),
+                ("verify_elapsed_us", self.verify_elapsed_us.0 as i64, i64),
                 ("receiver_watermark", self.receiver_watermark, i64),
             );
             self.last_update = Instant::now();
@@ -113,7 +109,7 @@ impl BamSigverifyStage {
 
     pub fn new(
         receiver: Receiver<(PacketBatch, BamPacketBatchMeta)>,
-        sender: Sender<BamPacketBatch>,
+        sender: Sender<VerifiedBamPacketBatch>,
         exit: Arc<AtomicBool>,
     ) -> Self {
         let thread = spawn(move || {
@@ -129,7 +125,7 @@ impl BamSigverifyStage {
 
     fn run(
         receiver: Receiver<(PacketBatch, BamPacketBatchMeta)>,
-        sender: Sender<BamPacketBatch>,
+        sender: Sender<VerifiedBamPacketBatch>,
         exit: Arc<AtomicBool>,
     ) {
         let mut metrics = BamSigverifyStageMetrics::default();
@@ -168,17 +164,18 @@ impl BamSigverifyStage {
                 atomic_tx_batch_metadata.push(atomic_tx_batch_meta);
             }
 
-            let packet_count = batches.iter().map(|batch| batch.len()).sum::<usize>();
+            let mut packet_count = 0;
+            for batch in &batches {
+                packet_count += batch.len();
+            }
 
-            metrics.total_packets.add_assign(packet_count as u64);
-            metrics.total_batches.add_assign(batches.len() as u64);
+            metrics.num_packets.add_assign(packet_count as u64);
+            metrics.num_batches.add_assign(batches.len() as u64);
 
             // packets will be marked as discard if they fail verification
             let (_, verify_elapsed_us) =
                 measure_us!(ed25519_verify_cpu(&mut batches, false, packet_count));
-            metrics
-                .total_verify_elapsed_us
-                .add_assign(verify_elapsed_us);
+            metrics.verify_elapsed_us.add_assign(verify_elapsed_us);
 
             for (packet_batch, mut bam_packet_batch_meta) in
                 batches.drain(..).zip(atomic_tx_batch_metadata.drain(..))
@@ -186,18 +183,19 @@ impl BamSigverifyStage {
                 // The entire batch is marked as discard if any packet is marked as discard
                 if packet_batch.iter().any(|packet| packet.meta().discard()) {
                     bam_packet_batch_meta.discard = true;
-                    metrics.total_discard_batches.add_assign(1);
+                    metrics.num_discard_batches.add_assign(1);
                     metrics
-                        .total_discard_packets
+                        .num_discard_packets
                         .add_assign(packet_batch.len() as u64);
                 } else {
-                    metrics.total_non_discard_batches.add_assign(1);
+                    metrics.num_non_discard_batches.add_assign(1);
                     metrics
-                        .total_non_discard_packets
+                        .num_non_discard_packets
                         .add_assign(packet_batch.len() as u64);
                 }
 
-                let bam_packet_batch = BamPacketBatch::new(packet_batch, bam_packet_batch_meta);
+                let bam_packet_batch =
+                    VerifiedBamPacketBatch::new(packet_batch, bam_packet_batch_meta);
                 if let Err(SendError(_)) = sender.send(bam_packet_batch) {
                     error!("BamSigverifyStage channel disconnected, exiting...");
                     return;

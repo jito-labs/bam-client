@@ -56,6 +56,7 @@ struct BatchInfo {
 }
 
 enum BatchIdOrTransactionState<Tx: TransactionWithMeta> {
+    #[allow(unused)]
     Batch(BatchInfo),
     TransactionState(TransactionState<Tx>),
 }
@@ -264,6 +265,7 @@ impl<Tx: TransactionWithMeta> TransactionStateContainer<Tx> {
     /// capacity in the container. If successful, returns the batch id.
     /// If there is not enough capacity, returns `None`.
     /// Note: will not evict existing transactions to make room for the batch (unlike `insert_new_transaction`).
+    #[allow(unused)]
     pub(crate) fn insert_new_batch(
         &mut self,
         txns_max_age: Vec<(Tx, MaxAge)>,

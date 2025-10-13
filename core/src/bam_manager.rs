@@ -2,7 +2,7 @@ use solana_perf::packet::PacketBatch;
 use solana_runtime::bank_forks::BankForks;
 
 use crate::{
-    bam_dependencies::BamOutboundMessage, bam_packet_batch::BamPacketBatchMeta,
+    bam_dependencies::BamOutboundMessage, verified_bam_packet_batch::BamPacketBatchMeta,
     bam_response_handle::BamResponseHandle,
 };
 /// Facilitates the BAM sub-system in the validator:
