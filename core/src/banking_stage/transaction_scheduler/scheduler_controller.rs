@@ -83,7 +83,8 @@ where
             decision_maker,
             receive_and_buffer,
             bank_forks,
-            container: R::Container::with_capacity(TOTAL_BUFFERED_PACKETS),
+            // BAM operates in batch mode
+            container: R::Container::with_capacity(TOTAL_BUFFERED_PACKETS, bam_controller),
             scheduler,
             count_metrics: SchedulerCountMetrics::default(),
             timing_metrics: SchedulerTimingMetrics::default(),

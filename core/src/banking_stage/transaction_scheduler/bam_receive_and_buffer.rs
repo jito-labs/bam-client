@@ -66,7 +66,7 @@ impl BamReceiveAndBuffer {
         _container: &mut TransactionViewStateContainer,
         _decision: &BufferedPacketsDecision,
         _root_bank: &Bank,
-        _working_bank: &Bank,
+        working_bank: &Bank,
         bam_packet_batch: VerifiedBamPacketBatch,
     ) -> ReceivingStats {
         let mut stats = ReceivingStats::default();
@@ -75,6 +75,14 @@ impl BamReceiveAndBuffer {
         if bam_packet_batch.meta().discard {
             self.bam_response_handle
                 .send_bad_signature(bam_packet_batch.meta().seq_id);
+            stats.num_dropped_without_parsing += bam_packet_batch.packet_batch().len();
+            return stats;
+        }
+
+        // Throw away batches that are outside the maximum schedulable slot
+        if bam_packet_batch.meta().max_schedule_slot > working_bank.slot() {
+            self.bam_response_handle
+                .send_outside_leader_slot_bundle_result(bam_packet_batch.meta().seq_id);
             stats.num_dropped_without_parsing += bam_packet_batch.packet_batch().len();
             return stats;
         }

@@ -6,6 +6,7 @@ use crate::bam_response_handle::BamResponseHandle;
 use crate::banking_stage::transaction_scheduler::scheduler::PreLockFilterAction;
 use crate::banking_stage::transaction_scheduler::scheduler_common::SchedulingCommon;
 use crate::banking_stage::transaction_scheduler::transaction_state::TransactionState;
+use crate::banking_stage::transaction_scheduler::transaction_state_container::BatchInfo;
 use histogram::Histogram;
 use itertools::Itertools;
 use solana_clock::{Slot, MAX_PROCESSING_AGE};
@@ -135,24 +136,28 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
 
         let working_bank = self.bank_forks.read().unwrap().working_bank();
 
-        while let Some(next_batch_id) = container.pop() {
-            let Some((batch_ids, _, max_schedule_slot)) = container.get_batch(next_batch_id.id)
+        while let Some(next_batch_id) = container.pop_batch() {
+            let Some(BatchInfo {
+                max_schedule_slot,
+                transaction_ids,
+                revert_on_error: _,
+            }) = container.get_batch(next_batch_id.id)
             else {
                 error!("Batch {} not found in container", next_batch_id.id);
                 continue;
             };
 
-            if max_schedule_slot < slot {
+            if slot > *max_schedule_slot {
                 // If the slot has changed, we cannot schedule this batch
                 self.bam_response_handle
                     .send_outside_leader_slot_bundle_result(priority_to_seq_id(
                         next_batch_id.priority,
                     ));
-                container.remove_by_id(next_batch_id.id);
+                container.remove_batch_by_id(next_batch_id.id);
                 continue;
             }
 
-            let txns = batch_ids
+            let txns = transaction_ids
                 .iter()
                 .filter_map(|txn_id| container.get_transaction(*txn_id))
                 .collect_vec();
@@ -172,7 +177,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                     .find_position(|res| res.is_err())
                     .map(|(i, res)| (i, res.as_ref().err().unwrap().clone()))
                 {
-                    container.remove_by_id(next_batch_id.id);
+                    container.remove_batch_by_id(next_batch_id.id);
 
                     let _seq_id = priority_to_seq_id(next_batch_id.priority);
                     // let result = atomic_txn_batch_result::Result::NotCommitted(
@@ -210,8 +215,11 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         let now = Instant::now();
         let working_bank = self.bank_forks.read().unwrap().working_bank();
         while let Some(id) = self.prio_graph.pop() {
-            let (batch_ids, revert_on_error, max_schedule_slot) =
-                container.get_batch(id.id).unwrap();
+            let BatchInfo {
+                max_schedule_slot,
+                transaction_ids,
+                revert_on_error,
+            } = container.get_batch(id.id).unwrap();
 
             // Update time in prio-graph metric
             if let Some(insertion_time) = self
@@ -224,17 +232,17 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             };
 
             // Filter on slot
-            if max_schedule_slot < slot {
+            if slot > *max_schedule_slot {
                 self.prio_graph.unblock(&id);
                 self.bam_response_handle
                     .send_outside_leader_slot_bundle_result(priority_to_seq_id(id.priority));
-                container.remove_by_id(id.id);
+                container.remove_batch_by_id(id.id);
                 continue;
             }
 
             // Filter on check_transactions
             if self.extra_checks_enabled {
-                let sanitized_txs = batch_ids
+                let sanitized_txs = transaction_ids
                     .iter()
                     .filter_map(|txn_id| container.get_transaction(*txn_id))
                     .map(|txn| txn.borrow())
@@ -253,7 +261,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                     .find_position(|res| res.is_err())
                     .map(|(i, res)| (i, res.as_ref().err().unwrap().clone()))
                 {
-                    container.remove_by_id(id.id);
+                    container.remove_batch_by_id(id.id);
                     self.prio_graph.unblock(&id);
 
                     // let seq_id = priority_to_seq_id(id.priority);
@@ -273,8 +281,15 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             // Schedulit
             let mut work = self.get_or_create_work_object();
             let batch_id = self.get_next_schedule_id();
-            *num_scheduled += batch_ids.len();
-            Self::generate_work(&mut work, batch_id, &[id], revert_on_error, container, slot);
+            *num_scheduled += transaction_ids.len();
+            Self::generate_work(
+                &mut work,
+                batch_id,
+                &[id],
+                *revert_on_error,
+                container,
+                slot,
+            );
             self.send_to_worker(vec![id], work, slot);
         }
     }
@@ -346,7 +361,11 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             priority_ids
                 .iter()
                 .filter_map(|priority_id| container.get_batch(priority_id.id))
-                .flat_map(|(batch_ids, _, _)| batch_ids.into_iter())
+                .flat_map(
+                    |BatchInfo {
+                         transaction_ids, ..
+                     }| transaction_ids.into_iter(),
+                )
                 .cloned(),
         );
 
@@ -494,7 +513,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                     .send_outside_leader_slot_bundle_result(priority_to_seq_id(
                         next_batch_id.priority,
                     ));
-                container.remove_by_id(next_batch_id.id);
+                container.remove_batch_by_id(next_batch_id.id);
             }
         }
 
@@ -518,7 +537,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
 
             self.bam_response_handle
                 .send_outside_leader_slot_bundle_result(seq_id);
-            container.remove_by_id(next_batch_id.id);
+            container.remove_batch_by_id(next_batch_id.id);
         }
 
         self.insertion_to_prio_graph_time.clear();
@@ -739,7 +758,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                 }
 
                 // Remove the transaction from the container
-                container.remove_by_id(priority_id.id);
+                container.remove_batch_by_id(priority_id.id);
             }
             self.recycle_priority_ids(inflight_batch_info.batch_priority_ids);
         }
