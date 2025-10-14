@@ -11,7 +11,7 @@ use solana_clock::{Slot, MAX_PROCESSING_AGE};
 use solana_measure::{measure::Measure, measure_us};
 use solana_packet::{PacketFlags, PACKET_DATA_SIZE};
 
-// use solana_perf::sigverify::ed25519_verify_cpu;
+use solana_perf::sigverify::ed25519_verify_cpu;
 use solana_pubkey::Pubkey;
 use solana_transaction::sanitized::SanitizedTransaction;
 use std::{
@@ -581,7 +581,7 @@ impl BamReceiveAndBuffer {
         });
 
         let mut verify_packet_batch_time_us = Measure::start("verify_packet_batch_time_us");
-        // ed25519_verify_cpu(&mut packet_batches, false, packet_count);
+        ed25519_verify_cpu(&mut packet_batches, false, packet_count);
         verify_packet_batch_time_us.stop();
 
         metrics
