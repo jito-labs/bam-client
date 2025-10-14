@@ -99,6 +99,21 @@ impl BankStats {
             .collect::<Vec<_>>();
         time_diffs.sort();
 
+        let num_outside_leader_slot = self
+            .sent_transactions_and_results
+            .values()
+            .filter(|result| {
+                if let Some(res) = &result.result {
+                    if let Some(jito_protos::proto::bam_types::atomic_txn_batch_result::Result::NotCommitted(not_committed)) = &res.result.result {
+                        if let Some(jito_protos::proto::bam_types::not_committed::Reason::SchedulingError(error)) = &not_committed.reason {
+                            return *error == jito_protos::proto::bam_types::SchedulingError::OutsideLeaderSlot as i32;
+                        }
+                    }
+                }
+                false
+            })
+            .count();
+
         let median_time_diff = time_diffs[time_diffs.len() / 2];
         let average_time_diff = time_diffs.iter().sum::<u128>() / time_diffs.len() as u128;
         let max_time_diff = time_diffs.iter().max().unwrap();
@@ -119,11 +134,12 @@ impl BankStats {
             .count();
 
         println!(
-            "==> bank slot: {}, elapsed: {}ms, transactions sent: {} transactions landed: {}",
+            "==> bank slot: {}, elapsed: {}ms, transactions sent: {} transactions landed: {} outside leader slot: {}",
             self.bank_slot,
             self.start_time.elapsed().as_millis(),
             self.sent_transactions_and_results.len(),
-            num_committed
+            num_committed,
+            num_outside_leader_slot
         );
         println!(
             "==> rtt: median time diff: {}ms, average time diff: {}ms, max time diff: {}ms, min time diff: {}ms",
