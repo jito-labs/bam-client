@@ -40,7 +40,10 @@ use {
     std::{
         collections::HashSet,
         num::NonZeroUsize,
-        sync::{atomic::{AtomicBool, Ordering}, Arc, RwLock},
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc, RwLock,
+        },
         thread::sleep,
         time::{Duration, Instant},
     },

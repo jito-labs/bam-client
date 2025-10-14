@@ -1,10 +1,3 @@
-use solana_perf::packet::PacketBatch;
-use solana_runtime::bank_forks::BankForks;
-
-use crate::{
-    bam_dependencies::BamOutboundMessage, verified_bam_packet_batch::BamPacketBatchMeta,
-    bam_response_handle::BamResponseHandle,
-};
 /// Facilitates the BAM sub-system in the validator:
 /// - Tries to connect to BAM
 /// - Sends leader state to BAM
@@ -19,13 +12,18 @@ use std::{
         Arc, Mutex, RwLock,
     },
 };
-
 use {
-    crate::{bam_connection::BamConnection, proxy::block_engine_stage::BlockBuilderFeeInfo},
+    crate::{
+        bam_connection::BamConnection, bam_dependencies::BamOutboundMessage,
+        bam_response_handle::BamResponseHandle, proxy::block_engine_stage::BlockBuilderFeeInfo,
+        verified_bam_packet_batch::BamPacketBatchMeta,
+    },
     jito_protos::proto::{bam_api::ConfigResponse, bam_types::Socket},
     solana_gossip::cluster_info::ClusterInfo,
+    solana_perf::packet::PacketBatch,
     solana_poh::poh_recorder::PohRecorder,
     solana_pubkey::Pubkey,
+    solana_runtime::bank_forks::BankForks,
 };
 
 pub struct BamManager {

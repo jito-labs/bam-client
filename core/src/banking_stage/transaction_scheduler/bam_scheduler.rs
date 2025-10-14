@@ -1,4 +1,5 @@
 use crate::bam_response_handle::BamResponseHandle;
+use crate::banking_stage::scheduler_messages::MaxAge;
 /// A Scheduler implementation that pulls batches off the container, and then
 /// schedules them to workers in a FIFO, account-aware manner. This is facilitated by the
 /// `PrioGraph` data structure, which is a directed graph that tracks the dependencies.
@@ -7,13 +8,13 @@ use crate::banking_stage::transaction_scheduler::scheduler::PreLockFilterAction;
 use crate::banking_stage::transaction_scheduler::scheduler_common::SchedulingCommon;
 use crate::banking_stage::transaction_scheduler::transaction_state::TransactionState;
 use crate::banking_stage::transaction_scheduler::transaction_state_container::BatchInfo;
-use histogram::Histogram;
+
 use itertools::Itertools;
 use solana_clock::{Slot, MAX_PROCESSING_AGE};
 use solana_runtime::bank_forks::BankForks;
 use solana_svm::transaction_error_metrics::TransactionErrorMetrics;
-use std::borrow::Borrow;
 use std::{
+    collections::HashMap,
     sync::{Arc, RwLock},
     time::Instant,
 };
@@ -30,7 +31,6 @@ use {
         decision_maker::BufferedPacketsDecision,
         scheduler_messages::{ConsumeWork, FinishedConsumeWork, TransactionBatchId},
     },
-    ahash::HashMap,
     crossbeam_channel::{Receiver, Sender},
     prio_graph::{AccessKind, GraphNode, PrioGraph},
     solana_pubkey::Pubkey,
@@ -45,69 +45,37 @@ type SchedulerPrioGraph = PrioGraph<
     fn(&TransactionPriorityId, &GraphNode<TransactionPriorityId>) -> TransactionPriorityId,
 >;
 
-#[inline(always)]
-fn passthrough_priority(
-    id: &TransactionPriorityId,
-    _graph_node: &GraphNode<TransactionPriorityId>,
-) -> TransactionPriorityId {
-    *id
+struct InflightBatchInfo {
+    batch_priority_id: TransactionPriorityId,
 }
 
 pub struct BamScheduler<Tx: TransactionWithMeta> {
-    consume_work_senders: Vec<Sender<ConsumeWork<Tx>>>,
-    finished_consume_work_receivers: Vec<Receiver<FinishedConsumeWork<Tx>>>,
+    consume_work_sender: Sender<ConsumeWork<Tx>>,
+    finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
     bam_response_handle: BamResponseHandle,
 
-    next_batch_id: u64,
-    inflight_batch_info: HashMap<TransactionBatchId, InflightBatchInfo>,
+    inflight_batches: HashMap<u64, InflightBatchInfo>,
+
     prio_graph: SchedulerPrioGraph,
-    insertion_to_prio_graph_time: HashMap<u32, Instant>,
-    time_in_priograph_us: Histogram,
-    time_in_worker_us: Histogram,
-    time_between_schedule_us: Histogram,
-    last_schedule_time: Instant,
     slot: Option<Slot>,
-
-    // Reusable objects to avoid allocations
-    reusable_consume_work: Vec<ConsumeWork<Tx>>,
-    reusable_priority_ids: Vec<Vec<TransactionPriorityId>>,
-
-    extra_checks_enabled: bool,
     bank_forks: Arc<RwLock<BankForks>>,
-}
-
-// A structure to hold information about inflight batches.
-// A batch can either be one 'revert_on_error' batch or multiple
-// 'non-revert_on_error' batches that are scheduled together.
-struct InflightBatchInfo {
-    pub schedule_time: Instant,
-    pub batch_priority_ids: Vec<TransactionPriorityId>,
-    pub slot: Slot,
 }
 
 impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
     pub fn new(
-        consume_work_senders: Vec<Sender<ConsumeWork<Tx>>>,
-        finished_consume_work_receivers: Vec<Receiver<FinishedConsumeWork<Tx>>>,
+        consume_work_sender: Sender<ConsumeWork<Tx>>,
+        finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
         bam_response_handle: BamResponseHandle,
         bank_forks: Arc<RwLock<BankForks>>,
     ) -> Self {
+        let capacity = consume_work_sender.capacity().unwrap_or(1024);
         Self {
-            consume_work_senders,
-            finished_consume_work_receivers,
+            consume_work_sender,
+            finished_consume_work_receiver,
             bam_response_handle,
-            next_batch_id: 0,
-            inflight_batch_info: HashMap::default(),
-            prio_graph: PrioGraph::new(passthrough_priority),
-            insertion_to_prio_graph_time: HashMap::default(),
-            time_in_priograph_us: Histogram::new(),
-            time_in_worker_us: Histogram::new(),
-            time_between_schedule_us: Histogram::new(),
-            last_schedule_time: Instant::now(),
+            inflight_batches: HashMap::with_capacity(capacity),
+            prio_graph: PrioGraph::new(|id, _graph_node| *id),
             slot: None,
-            reusable_consume_work: Vec::new(),
-            reusable_priority_ids: Vec::new(),
-            extra_checks_enabled: true,
             bank_forks,
         }
     }
@@ -127,74 +95,23 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         })
     }
 
-    /// Insert all incoming transactions into the `PrioGraph`.
+    /// Pop the batch IDs from the container priority queue and insert each batch ID into the priority graph
+    /// with each batch's account locks.
     fn pull_into_prio_graph<S: StateContainer<Tx>>(&mut self, container: &mut S) {
-        let Some(slot) = self.slot else {
-            warn!("Slot is not set, cannot pull transactions into prio-graph");
-            return;
-        };
-
-        let working_bank = self.bank_forks.read().unwrap().working_bank();
-
         while let Some(next_batch_id) = container.pop_batch() {
             let Some(BatchInfo {
-                max_schedule_slot,
-                transaction_ids,
-                revert_on_error: _,
+                transaction_ids, ..
             }) = container.get_batch(next_batch_id.id)
             else {
                 error!("Batch {} not found in container", next_batch_id.id);
                 continue;
             };
 
-            if slot > *max_schedule_slot {
-                // If the slot has changed, we cannot schedule this batch
-                self.bam_response_handle
-                    .send_outside_leader_slot_bundle_result(priority_to_seq_id(
-                        next_batch_id.priority,
-                    ));
-                container.remove_batch_by_id(next_batch_id.id);
-                continue;
-            }
-
             let txns = transaction_ids
                 .iter()
                 .filter_map(|txn_id| container.get_transaction(*txn_id))
                 .collect_vec();
 
-            if self.extra_checks_enabled {
-                let lock_results = (0..txns.len())
-                    .map(|_| Ok(()))
-                    .collect::<Vec<solana_transaction_error::TransactionResult<()>>>();
-                let check_result = working_bank.check_transactions::<Tx>(
-                    &txns,
-                    lock_results.as_slice(),
-                    MAX_PROCESSING_AGE,
-                    &mut TransactionErrorMetrics::default(),
-                );
-                if let Some((_index, _err)) = check_result
-                    .iter()
-                    .find_position(|res| res.is_err())
-                    .map(|(i, res)| (i, res.as_ref().err().unwrap().clone()))
-                {
-                    container.remove_batch_by_id(next_batch_id.id);
-
-                    let _seq_id = priority_to_seq_id(next_batch_id.priority);
-                    // let result = atomic_txn_batch_result::Result::NotCommitted(
-                    //     jito_protos::proto::bam_types::NotCommitted {
-                    //         reason: Some(Self::convert_reason_to_proto(
-                    //             index,
-                    //             NotCommittedReason::Error(err),
-                    //         )),
-                    //     },
-                    // );
-                    // self.send_back_result(seq_id, result);
-                    continue;
-                };
-            }
-
-            self.insertion_to_prio_graph_time
-                .insert(priority_to_seq_id(next_batch_id.priority), Instant::now());
             self.prio_graph.insert_transaction(
                 next_batch_id,
                 Self::get_transactions_account_access(txns.into_iter()),
@@ -202,287 +119,86 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         }
     }
 
+    /// Pop batch IDs from the priority graph, grab the transactions, check them for validity, and send them to the workers.
     fn send_to_workers(
         &mut self,
         container: &mut impl StateContainer<Tx>,
         num_scheduled: &mut usize,
+        num_filtered_out: &mut usize,
     ) {
-        let Some(slot) = self.slot else {
-            warn!("Slot is not set, cannot schedule transactions");
-            return;
-        };
-
-        let now = Instant::now();
         let working_bank = self.bank_forks.read().unwrap().working_bank();
-        while let Some(id) = self.prio_graph.pop() {
-            let BatchInfo {
-                max_schedule_slot,
-                transaction_ids,
-                revert_on_error,
-            } = container.get_batch(id.id).unwrap();
 
-            // Update time in prio-graph metric
-            if let Some(insertion_time) = self
-                .insertion_to_prio_graph_time
-                .remove(&priority_to_seq_id(id.priority))
+        while let Some(batch_priority_id) = self.prio_graph.pop() {
+            let batch_info = container.get_batch(batch_priority_id.id).unwrap();
+
+            let max_schedule_slot = batch_info.max_schedule_slot;
+            let transaction_ids = batch_info.transaction_ids.to_vec();
+            let revert_on_error = batch_info.revert_on_error;
+
+            // Assumption: priority graph gets cleared on slot boundary
+            // Otherwise would be worth checking the max_schedule_slot here
+
+            let (transactions, max_ages): (Vec<Tx>, Vec<MaxAge>) = transaction_ids
+                .iter()
+                .map(|txn_id| {
+                    let tx = container
+                        .get_mut_transaction_state(*txn_id)
+                        .expect("transaction must exist");
+                    tx.take_transaction_for_scheduling()
+                })
+                .unzip();
+
+            // Save bounce between between the coordinator, worker, and back for common errors.
+            // It's expected that BAM will handle most of these errors, but durable nonces are annoying.
+            let lock_results = (0..transactions.len())
+                .map(|_| Ok(()))
+                .collect::<Vec<solana_transaction_error::TransactionResult<()>>>();
+            let check_result = working_bank.check_transactions::<Tx>(
+                &transactions,
+                lock_results.as_slice(),
+                MAX_PROCESSING_AGE,
+                &mut TransactionErrorMetrics::default(),
+            );
+            if let Some((index, err)) = check_result
+                .iter()
+                .find_position(|res| res.is_err())
+                .map(|(i, res)| (i, res.as_ref().err().unwrap()))
             {
-                let _ = self
-                    .time_in_priograph_us
-                    .increment(now.duration_since(insertion_time).as_micros() as u64);
-            };
+                container.remove_batch_by_id(batch_priority_id.id);
+                self.prio_graph.unblock(&batch_priority_id);
 
-            // Filter on slot
-            if slot > *max_schedule_slot {
-                self.prio_graph.unblock(&id);
-                self.bam_response_handle
-                    .send_outside_leader_slot_bundle_result(priority_to_seq_id(id.priority));
-                container.remove_batch_by_id(id.id);
+                self.bam_response_handle.send_not_committed_result(
+                    priority_to_seq_id(batch_priority_id.priority),
+                    index,
+                    err.clone(),
+                );
+
+                *num_filtered_out += transaction_ids.len();
                 continue;
             }
 
-            // Filter on check_transactions
-            if self.extra_checks_enabled {
-                let sanitized_txs = transaction_ids
-                    .iter()
-                    .filter_map(|txn_id| container.get_transaction(*txn_id))
-                    .map(|txn| txn.borrow())
-                    .collect::<Vec<_>>();
-                let lock_results = (0..sanitized_txs.len())
-                    .map(|_| Ok(()))
-                    .collect::<Vec<solana_transaction_error::TransactionResult<()>>>();
-                let check_result = working_bank.check_transactions::<Tx>(
-                    &sanitized_txs,
-                    lock_results.as_slice(),
-                    MAX_PROCESSING_AGE,
-                    &mut TransactionErrorMetrics::default(),
-                );
-                if let Some((_index, _err)) = check_result
-                    .iter()
-                    .find_position(|res| res.is_err())
-                    .map(|(i, res)| (i, res.as_ref().err().unwrap().clone()))
-                {
-                    container.remove_batch_by_id(id.id);
-                    self.prio_graph.unblock(&id);
+            // Schedule it
+            let work = ConsumeWork {
+                batch_id: TransactionBatchId::new(batch_priority_id.id as u64),
+                ids: transaction_ids.to_vec(),
+                transactions,
+                max_ages,
+                revert_on_error,
+                respond_with_extra_info: true,
+                max_schedule_slot: Some(max_schedule_slot),
+            };
+            let _ = self.consume_work_sender.send(work);
 
-                    // let seq_id = priority_to_seq_id(id.priority);
-                    // let result = atomic_txn_batch_result::Result::NotCommitted(
-                    //     jito_protos::proto::bam_types::NotCommitted {
-                    //         reason: Some(Self::convert_reason_to_proto(
-                    //             index,
-                    //             NotCommittedReason::Error(err),
-                    //         )),
-                    //     },
-                    // );
-                    // self.send_back_result(seq_id, result);
-                    continue;
-                };
-            }
-
-            // Schedulit
-            let mut work = self.get_or_create_work_object();
-            let batch_id = self.get_next_schedule_id();
-            *num_scheduled += transaction_ids.len();
-            Self::generate_work(
-                &mut work,
-                batch_id,
-                &[id],
-                *revert_on_error,
-                container,
-                slot,
+            self.inflight_batches.insert(
+                batch_priority_id.id as u64,
+                InflightBatchInfo { batch_priority_id },
             );
-            self.send_to_worker(vec![id], work, slot);
+
+            *num_scheduled += transaction_ids.len();
         }
     }
 
-    fn send_to_worker(
-        &mut self,
-        priority_ids: Vec<TransactionPriorityId>,
-        work: ConsumeWork<Tx>,
-        slot: Slot,
-    ) {
-        let batch_id = work.batch_id;
-        let _ = self.consume_work_senders[0].send(work);
-        self.inflight_batch_info.insert(
-            batch_id,
-            InflightBatchInfo {
-                schedule_time: Instant::now(),
-                batch_priority_ids: priority_ids,
-                slot,
-            },
-        );
-    }
-
-    fn get_next_schedule_id(&mut self) -> TransactionBatchId {
-        let result = TransactionBatchId::new(self.next_batch_id);
-        self.next_batch_id += 1;
-        result
-    }
-
-    fn get_or_create_work_object(&mut self) -> ConsumeWork<Tx> {
-        if let Some(work) = self.reusable_consume_work.pop() {
-            work
-        } else {
-            // These values will be overwritten by `generate_work`
-            ConsumeWork {
-                batch_id: TransactionBatchId::new(0),
-                ids: Vec::with_capacity(1),
-                transactions: Vec::with_capacity(5),
-                max_ages: Vec::with_capacity(5),
-                revert_on_error: false,
-                respond_with_extra_info: false,
-                max_schedule_slot: None,
-            }
-        }
-    }
-
-    fn recycle_work_object(&mut self, mut work: ConsumeWork<Tx>) {
-        // Just in case, clear the work object
-        work.ids.clear();
-        work.transactions.clear();
-        work.max_ages.clear();
-        self.reusable_consume_work.push(work);
-    }
-
-    fn recycle_priority_ids(&mut self, mut priority_ids: Vec<TransactionPriorityId>) {
-        priority_ids.clear();
-        self.reusable_priority_ids.push(priority_ids);
-    }
-
-    fn generate_work(
-        output: &mut ConsumeWork<Tx>,
-        batch_id: TransactionBatchId,
-        priority_ids: &[TransactionPriorityId],
-        revert_on_error: bool,
-        container: &mut impl StateContainer<Tx>,
-        slot: Slot,
-    ) {
-        output.ids.clear();
-        output.ids.extend(
-            priority_ids
-                .iter()
-                .filter_map(|priority_id| container.get_batch(priority_id.id))
-                .flat_map(
-                    |BatchInfo {
-                         transaction_ids, ..
-                     }| transaction_ids.into_iter(),
-                )
-                .cloned(),
-        );
-
-        output.transactions.clear();
-        output.max_ages.clear();
-        for (txn, max_age) in output.ids.iter().filter_map(|txn_id| {
-            let result = container.get_mut_transaction_state(*txn_id)?;
-            let result = result.take_transaction_for_scheduling();
-            Some(result)
-        }) {
-            output.transactions.push(txn);
-            output.max_ages.push(max_age);
-        }
-
-        output.batch_id = batch_id;
-        output.revert_on_error = revert_on_error;
-        output.max_schedule_slot = Some(slot);
-        output.respond_with_extra_info = true;
-    }
-
-    // fn send_back_result(&self, _seq_id: u32, _result: atomic_txn_batch_result::Result) {
-    // let _ = self
-    //     .response_sender
-    //     .try_send(BamOutboundMessage::AtomicTxnBatchResult(
-    //         jito_protos::proto::bam_types::AtomicTxnBatchResult {
-    //             seq_id,
-    //             result: Some(result),
-    //         },
-    //     ));
-    // }
-
-    // /// Generates a `bundle_result::Result` based on the processed results for 'revert_on_error' batches.
-    // fn generate_revert_on_error_bundle_result(
-    //     processed_results: &[TransactionResult],
-    // ) -> atomic_txn_batch_result::Result {
-    //     if processed_results
-    //         .iter()
-    //         .all(|result| matches!(result, TransactionResult::Committed(_)))
-    //     {
-    //         let transaction_results = processed_results
-    //             .iter()
-    //             .filter_map(|result| {
-    //                 if let TransactionResult::Committed(processed) = result {
-    //                     Some(processed.clone())
-    //                 } else {
-    //                     None
-    //                 }
-    //             })
-    //             .collect();
-    //         atomic_txn_batch_result::Result::Committed(jito_protos::proto::bam_types::Committed {
-    //             transaction_results,
-    //         })
-    //     } else {
-    //         // Get first NotCommit Reason that is not BatchRevert
-    //         let (index, not_commit_reason) = processed_results
-    //             .iter()
-    //             .enumerate()
-    //             .find_map(|(index, result)| {
-    //                 if let TransactionResult::NotCommitted(reason) = result {
-    //                     Some((index, reason.clone()))
-    //                 } else {
-    //                     None
-    //                 }
-    //             })
-    //             .unwrap_or((0, NotCommittedReason::PohTimeout));
-
-    //         atomic_txn_batch_result::Result::NotCommitted(
-    //             jito_protos::proto::bam_types::NotCommitted {
-    //                 reason: Some(Self::convert_reason_to_proto(index, not_commit_reason)),
-    //             },
-    //         )
-    //     }
-    // }
-
-    // / Generates a `bundle_result::Result` based on the processed result of a single transaction.
-    // fn generate_bundle_result(processed: &TransactionResult) -> atomic_txn_batch_result::Result {
-    //     match processed {
-    //         TransactionResult::Committed(result) => atomic_txn_batch_result::Result::Committed(
-    //             jito_protos::proto::bam_types::Committed {
-    //                 transaction_results: vec![result.clone()],
-    //             },
-    //         ),
-    //         TransactionResult::NotCommitted(reason) => {
-    //             let (index, not_commit_reason) = match reason {
-    //                 NotCommittedReason::PohTimeout => (0, NotCommittedReason::PohTimeout),
-    //                 NotCommittedReason::Error(err) => (0, NotCommittedReason::Error(err.clone())),
-    //             };
-    //             atomic_txn_batch_result::Result::NotCommitted(
-    //                 jito_protos::proto::bam_types::NotCommitted {
-    //                     reason: Some(Self::convert_reason_to_proto(index, not_commit_reason)),
-    //                 },
-    //             )
-    //         }
-    //     }
-    // }
-
-    // fn convert_reason_to_proto(
-    //     index: usize,
-    //     reason: NotCommittedReason,
-    // ) -> jito_protos::proto::bam_types::not_committed::Reason {
-    //     match reason {
-    //         NotCommittedReason::PohTimeout => {
-    //             jito_protos::proto::bam_types::not_committed::Reason::SchedulingError(
-    //                 SchedulingError::PohTimeout as i32,
-    //             )
-    //         }
-    //         NotCommittedReason::Error(err) => {
-    //             jito_protos::proto::bam_types::not_committed::Reason::TransactionError(
-    //                 jito_protos::proto::bam_types::TransactionError {
-    //                     index: index as u32,
-    //                     reason: convert_txn_error_to_proto(err) as i32,
-    //                 },
-    //             )
-    //         }
-    //     }
-    // }
-
+    /// On bank boundaries, the container is emptied and the priority graph is cleared
     fn maybe_bank_boundary_actions(
         &mut self,
         decision: &BufferedPacketsDecision,
@@ -493,7 +209,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         if maybe_bank.map(|bank| bank.slot()) == self.slot {
             return;
         }
-        let prev_slot = self.slot;
+
         if let Some(bank) = maybe_bank {
             info!(
                 "Bank boundary detected: slot changed from {:?} to {:?}",
@@ -506,156 +222,149 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             self.slot = None;
         }
 
-        // Drain container and send back 'retryable'
-        if self.slot.is_none() {
-            while let Some(next_batch_id) = container.pop() {
-                self.bam_response_handle
-                    .send_outside_leader_slot_bundle_result(priority_to_seq_id(
-                        next_batch_id.priority,
-                    ));
-                container.remove_batch_by_id(next_batch_id.id);
-            }
-        }
-
-        // Unblock all transactions blocked by inflight batches
-        // and then drain the prio-graph
-        for (_, inflight_info) in self.inflight_batch_info.iter() {
-            for priority_id in &inflight_info.batch_priority_ids {
-                if prev_slot == Some(inflight_info.slot) {
-                    self.prio_graph.unblock(priority_id);
-                }
-            }
-        }
-        let now = Instant::now();
-        while let Some((next_batch_id, _)) = self.prio_graph.pop_and_unblock() {
-            let seq_id = priority_to_seq_id(next_batch_id.priority);
-            if let Some(insertion_time) = self.insertion_to_prio_graph_time.remove(&seq_id) {
-                let _ = self
-                    .time_in_priograph_us
-                    .increment(now.duration_since(insertion_time).as_micros() as u64);
-            };
-
-            self.bam_response_handle
-                .send_outside_leader_slot_bundle_result(seq_id);
+        // On slot boundaries, all the transactions are removed from the container and the priority graph is cleared.
+        // Anything left in the container at the end of the slot is outside the leader slot window.
+        while let Some(next_batch_id) = container.pop_batch() {
             container.remove_batch_by_id(next_batch_id.id);
+            self.bam_response_handle
+                .send_outside_leader_slot_bundle_result(priority_to_seq_id(next_batch_id.priority));
         }
 
-        self.insertion_to_prio_graph_time.clear();
+        // It's assumed that all accounting for inflight batches is correct
+        info!("Starting to wait for anything pending...");
+        let start = Instant::now();
+        while !self.inflight_batches.is_empty() {
+            let Ok(work) = self.finished_consume_work_receiver.recv() else {
+                break;
+            };
+            let batch_info = self
+                .inflight_batches
+                .remove(&work.work.batch_id.0)
+                .expect("batch must be inflight");
 
-        // Only report timing metrics when slot has ended
-        if self.slot.is_none() {
-            self.report_histogram_metrics();
+            container.remove_batch_by_id(batch_info.batch_priority_id.id);
+            self.bam_response_handle
+                .send_outside_leader_slot_bundle_result(priority_to_seq_id(
+                    batch_info.batch_priority_id.priority,
+                ));
+            self.prio_graph.unblock(&batch_info.batch_priority_id);
         }
+        self.prio_graph.clear();
 
-        self.last_schedule_time = Instant::now();
+        info!(
+            "Done waiting for anything pending. Time taken: {:?}us",
+            start.elapsed().as_micros()
+        );
+
+        self.report_histogram_metrics();
     }
 
     fn report_histogram_metrics(&mut self) {
-        datapoint_info!(
-            "bam_scheduler_bank_boundary-metrics",
-            (
-                "time_in_priograph_us_p50",
-                self.time_in_priograph_us
-                    .percentile(50.0)
-                    .unwrap_or_default(),
-                i64
-            ),
-            (
-                "time_in_priograph_us_p75",
-                self.time_in_priograph_us
-                    .percentile(75.0)
-                    .unwrap_or_default(),
-                i64
-            ),
-            (
-                "time_in_priograph_us_p90",
-                self.time_in_priograph_us
-                    .percentile(90.0)
-                    .unwrap_or_default(),
-                i64
-            ),
-            (
-                "time_in_priograph_us_p99",
-                self.time_in_priograph_us
-                    .percentile(99.0)
-                    .unwrap_or_default(),
-                i64
-            ),
-            (
-                "time_in_priograph_us_max",
-                self.time_in_priograph_us.maximum().unwrap_or_default(),
-                i64
-            ),
-        );
-        self.time_in_priograph_us.clear();
+        // datapoint_info!(
+        //     "bam_scheduler_bank_boundary-metrics",
+        //     (
+        //         "time_in_priograph_us_p50",
+        //         self.time_in_priograph_us
+        //             .percentile(50.0)
+        //             .unwrap_or_default(),
+        //         i64
+        //     ),
+        //     (
+        //         "time_in_priograph_us_p75",
+        //         self.time_in_priograph_us
+        //             .percentile(75.0)
+        //             .unwrap_or_default(),
+        //         i64
+        //     ),
+        //     (
+        //         "time_in_priograph_us_p90",
+        //         self.time_in_priograph_us
+        //             .percentile(90.0)
+        //             .unwrap_or_default(),
+        //         i64
+        //     ),
+        //     (
+        //         "time_in_priograph_us_p99",
+        //         self.time_in_priograph_us
+        //             .percentile(99.0)
+        //             .unwrap_or_default(),
+        //         i64
+        //     ),
+        //     (
+        //         "time_in_priograph_us_max",
+        //         self.time_in_priograph_us.maximum().unwrap_or_default(),
+        //         i64
+        //     ),
+        // );
+        // self.time_in_priograph_us.clear();
 
-        datapoint_info!(
-            "bam_scheduler_worker_time_metrics",
-            (
-                "time_in_worker_us_p50",
-                self.time_in_worker_us.percentile(50.0).unwrap_or_default(),
-                i64
-            ),
-            (
-                "time_in_worker_us_p75",
-                self.time_in_worker_us.percentile(75.0).unwrap_or_default(),
-                i64
-            ),
-            (
-                "time_in_worker_us_p90",
-                self.time_in_worker_us.percentile(90.0).unwrap_or_default(),
-                i64
-            ),
-            (
-                "time_in_worker_us_p99",
-                self.time_in_worker_us.percentile(99.0).unwrap_or_default(),
-                i64
-            ),
-            (
-                "time_in_worker_us_max",
-                self.time_in_worker_us.maximum().unwrap_or_default(),
-                i64
-            ),
-        );
-        self.time_in_worker_us.clear();
+        // datapoint_info!(
+        //     "bam_scheduler_worker_time_metrics",
+        //     (
+        //         "time_in_worker_us_p50",
+        //         self.time_in_worker_us.percentile(50.0).unwrap_or_default(),
+        //         i64
+        //     ),
+        //     (
+        //         "time_in_worker_us_p75",
+        //         self.time_in_worker_us.percentile(75.0).unwrap_or_default(),
+        //         i64
+        //     ),
+        //     (
+        //         "time_in_worker_us_p90",
+        //         self.time_in_worker_us.percentile(90.0).unwrap_or_default(),
+        //         i64
+        //     ),
+        //     (
+        //         "time_in_worker_us_p99",
+        //         self.time_in_worker_us.percentile(99.0).unwrap_or_default(),
+        //         i64
+        //     ),
+        //     (
+        //         "time_in_worker_us_max",
+        //         self.time_in_worker_us.maximum().unwrap_or_default(),
+        //         i64
+        //     ),
+        // );
+        // self.time_in_worker_us.clear();
 
-        datapoint_info!(
-            "bam_scheduler_time_between_schedules_metrics",
-            (
-                "time_between_schedule_us_p50",
-                self.time_between_schedule_us
-                    .percentile(50.0)
-                    .unwrap_or_default(),
-                i64
-            ),
-            (
-                "time_between_schedule_us_p75",
-                self.time_between_schedule_us
-                    .percentile(75.0)
-                    .unwrap_or_default(),
-                i64
-            ),
-            (
-                "time_between_schedule_us_p90",
-                self.time_between_schedule_us
-                    .percentile(90.0)
-                    .unwrap_or_default(),
-                i64
-            ),
-            (
-                "time_between_schedule_us_p99",
-                self.time_between_schedule_us
-                    .percentile(99.0)
-                    .unwrap_or_default(),
-                i64
-            ),
-            (
-                "time_between_schedule_us_max",
-                self.time_between_schedule_us.maximum().unwrap_or_default(),
-                i64
-            ),
-        );
-        self.time_between_schedule_us.clear();
+        // datapoint_info!(
+        //     "bam_scheduler_time_between_schedules_metrics",
+        //     (
+        //         "time_between_schedule_us_p50",
+        //         self.time_between_schedule_us
+        //             .percentile(50.0)
+        //             .unwrap_or_default(),
+        //         i64
+        //     ),
+        //     (
+        //         "time_between_schedule_us_p75",
+        //         self.time_between_schedule_us
+        //             .percentile(75.0)
+        //             .unwrap_or_default(),
+        //         i64
+        //     ),
+        //     (
+        //         "time_between_schedule_us_p90",
+        //         self.time_between_schedule_us
+        //             .percentile(90.0)
+        //             .unwrap_or_default(),
+        //         i64
+        //     ),
+        //     (
+        //         "time_between_schedule_us_p99",
+        //         self.time_between_schedule_us
+        //             .percentile(99.0)
+        //             .unwrap_or_default(),
+        //         i64
+        //     ),
+        //     (
+        //         "time_between_schedule_us_max",
+        //         self.time_between_schedule_us.maximum().unwrap_or_default(),
+        //         i64
+        //     ),
+        // );
+        // self.time_between_schedule_us.clear();
     }
 }
 
@@ -670,24 +379,19 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
         let starting_buffer_size = container.buffer_size();
 
         let start_time = Instant::now();
-        let time_since_last_schedule = start_time.duration_since(self.last_schedule_time);
-        self.last_schedule_time = start_time;
-        let _ = self
-            .time_between_schedule_us
-            .increment(time_since_last_schedule.as_micros() as u64);
 
         let mut num_scheduled = 0;
+        let mut num_filtered_out = 0;
 
         self.pull_into_prio_graph(container);
-        self.send_to_workers(container, &mut num_scheduled);
+        self.send_to_workers(container, &mut num_scheduled, &mut num_filtered_out);
 
-        // TODO(seg): Double check the zeros here
         Ok(SchedulingSummary {
             starting_queue_size,
             starting_buffer_size,
             num_scheduled,
             num_unschedulable_conflicts: 0,
-            num_filtered_out: 0,
+            num_filtered_out,
             filter_time_us: start_time.elapsed().as_micros() as u64,
             num_unschedulable_threads: 0,
         })
@@ -706,61 +410,47 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
         // IMPORTANT: This must be called before the receiving code below
         self.maybe_bank_boundary_actions(decision, container);
 
-        let mut num_transactions = 0;
-        let now = Instant::now();
-        while let Ok(result) = self.finished_consume_work_receivers[0].try_recv() {
-            num_transactions += result.work.ids.len();
-            let batch_id = result.work.batch_id;
-            let revert_on_error = result.work.revert_on_error;
-            self.recycle_work_object(result.work);
+        let num_transactions = 0;
+        while let Ok(result) = self.finished_consume_work_receiver.try_recv() {
+            let inflight_batch_info = self
+                .inflight_batches
+                .remove(&result.work.batch_id.0)
+                .expect("batch must be inflight to be removed");
 
-            let Some(inflight_batch_info) = self.inflight_batch_info.remove(&batch_id) else {
-                continue;
-            };
+            self.prio_graph
+                .unblock(&inflight_batch_info.batch_priority_id);
+            container.remove_batch_by_id(inflight_batch_info.batch_priority_id.id);
 
-            let _ = self.time_in_worker_us.increment(
-                now.duration_since(inflight_batch_info.schedule_time)
-                    .as_micros() as u64,
-            );
+            // let extra_info = result.extra_info.unwrap();
 
             // Should never not be 1; but just in case
-            let len = if revert_on_error {
-                1
-            } else {
-                inflight_batch_info.batch_priority_ids.len()
-            };
-            for (_i, priority_id) in inflight_batch_info
-                .batch_priority_ids
-                .iter()
-                .enumerate()
-                .take(len)
-            {
-                // If we got extra info, we can send back the result
-                // if let Some(extra_info) = result.extra_info.as_ref() {
-                //     let bundle_result = if revert_on_error {
-                //         Self::generate_revert_on_error_bundle_result(&extra_info.processed_results)
-                //     } else {
-                //         let Some(txn_result) = extra_info.processed_results.get(i) else {
-                //             warn!(
-                //                 "Processed results for batch {} are missing for index {}",
-                //                 batch_id.0, i
-                //             );
-                //             continue;
-                //         };
-                //         Self::generate_bundle_result(txn_result)
-                //     };
-                //     self.send_back_result(priority_to_seq_id(priority_id.priority), bundle_result);
-                // }
-
-                // If in the same slot, unblock the transaction
-                if Some(inflight_batch_info.slot) == self.slot {
-                    self.prio_graph.unblock(priority_id);
-                }
-
-                // Remove the transaction from the container
-                container.remove_batch_by_id(priority_id.id);
-            }
-            self.recycle_priority_ids(inflight_batch_info.batch_priority_ids);
+            // let len = if revert_on_error {
+            //     1
+            // } else {
+            //     inflight_batch_info.batch_priority_ids.len()
+            // };
+            // for (_i, priority_id) in inflight_batch_info
+            //     .batch_priority_ids
+            //     .iter()
+            //     .enumerate()
+            //     .take(len)
+            // {
+            // If we got extra info, we can send back the result
+            // if let Some(extra_info) = result.extra_info.as_ref() {
+            //     let bundle_result = if revert_on_error {
+            //         Self::generate_revert_on_error_bundle_result(&extra_info.processed_results)
+            //     } else {
+            //         let Some(txn_result) = extra_info.processed_results.get(i) else {
+            //             warn!(
+            //                 "Processed results for batch {} are missing for index {}",
+            //                 batch_id.0, i
+            //             );
+            //             continue;
+            //         };
+            //         Self::generate_bundle_result(txn_result)
+            //     };
+            //     self.send_back_result(priority_to_seq_id(priority_id.priority), bundle_result);
+            // }
         }
 
         Ok((num_transactions, 0))

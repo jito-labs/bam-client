@@ -1,19 +1,19 @@
-use std::{
-    ops::AddAssign,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
+use {
+    crate::verified_bam_packet_batch::{BamPacketBatchMeta, VerifiedBamPacketBatch},
+    crossbeam_channel::{Receiver, RecvTimeoutError, SendError, Sender, TryRecvError},
+    solana_measure::measure_us,
+    solana_perf::{packet::PacketBatch, sigverify::ed25519_verify_cpu},
+    std::{
+        num::Saturating,
+        ops::AddAssign,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
+        thread::{self, spawn, JoinHandle},
+        time::{Duration, Instant},
     },
-    thread::{self, spawn, JoinHandle},
-    time::{Duration, Instant},
 };
-
-use crossbeam_channel::{Receiver, RecvTimeoutError, SendError, Sender, TryRecvError};
-use solana_measure::measure_us;
-use solana_perf::{packet::PacketBatch, sigverify::ed25519_verify_cpu};
-use std::num::Saturating;
-
-use crate::verified_bam_packet_batch::{BamPacketBatchMeta, VerifiedBamPacketBatch};
 
 struct BamSigverifyStageMetrics {
     last_update: Instant,
@@ -207,9 +207,7 @@ impl BamSigverifyStage {
 
 #[cfg(test)]
 mod tests {
-    use crossbeam_channel::bounded;
-
-    use super::*;
+    use {super::*, crossbeam_channel::bounded};
 
     #[test]
     fn test_bam_sigverify_stage_exits() {

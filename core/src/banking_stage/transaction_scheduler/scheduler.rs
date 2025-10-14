@@ -1,3 +1,4 @@
+use crate::banking_stage::decision_maker::BufferedPacketsDecision;
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
 use {
@@ -8,7 +9,6 @@ use {
     solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
     std::num::Saturating,
 };
-use crate::banking_stage::decision_maker::BufferedPacketsDecision;
 
 #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
 pub(crate) trait Scheduler<Tx: TransactionWithMeta> {

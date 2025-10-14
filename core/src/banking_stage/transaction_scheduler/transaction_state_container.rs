@@ -119,6 +119,9 @@ pub(crate) trait StateContainer<Tx: TransactionWithMeta> {
     /// Remove transaction by id.
     fn remove_by_id(&mut self, id: TransactionId);
 
+    /// Pushes a batch id into the priority queue.
+    fn push_batch_id_into_queue(&mut self, id: TransactionPriorityId);
+
     /// Remove batch and all transactions by ID
     fn remove_batch_by_id(&mut self, id: TransactionId);
 
@@ -221,6 +224,14 @@ impl<Tx: TransactionWithMeta> StateContainer<Tx> for TransactionStateContainer<T
             "cannot remove transactions from batch mode container"
         );
         self.id_to_transaction_state.remove(id);
+    }
+
+    fn push_batch_id_into_queue(&mut self, id: TransactionPriorityId) {
+        assert!(
+            self.is_batch_mode,
+            "cannot push batch id into non-batch mode container"
+        );
+        self.batch_priority_queue.push(id);
     }
 
     fn remove_batch_by_id(&mut self, id: TransactionId) {
@@ -390,24 +401,53 @@ impl TransactionViewStateContainer {
         }
     }
 
-    // Returns the batch ID
-    // pub(crate) fn try_insert_map_only_with_batch(
-    //     &mut self,
-    //     batch: &[&[u8]],
-    //     _f: impl FnOnce(SharedBytes) -> Result<TransactionState<RuntimeTransactionView>, ()>,
-    // ) -> Option<usize> {
-    //     assert!(
-    //         self.inner.is_batch_mode,
-    //         "cannot insert batch into non-batch mode container"
-    //     );
+    // Returns the batch ID if succesful.
+    pub(crate) fn try_insert_map_only_with_batch(
+        &mut self,
+        batches: &[&[u8]],
+        revert_on_error: bool,
+        max_schedule_slot: u64,
+        mut f: impl FnMut(SharedBytes) -> Result<TransactionState<RuntimeTransactionView>, ()>,
+    ) -> Option<usize> {
+        assert!(
+            self.inner.is_batch_mode,
+            "cannot insert batch into non-batch mode container"
+        );
 
-    //     // +1 because the batch info is stored in the same slab as the transactions
-    //     let capacity_required = self.inner.id_to_transaction_state.len() + batch.len() + 1;
-    //     if capacity_required > self.inner.id_to_transaction_state.capacity() {
-    //         return None;
-    //     }
-    //     None
-    // }
+        let capacity_required = self.inner.id_to_transaction_state.len() + batches.len();
+        if capacity_required > self.inner.id_to_transaction_state.capacity() {
+            return None;
+        }
+
+        let mut transaction_ids = SmallVec::with_capacity(batches.len());
+        for batch in batches {
+            // Optimistically add the batch to the map, removing all transaction_ids if any tx in the batch fails to deserialize.
+            if let Some(transaction_id) = self.try_insert_map_only_with_data(batch, |data| f(data))
+            {
+                transaction_ids.push(transaction_id);
+            } else {
+                for transaction_id in transaction_ids {
+                    self.inner.id_to_transaction_state.remove(transaction_id);
+                }
+                return None;
+            }
+        }
+
+        // If no transactions were added, no need to add the BatchInfo.
+        if transaction_ids.is_empty() {
+            return None;
+        }
+
+        let batch_entry = self.inner.get_vacant_batch_info_entry();
+        let batch_id = batch_entry.key();
+
+        batch_entry.insert(BatchInfo {
+            max_schedule_slot,
+            transaction_ids,
+            revert_on_error,
+        });
+        Some(batch_id)
+    }
 }
 
 impl StateContainer<RuntimeTransactionView> for TransactionViewStateContainer {
@@ -467,6 +507,11 @@ impl StateContainer<RuntimeTransactionView> for TransactionViewStateContainer {
         priority_ids: impl Iterator<Item = TransactionPriorityId>,
     ) -> usize {
         self.inner.push_ids_into_queue(priority_ids)
+    }
+
+    #[inline]
+    fn push_batch_id_into_queue(&mut self, batch_id: TransactionPriorityId) {
+        self.inner.push_batch_id_into_queue(batch_id);
     }
 
     #[inline]

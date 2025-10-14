@@ -1,7 +1,9 @@
-use itertools::Itertools;
-use jito_protos::proto::bam_types::AtomicTxnBatch;
-use solana_packet::{Meta, PACKET_DATA_SIZE};
-use solana_perf::packet::{BytesPacket, PacketBatch};
+use {
+    itertools::Itertools,
+    jito_protos::proto::bam_types::AtomicTxnBatch,
+    solana_packet::{Meta, PACKET_DATA_SIZE},
+    solana_perf::packet::{BytesPacket, PacketBatch},
+};
 
 pub enum BamPacketBatchError {
     OutsideLeaderSlot,

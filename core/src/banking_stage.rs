@@ -2,37 +2,33 @@
 //! to construct a software pipeline. The stage uses all available CPU cores and
 //! can do its processing in parallel with signature verification on the GPU.
 
-use crate::{
-    bam_response_handle::BamResponseHandle,
-    banking_stage::transaction_scheduler::transaction_state_container::SharedBytes,
-    verified_bam_packet_batch::VerifiedBamPacketBatch,
-};
-use agave_transaction_view::resolved_transaction_view::ResolvedTransactionView;
-use crossbeam_channel::bounded;
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
-
 use {
     self::{
         committer::Committer, consumer::Consumer, decision_maker::DecisionMaker,
         packet_receiver::PacketReceiver, qos_service::QosService, vote_storage::VoteStorage,
     },
     crate::{
+        bam_response_handle::BamResponseHandle,
         banking_stage::{
             consume_worker::ConsumeWorker,
             packet_deserializer::PacketDeserializer,
             transaction_scheduler::{
                 prio_graph_scheduler::PrioGraphScheduler,
                 scheduler_controller::SchedulerController, scheduler_error::SchedulerError,
+                transaction_state_container::SharedBytes,
             },
         },
         bundle_stage::bundle_account_locker::BundleAccountLocker,
         validator::{BlockProductionMethod, TransactionStructure},
+        verified_bam_packet_batch::VerifiedBamPacketBatch,
     },
     agave_banking_stage_ingress_types::BankingPacketReceiver,
+    agave_transaction_view::resolved_transaction_view::ResolvedTransactionView,
     conditional_mod::conditional_vis_mod,
     consumer::TipProcessingDependencies,
-    crossbeam_channel::{unbounded, Receiver, Sender},
+    crossbeam_channel::{bounded, unbounded, Receiver, Sender},
     histogram::Histogram,
     solana_gossip::{cluster_info::ClusterInfo, contact_info::ContactInfoQuery},
     solana_ledger::blockstore_processor::TransactionStatusSender,
@@ -674,23 +670,19 @@ impl BankingStage {
         // Create channels for communication between scheduler and workers
         const NUM_BAM_WORKERS: usize = 12;
         let num_workers = NUM_BAM_WORKERS;
-        let mut work_senders = Vec::with_capacity(num_workers);
-        let mut finished_work_receivers = Vec::with_capacity(num_workers);
+
+        let (work_sender, work_receiver) = bounded(10_000);
+        let (finished_work_sender, finished_work_receiver) = bounded(10_000);
 
         // Spawn the worker threads
         let mut worker_metrics = Vec::with_capacity(num_workers);
         for index in 0..num_workers {
             let id = index as u32;
 
-            let (work_sender, work_receiver) = bounded(100_000);
-            let (finished_work_sender, finished_work_receiver) = bounded(100_000);
-            work_senders.push(work_sender);
-            finished_work_receivers.push(finished_work_receiver);
-
             let consume_worker = ConsumeWorker::new_with_tip_processing_deps(
                 id,
                 exit.clone(),
-                work_receiver,
+                work_receiver.clone(),
                 Consumer::new(
                     context.committer.clone(),
                     context.transaction_recorder.clone(),
@@ -698,7 +690,7 @@ impl BankingStage {
                     context.log_messages_bytes_limit,
                     bundle_account_locker.clone(),
                 ),
-                finished_work_sender,
+                finished_work_sender.clone(),
                 context.poh_recorder.read().unwrap().shared_working_bank(),
                 tip_processing_dependencies.clone(),
             );
@@ -724,8 +716,8 @@ impl BankingStage {
                     let scheduler = BamScheduler::<
                         RuntimeTransaction<ResolvedTransactionView<SharedBytes>>,
                     >::new(
-                        work_senders,
-                        finished_work_receivers,
+                        work_sender,
+                        finished_work_receiver,
                         bam_response_handle.clone(),
                         context.bank_forks.clone(),
                     );

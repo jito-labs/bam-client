@@ -1,15 +1,15 @@
-use std::sync::Arc;
-
-use jito_protos::proto::bam_types::{
-    atomic_txn_batch_result, not_committed::Reason, DeserializationErrorReason, LeaderState,
-    SchedulingError, TransactionErrorReason,
-};
-use solana_runtime::bank::Bank;
-use solana_transaction_error::TransactionError;
-
-use crate::{
-    bam_dependencies::BamOutboundMessage,
-    banking_stage::immutable_deserialized_packet::DeserializedPacketError,
+use {
+    crate::{
+        bam_dependencies::BamOutboundMessage,
+        banking_stage::immutable_deserialized_packet::DeserializedPacketError,
+    },
+    jito_protos::proto::bam_types::{
+        atomic_txn_batch_result, not_committed::Reason, DeserializationErrorReason, LeaderState,
+        SchedulingError, TransactionCommittedResult, TransactionErrorReason,
+    },
+    solana_runtime::bank::Bank,
+    solana_transaction_error::TransactionError,
+    std::sync::Arc,
 };
 
 #[derive(Clone)]
@@ -29,6 +29,21 @@ impl BamResponseHandle {
         let leader_state = Self::generate_leader_state(bank);
         self.sender
             .try_send(BamOutboundMessage::LeaderState(leader_state))
+            .is_ok()
+    }
+
+    pub fn send_results(&self, seq_id: u32, results: Vec<TransactionCommittedResult>) -> bool {
+        self.sender
+            .try_send(BamOutboundMessage::AtomicTxnBatchResult(
+                jito_protos::proto::bam_types::AtomicTxnBatchResult {
+                    seq_id,
+                    result: Some(atomic_txn_batch_result::Result::Committed(
+                        jito_protos::proto::bam_types::Committed {
+                            transaction_results: results,
+                        },
+                    )),
+                },
+            ))
             .is_ok()
     }
 
@@ -78,16 +93,95 @@ impl BamResponseHandle {
             .is_ok()
     }
 
-    fn generate_leader_state(bank: &Bank) -> LeaderState {
-        let max_block_cu = bank.read_cost_tracker().unwrap().block_cost_limit();
-        let consumed_block_cu = bank.read_cost_tracker().unwrap().block_cost();
-        let slot_cu_budget_remaining = max_block_cu.saturating_sub(consumed_block_cu) as u32;
-        LeaderState {
-            slot: bank.slot(),
-            tick: (bank.tick_height() % bank.ticks_per_slot()) as u32,
-            slot_cu_budget_remaining,
-        }
+    pub fn send_not_committed_result(
+        &self,
+        seq_id: u32,
+        index: usize,
+        err: TransactionError,
+    ) -> bool {
+        self.sender
+            .try_send(BamOutboundMessage::AtomicTxnBatchResult(
+                jito_protos::proto::bam_types::AtomicTxnBatchResult {
+                    seq_id,
+                    result: Some(atomic_txn_batch_result::Result::NotCommitted(
+                        jito_protos::proto::bam_types::NotCommitted {
+                            reason: Some(jito_protos::proto::bam_types::not_committed::Reason::TransactionError(
+                                jito_protos::proto::bam_types::TransactionError {
+                                    index: index as u32,
+                                    reason: Self::convert_txn_error_to_proto(err) as i32,
+                                },
+                            )),
+                        },
+                    )),
+                },
+            ))
+            .is_ok()
     }
+
+    // /// Generates a `bundle_result::Result` based on the processed results for 'revert_on_error' batches.
+    // fn generate_revert_on_error_bundle_result(
+    //     processed_results: &[TransactionResult],
+    // ) -> atomic_txn_batch_result::Result {
+    //     if processed_results
+    //         .iter()
+    //         .all(|result| matches!(result, TransactionResult::Committed(_)))
+    //     {
+    //         let transaction_results = processed_results
+    //             .iter()
+    //             .filter_map(|result| {
+    //                 if let TransactionResult::Committed(processed) = result {
+    //                     Some(processed.clone())
+    //                 } else {
+    //                     None
+    //                 }
+    //             })
+    //             .collect();
+    //         atomic_txn_batch_result::Result::Committed(jito_protos::proto::bam_types::Committed {
+    //             transaction_results,
+    //         })
+    //     } else {
+    //         // Get first NotCommit Reason that is not BatchRevert
+    //         let (index, not_commit_reason) = processed_results
+    //             .iter()
+    //             .enumerate()
+    //             .find_map(|(index, result)| {
+    //                 if let TransactionResult::NotCommitted(reason) = result {
+    //                     Some((index, reason.clone()))
+    //                 } else {
+    //                     None
+    //                 }
+    //             })
+    //             .unwrap_or((0, NotCommittedReason::PohTimeout));
+
+    //         atomic_txn_batch_result::Result::NotCommitted(
+    //             jito_protos::proto::bam_types::NotCommitted {
+    //                 reason: Some(Self::convert_reason_to_proto(index, not_commit_reason)),
+    //             },
+    //         )
+    //     }
+    // }
+
+    // / Generates a `bundle_result::Result` based on the processed result of a single transaction.
+    // fn generate_bundle_result(processed: &TransactionResult) -> atomic_txn_batch_result::Result {
+    //     match processed {
+    //         TransactionResult::Committed(result) => atomic_txn_batch_result::Result::Committed(
+    //             jito_protos::proto::bam_types::Committed {
+    //                 transaction_results: vec![result.clone()],
+    //             },
+    //         ),
+    //         TransactionResult::NotCommitted(reason) => {
+    //             let (index, not_commit_reason) = match reason {
+    //                 NotCommittedReason::PohTimeout => (0, NotCommittedReason::PohTimeout),
+    //                 NotCommittedReason::Error(err) => (0, NotCommittedReason::Error(err.clone())),
+    //             };
+    //             atomic_txn_batch_result::Result::NotCommitted(
+    //                 jito_protos::proto::bam_types::NotCommitted {
+    //                     reason: Some(Self::convert_reason_to_proto(index, not_commit_reason)),
+    //                 },
+    //             )
+    //         }
+    //     }
+    // }
 
     // fn convert_reason_to_proto(
     //     index: usize,
@@ -103,14 +197,25 @@ impl BamResponseHandle {
     //             jito_protos::proto::bam_types::not_committed::Reason::TransactionError(
     //                 jito_protos::proto::bam_types::TransactionError {
     //                     index: index as u32,
-    //                     reason: Self::convert_txn_error_to_proto(err) as i32,
+    //                     reason: convert_txn_error_to_proto(err) as i32,
     //                 },
     //             )
     //         }
     //     }
     // }
 
-    pub fn convert_txn_error_to_proto(err: TransactionError) -> TransactionErrorReason {
+    fn generate_leader_state(bank: &Bank) -> LeaderState {
+        let max_block_cu = bank.read_cost_tracker().unwrap().block_cost_limit();
+        let consumed_block_cu = bank.read_cost_tracker().unwrap().block_cost();
+        let slot_cu_budget_remaining = max_block_cu.saturating_sub(consumed_block_cu) as u32;
+        LeaderState {
+            slot: bank.slot(),
+            tick: (bank.tick_height() % bank.ticks_per_slot()) as u32,
+            slot_cu_budget_remaining,
+        }
+    }
+
+    fn convert_txn_error_to_proto(err: TransactionError) -> TransactionErrorReason {
         match err {
             TransactionError::AccountInUse => TransactionErrorReason::AccountInUse,
             TransactionError::AccountLoadedTwice => TransactionErrorReason::AccountLoadedTwice,
