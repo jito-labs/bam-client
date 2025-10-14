@@ -421,36 +421,14 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                 .unblock(&inflight_batch_info.batch_priority_id);
             container.remove_batch_by_id(inflight_batch_info.batch_priority_id.id);
 
-            // let extra_info = result.extra_info.unwrap();
-
-            // Should never not be 1; but just in case
-            // let len = if revert_on_error {
-            //     1
-            // } else {
-            //     inflight_batch_info.batch_priority_ids.len()
-            // };
-            // for (_i, priority_id) in inflight_batch_info
-            //     .batch_priority_ids
-            //     .iter()
-            //     .enumerate()
-            //     .take(len)
-            // {
-            // If we got extra info, we can send back the result
-            // if let Some(extra_info) = result.extra_info.as_ref() {
-            //     let bundle_result = if revert_on_error {
-            //         Self::generate_revert_on_error_bundle_result(&extra_info.processed_results)
-            //     } else {
-            //         let Some(txn_result) = extra_info.processed_results.get(i) else {
-            //             warn!(
-            //                 "Processed results for batch {} are missing for index {}",
-            //                 batch_id.0, i
-            //             );
-            //             continue;
-            //         };
-            //         Self::generate_bundle_result(txn_result)
-            //     };
-            //     self.send_back_result(priority_to_seq_id(priority_id.priority), bundle_result);
-            // }
+            self.bam_response_handle.send_result(
+                priority_to_seq_id(inflight_batch_info.batch_priority_id.priority),
+                result.work.revert_on_error,
+                result
+                    .extra_info
+                    .expect("bam requires extra info")
+                    .processed_results,
+            );
         }
 
         Ok((num_transactions, 0))
