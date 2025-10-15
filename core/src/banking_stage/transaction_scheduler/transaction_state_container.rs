@@ -74,6 +74,10 @@ pub(crate) trait StateContainer<Tx: TransactionWithMeta> {
 
     fn buffer_size(&self) -> usize;
 
+    fn batch_queue_size(&self) -> usize;
+
+    fn batch_buffer_size(&self) -> usize;
+
     /// Returns true if the queue is empty.
     fn is_empty(&self) -> bool;
 
@@ -159,6 +163,14 @@ impl<Tx: TransactionWithMeta> StateContainer<Tx> for TransactionStateContainer<T
         self.priority_queue.is_empty()
     }
 
+    fn batch_queue_size(&self) -> usize {
+        self.batch_priority_queue.len()
+    }
+
+    fn batch_buffer_size(&self) -> usize {
+        self.batch_ids_to_batch_info.len()
+    }
+
     fn pop(&mut self) -> Option<TransactionPriorityId> {
         assert!(!self.is_batch_mode, "cannot pop from batch mode container");
         self.priority_queue.pop_max()
@@ -197,6 +209,8 @@ impl<Tx: TransactionWithMeta> StateContainer<Tx> for TransactionStateContainer<T
         &mut self,
         priority_ids: impl Iterator<Item = TransactionPriorityId>,
     ) -> usize {
+        assert!(!self.is_batch_mode, "cannot call in batch mode");
+
         for id in priority_ids {
             self.priority_queue.push(id);
         }
@@ -472,6 +486,16 @@ impl StateContainer<RuntimeTransactionView> for TransactionViewStateContainer {
     #[inline]
     fn buffer_size(&self) -> usize {
         self.inner.buffer_size()
+    }
+
+    #[inline]
+    fn batch_queue_size(&self) -> usize {
+        self.inner.batch_queue_size()
+    }
+
+    #[inline]
+    fn batch_buffer_size(&self) -> usize {
+        self.inner.batch_buffer_size()
     }
 
     #[inline]

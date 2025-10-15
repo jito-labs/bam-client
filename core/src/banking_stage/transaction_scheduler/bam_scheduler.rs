@@ -227,7 +227,10 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         }
 
         // It's assumed that all accounting for inflight batches is correct
-        info!("Starting to wait for anything pending...");
+        info!(
+            "Waiting for {} pending results",
+            self.inflight_batches.len()
+        );
         let start = Instant::now();
         while !self.inflight_batches.is_empty() {
             let Ok(work) = self.finished_consume_work_receiver.recv() else {
@@ -252,17 +255,19 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
 
         // On slot boundaries, all the transactions are removed from the container and the priority graph is cleared.
         // Anything left in the container at the end of the slot is outside the leader slot window.
-        while let Some(next_batch_id) = container.pop_batch() {
-            info!("popping batch: {}", next_batch_id.id);
+        while let Some((next_batch_id, _)) = self.prio_graph.pop_and_unblock() {
+            // info!("popping batch: {}", next_batch_id.id);
             container.remove_batch_by_id(next_batch_id.id);
             self.bam_response_handle
                 .send_outside_leader_slot_bundle_result(priority_to_seq_id(next_batch_id.priority));
         }
 
         info!(
-            "pqueue size: {}, buffer size: {}",
+            "pqueue size: {}, buffer size: {}, batch queue size: {}, batch buffer size: {}",
             container.queue_size(),
             container.buffer_size(),
+            container.batch_queue_size(),
+            container.batch_buffer_size(),
         );
 
         self.prio_graph.clear();
