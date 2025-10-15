@@ -37,7 +37,6 @@ use solana_runtime::bank::Bank;
 use solana_runtime_transaction::transaction_meta::StaticMeta;
 use solana_svm::transaction_error_metrics::TransactionErrorMetrics;
 use solana_transaction::sanitized::MessageHash;
-use solana_transaction_error::TransactionError;
 
 use std::time::Instant;
 use std::{
@@ -56,6 +55,7 @@ use {
     solana_runtime_transaction::runtime_transaction::RuntimeTransaction,
 };
 
+#[derive(Debug)]
 enum PacketHandlingError {
     Sanitization,
     LockValidation,
@@ -121,8 +121,9 @@ impl BamReceiveAndBuffer {
         // The 5 packet check exists when creating the VerifiedBamPacketBatch, but might get removed in the future.
         // This check exists to ensure that we don't accidentally overflow the transactions ArrayVec below.
         if bam_packet_batch.packet_batch().len() > EXTRA_CAPACITY {
-            // TODO (LB): send back BAM response
-            stats.num_dropped_on_capacity += bam_packet_batch.packet_batch().len();
+            self.bam_response_handle
+                .send_sanitization_error(bam_packet_batch.meta().seq_id, 0);
+            stats.num_dropped_without_parsing += bam_packet_batch.packet_batch().len();
             return stats;
         }
 
@@ -134,8 +135,9 @@ impl BamReceiveAndBuffer {
 
         let lock_results: [_; EXTRA_CAPACITY] = core::array::from_fn(|_| Ok(()));
 
-        // Insert the batch into the container, but not the priority queue yet.
-        if let Some(batch_id) = container.try_insert_map_only_with_batch(
+        let mut packet_index = 0;
+        let mut insert_map_error = None;
+        match container.try_insert_map_only_with_batch(
             packet_data.as_slice(),
             bam_packet_batch.meta().revert_on_error,
             bam_packet_batch.meta().max_schedule_slot,
@@ -146,92 +148,113 @@ impl BamReceiveAndBuffer {
                 transaction_account_lock_limit,
                 &self.blacklisted_accounts,
             ) {
-                Ok(state) => Ok(state),
+                Ok(state) => {
+                    packet_index += 1;
+                    Ok(state)
+                }
                 Err(PacketHandlingError::Sanitization) => {
+                    insert_map_error = Some((packet_index, PacketHandlingError::Sanitization));
                     stats.num_dropped_on_parsing_and_sanitization += 1;
-                    // TODO (LB): send back to BAM
+                    packet_index += 1;
                     Err(())
                 }
                 Err(PacketHandlingError::LockValidation) => {
+                    insert_map_error = Some((packet_index, PacketHandlingError::LockValidation));
                     stats.num_dropped_on_lock_validation += 1;
-                    // TODO (LB): send back to BAM
+                    packet_index += 1;
                     Err(())
                 }
                 Err(PacketHandlingError::ComputeBudget) => {
+                    insert_map_error = Some((packet_index, PacketHandlingError::ComputeBudget));
                     stats.num_dropped_on_compute_budget += 1;
-                    // TODO (LB): send back to BAM
+                    packet_index += 1;
                     Err(())
                 }
                 Err(PacketHandlingError::BlacklistedAccount) => {
+                    insert_map_error =
+                        Some((packet_index, PacketHandlingError::BlacklistedAccount));
                     stats.num_dropped_on_blacklisted_account += 1;
-                    // TODO (LB): send back to BAM
+                    packet_index += 1;
                     Err(())
                 }
             },
         ) {
-            let transaction_ids = {
-                let batch_info = container.get_batch(batch_id).expect("batch must exist");
-                let mut transaction_ids = ArrayVec::<_, EXTRA_CAPACITY>::new();
-                transaction_ids.extend(batch_info.transaction_ids.iter().cloned());
-                transaction_ids
-            };
+            Ok(Some(batch_id)) => {
+                let transaction_ids = {
+                    let batch_info = container.get_batch(batch_id).expect("batch must exist");
+                    let mut transaction_ids = ArrayVec::<_, EXTRA_CAPACITY>::new();
+                    transaction_ids.extend(batch_info.transaction_ids.iter().cloned());
+                    transaction_ids
+                };
 
-            // Note: mega-batching these transaction checks would probably speed things up
-            let mut transactions = ArrayVec::<_, EXTRA_CAPACITY>::new();
-            transactions.extend(transaction_ids.iter().map(|id| {
-                container
-                    .get_transaction(*id)
-                    .expect("transaction must exist")
-            }));
-            let check_results = working_bank.check_transactions::<RuntimeTransaction<_>>(
-                &transactions,
-                &lock_results[..transactions.len()],
-                MAX_PROCESSING_AGE,
-                &mut error_counters,
-            );
+                // Note: mega-batching these transaction checks would probably speed things up
+                let mut transactions = ArrayVec::<_, EXTRA_CAPACITY>::new();
+                transactions.extend(transaction_ids.iter().map(|id| {
+                    container
+                        .get_transaction(*id)
+                        .expect("transaction must exist")
+                }));
+                let check_results = working_bank.check_transactions::<RuntimeTransaction<_>>(
+                    &transactions,
+                    &lock_results[..transactions.len()],
+                    MAX_PROCESSING_AGE,
+                    &mut error_counters,
+                );
 
-            let mut any_error = false;
-            for (index, (result, _transaction_id)) in
-                check_results.iter().zip(transaction_ids.iter()).enumerate()
-            {
-                match result {
-                    Ok(_) => {
-                        if Consumer::check_fee_payer_unlocked(
-                            working_bank,
-                            transactions[index],
-                            &mut error_counters,
-                        )
-                        .is_err()
-                        {
-                            stats.num_dropped_on_fee_payer += transaction_ids.len();
-                            any_error = true;
+                let mut error = None;
+                for (index, (result, _transaction_id)) in
+                    check_results.iter().zip(transaction_ids.iter()).enumerate()
+                {
+                    match result {
+                        Ok(_) => {
+                            if let Err(e) = Consumer::check_fee_payer_unlocked(
+                                working_bank,
+                                transactions[index],
+                                &mut error_counters,
+                            ) {
+                                stats.num_dropped_on_fee_payer += transaction_ids.len();
+                                error = Some((index, e));
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            error = Some((index, e.clone()));
                             break;
                         }
                     }
-                    Err(TransactionError::BlockhashNotFound) => {
-                        stats.num_dropped_on_age += transaction_ids.len();
-                        any_error = true;
-                        break;
-                    }
-                    Err(TransactionError::AlreadyProcessed) => {
-                        stats.num_dropped_on_already_processed += transaction_ids.len();
-                        any_error = true;
-                        break;
-                    }
-                    // check_transactions only returns TransactionError::BlockhashNotFound and TransactionError::AlreadyProcessed
-                    Err(_) => {}
+                }
+                drop(transactions);
+
+                if let Some((error_index, error)) = error {
+                    container.remove_batch_by_id(batch_id);
+                    self.bam_response_handle.send_not_committed_result(
+                        bam_packet_batch.meta().seq_id,
+                        error_index,
+                        error,
+                    );
+                } else {
+                    container.push_batch_id_into_queue(TransactionPriorityId::new(
+                        seq_id_to_priority(bam_packet_batch.meta().seq_id),
+                        batch_id,
+                    ));
                 }
             }
-            drop(transactions);
-
-            if any_error {
-                container.remove_batch_by_id(batch_id);
-            } else {
-                container.push_batch_id_into_queue(TransactionPriorityId::new(
-                    seq_id_to_priority(bam_packet_batch.meta().seq_id),
-                    batch_id,
-                ));
+            // Ok(None) means an error occurred during insertion, all of the transactions were removed from the container and insert_map_error is set
+            Ok(None) => {}
+            // container is full, nothing was added
+            Err(()) => {
+                // error!("Container is full, nothing was added");
+                stats.num_dropped_on_capacity += bam_packet_batch.packet_batch().len();
+                self.bam_response_handle
+                    .send_container_full_txn_batch_result(bam_packet_batch.meta().seq_id);
             }
+        }
+
+        // TODO (LB): send back specific error to BAM
+        if let Some((index, error)) = insert_map_error {
+            error!("Sanitization error: {:?}", error);
+            self.bam_response_handle
+                .send_sanitization_error(bam_packet_batch.meta().seq_id, index);
         }
 
         stats

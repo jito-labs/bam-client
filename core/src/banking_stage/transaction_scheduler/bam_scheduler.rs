@@ -99,17 +99,19 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
     /// with each batch's account locks.
     fn pull_into_prio_graph<S: StateContainer<Tx>>(&mut self, container: &mut S) {
         while let Some(next_batch_id) = container.pop_batch() {
-            let Some(BatchInfo {
+            let BatchInfo {
                 transaction_ids, ..
-            }) = container.get_batch(next_batch_id.id)
-            else {
-                error!("Batch {} not found in container", next_batch_id.id);
-                continue;
-            };
+            } = container
+                .get_batch(next_batch_id.id)
+                .expect("batch must exist");
 
             let txns = transaction_ids
                 .iter()
-                .filter_map(|txn_id| container.get_transaction(*txn_id))
+                .map(|txn_id| {
+                    container
+                        .get_transaction(*txn_id)
+                        .expect("transaction must exist")
+                })
                 .collect_vec();
 
             self.prio_graph.insert_transaction(
@@ -129,7 +131,9 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         let working_bank = self.bank_forks.read().unwrap().working_bank();
 
         while let Some(batch_priority_id) = self.prio_graph.pop() {
-            let batch_info = container.get_batch(batch_priority_id.id).unwrap();
+            let batch_info = container
+                .get_batch(batch_priority_id.id)
+                .expect("batch must exist");
 
             let max_schedule_slot = batch_info.max_schedule_slot;
             let transaction_ids = batch_info.transaction_ids.to_vec();
@@ -222,14 +226,6 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             self.slot = None;
         }
 
-        // On slot boundaries, all the transactions are removed from the container and the priority graph is cleared.
-        // Anything left in the container at the end of the slot is outside the leader slot window.
-        while let Some(next_batch_id) = container.pop_batch() {
-            container.remove_batch_by_id(next_batch_id.id);
-            self.bam_response_handle
-                .send_outside_leader_slot_bundle_result(priority_to_seq_id(next_batch_id.priority));
-        }
-
         // It's assumed that all accounting for inflight batches is correct
         info!("Starting to wait for anything pending...");
         let start = Instant::now();
@@ -249,12 +245,27 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 ));
             self.prio_graph.unblock(&batch_info.batch_priority_id);
         }
-        self.prio_graph.clear();
-
         info!(
             "Done waiting for anything pending. Time taken: {:?}us",
             start.elapsed().as_micros()
         );
+
+        // On slot boundaries, all the transactions are removed from the container and the priority graph is cleared.
+        // Anything left in the container at the end of the slot is outside the leader slot window.
+        while let Some(next_batch_id) = container.pop_batch() {
+            info!("popping batch: {}", next_batch_id.id);
+            container.remove_batch_by_id(next_batch_id.id);
+            self.bam_response_handle
+                .send_outside_leader_slot_bundle_result(priority_to_seq_id(next_batch_id.priority));
+        }
+
+        info!(
+            "pqueue size: {}, buffer size: {}",
+            container.queue_size(),
+            container.buffer_size(),
+        );
+
+        self.prio_graph.clear();
 
         self.report_histogram_metrics();
     }

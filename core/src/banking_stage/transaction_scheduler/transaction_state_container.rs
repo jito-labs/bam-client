@@ -402,13 +402,14 @@ impl TransactionViewStateContainer {
     }
 
     // Returns the batch ID if succesful.
+    // TODO (LB): need to bubble up container full error to
     pub(crate) fn try_insert_map_only_with_batch(
         &mut self,
         batches: &[&[u8]],
         revert_on_error: bool,
         max_schedule_slot: u64,
         mut f: impl FnMut(SharedBytes) -> Result<TransactionState<RuntimeTransactionView>, ()>,
-    ) -> Option<usize> {
+    ) -> Result<Option<usize>, ()> {
         assert!(
             self.inner.is_batch_mode,
             "cannot insert batch into non-batch mode container"
@@ -416,7 +417,7 @@ impl TransactionViewStateContainer {
 
         let capacity_required = self.inner.id_to_transaction_state.len() + batches.len();
         if capacity_required > self.inner.id_to_transaction_state.capacity() {
-            return None;
+            return Err(());
         }
 
         let mut transaction_ids = SmallVec::with_capacity(batches.len());
@@ -429,13 +430,13 @@ impl TransactionViewStateContainer {
                 for transaction_id in transaction_ids {
                     self.inner.id_to_transaction_state.remove(transaction_id);
                 }
-                return None;
+                return Ok(None);
             }
         }
 
         // If no transactions were added, no need to add the BatchInfo.
         if transaction_ids.is_empty() {
-            return None;
+            return Ok(None);
         }
 
         let batch_entry = self.inner.get_vacant_batch_info_entry();
@@ -446,7 +447,7 @@ impl TransactionViewStateContainer {
             transaction_ids,
             revert_on_error,
         });
-        Some(batch_id)
+        Ok(Some(batch_id))
     }
 }
 

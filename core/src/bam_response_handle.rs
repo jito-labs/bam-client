@@ -7,8 +7,8 @@ use {
         },
     },
     jito_protos::proto::bam_types::{
-        atomic_txn_batch_result, not_committed::Reason, DeserializationErrorReason, LeaderState,
-        SchedulingError, TransactionErrorReason,
+        atomic_txn_batch_result, not_committed::Reason, DeserializationError,
+        DeserializationErrorReason, LeaderState, SchedulingError, TransactionErrorReason,
     },
     solana_runtime::bank::Bank,
     solana_transaction_error::TransactionError,
@@ -32,6 +32,24 @@ impl BamResponseHandle {
         let leader_state = Self::generate_leader_state(bank);
         self.sender
             .try_send(BamOutboundMessage::LeaderState(leader_state))
+            .is_ok()
+    }
+
+    pub fn send_sanitization_error(&self, seq_id: u32, index: usize) -> bool {
+        self.sender
+            .try_send(BamOutboundMessage::AtomicTxnBatchResult(
+                jito_protos::proto::bam_types::AtomicTxnBatchResult {
+                    seq_id,
+                    result: Some(atomic_txn_batch_result::Result::NotCommitted(
+                        jito_protos::proto::bam_types::NotCommitted {
+                            reason: Some(Reason::DeserializationError(DeserializationError {
+                                index: index as u32,
+                                reason: DeserializationErrorReason::SanitizeError as i32,
+                            })),
+                        },
+                    )),
+                },
+            ))
             .is_ok()
     }
 
