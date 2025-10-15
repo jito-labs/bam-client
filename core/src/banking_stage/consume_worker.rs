@@ -135,54 +135,57 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
     }
 
     fn pop_and_consume_priority_graph(&self, bank: &Arc<Bank>) {
-        let Some(BamPriorityGraphWork {
-            batch_priority_id,
-            revert_on_error,
-            max_schedule_slot,
-            transactions,
-            max_ages,
-        }) = self.bam_priority_graph.as_ref().unwrap().get_work()
-        else {
-            warn!("No work found; not doing work.");
-            return;
-        };
+        while !bank.is_complete() {
+            let Some(BamPriorityGraphWork {
+                batch_priority_id,
+                revert_on_error,
+                max_schedule_slot,
+                transactions,
+                max_ages,
+            }) = self.bam_priority_graph.as_ref().unwrap().get_work()
+            else {
+                // warn!("No work found; not doing work.");
+                return;
+            };
 
-        // Update tip account receivers if needed
-        if !self.run_tip_programs_if_needed(bank, &transactions, &|_| 0) {
-            error!(
-                "Error running tip programs for transactions: {:?}",
-                transactions
+            // Update tip account receivers if needed
+            if !self.run_tip_programs_if_needed(bank, &transactions, &|_| 0) {
+                error!(
+                    "Error running tip programs for transactions: {:?}",
+                    transactions
+                );
+                datapoint_error!(
+                    "consume-worker-error",
+                    ("error", "tip_programs_error", String),
+                );
+            }
+
+            let output = self.consumer.process_and_record_aged_transactions(
+                bank,
+                &transactions,
+                &max_ages,
+                &|_| 0,
+                revert_on_error,
             );
-            datapoint_error!(
-                "consume-worker-error",
-                ("error", "tip_programs_error", String),
+
+            self.metrics.update_for_consume(&output);
+            self.metrics.has_data.store(true, Ordering::Relaxed);
+
+            let extra_info = Self::generate_extra_info(&output, &transactions, bank);
+            // if you don't drop transactions, you will get an error on the Arc<Vec<u8>> strong count memory in the TransactionViewStateContainer
+            // because the transactions are still borrowed from the container
+            drop(transactions);
+            self.bam_priority_graph
+                .as_ref()
+                .unwrap()
+                .notify_worker_consumed(batch_priority_id);
+
+            self.bam_response_handle.as_ref().unwrap().send_result(
+                priority_to_seq_id(batch_priority_id.priority),
+                revert_on_error,
+                extra_info.processed_results,
             );
         }
-
-        let output = self.consumer.process_and_record_aged_transactions(
-            bank,
-            &transactions,
-            &max_ages,
-            &|_| 0,
-            revert_on_error,
-        );
-
-        self.metrics.update_for_consume(&output);
-        self.metrics.has_data.store(true, Ordering::Relaxed);
-
-        let extra_info = Self::generate_extra_info(&output, &transactions, bank);
-        self.bam_response_handle.as_ref().unwrap().send_result(
-            priority_to_seq_id(batch_priority_id.priority),
-            revert_on_error,
-            extra_info.processed_results,
-        );
-        // if you don't drop transactions, you will get an error on the Arc<Vec<u8>> strong count memory in the TransactionViewStateContainer
-        // because the transactions are still borrowed from the container
-        drop(transactions);
-        self.bam_priority_graph
-            .as_ref()
-            .unwrap()
-            .notify_worker_consumed(batch_priority_id);
     }
 
     #[allow(clippy::result_large_err)]

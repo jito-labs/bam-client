@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
     sync::{Arc, Mutex},
+    time::Instant,
 };
 
 use agave_transaction_view::{
@@ -13,6 +14,7 @@ use prio_graph::{AccessKind, GraphNode, PrioGraph};
 use solana_accounts_db::account_locks::validate_account_locks;
 use solana_clock::MAX_PROCESSING_AGE;
 use solana_fee_structure::FeeBudgetLimits;
+use solana_measure::measure_us;
 use solana_pubkey::Pubkey;
 use solana_runtime::bank::Bank;
 use solana_runtime_transaction::{
@@ -200,7 +202,10 @@ impl BamPriorityGraphContainer {
                 .map(|p| p.data(..).unwrap()),
         );
 
+        // let now = Instant::now();
         let mut inner = self.inner.lock().unwrap();
+        // let ns_elapsed = now.elapsed().as_nanos();
+        // println!("lock_elapsed_ns: {}", ns_elapsed);
 
         let mut packet_index = 0;
         let mut packet_handling_error = None;
