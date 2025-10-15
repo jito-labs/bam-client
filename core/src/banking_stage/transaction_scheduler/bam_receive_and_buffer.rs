@@ -97,10 +97,11 @@ impl BamReceiveAndBuffer {
         bam_packet_batch: VerifiedBamPacketBatch,
     ) -> ReceivingStats {
         let mut stats = ReceivingStats::default();
-        stats.num_received += bam_packet_batch.packet_batch().len();
 
         let transaction_account_lock_limit = working_bank.get_transaction_account_lock_limit();
         let mut error_counters = TransactionErrorMetrics::default();
+
+        stats.num_received += bam_packet_batch.packet_batch().len();
 
         // Throw away batches that are marked as discard from bad signature
         if bam_packet_batch.meta().discard {
@@ -127,11 +128,13 @@ impl BamReceiveAndBuffer {
             return stats;
         }
 
-        let packet_data = bam_packet_batch
-            .packet_batch()
-            .iter()
-            .filter_map(|p| p.data(..))
-            .collect::<Vec<_>>();
+        let mut packet_data = ArrayVec::<_, EXTRA_CAPACITY>::new();
+        packet_data.extend(
+            bam_packet_batch
+                .packet_batch()
+                .iter()
+                .map(|p| p.data(..).unwrap()),
+        );
 
         let lock_results: [_; EXTRA_CAPACITY] = core::array::from_fn(|_| Ok(()));
 
@@ -257,6 +260,8 @@ impl BamReceiveAndBuffer {
                 .send_sanitization_error(bam_packet_batch.meta().seq_id, index);
         }
 
+        stats.num_buffered += bam_packet_batch.packet_batch().len();
+
         stats
     }
 
@@ -362,30 +367,31 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
         };
 
         match decision {
-            BufferedPacketsDecision::Consume(_) | BufferedPacketsDecision::Hold => loop {
-                let bam_packet_batch = match self.bam_packet_batch_receiver.try_recv() {
-                    Ok(bam_packet_batch) => bam_packet_batch,
-                    Err(TryRecvError::Disconnected) => return Err(DisconnectedError),
-                    Err(TryRecvError::Empty) => {
-                        // If the channel is empty, work here is done.
-                        break;
+            BufferedPacketsDecision::Consume(_) | BufferedPacketsDecision::Hold => {
+                loop {
+                    let bam_packet_batch = match self.bam_packet_batch_receiver.try_recv() {
+                        Ok(bam_packet_batch) => bam_packet_batch,
+                        Err(TryRecvError::Disconnected) => return Err(DisconnectedError),
+                        Err(TryRecvError::Empty) => {
+                            // If the channel is empty, work here is done.
+                            break;
+                        }
+                    };
+
+                    // If BAM is not enabled, drain the channel
+                    if !is_bam_enabled {
+                        stats.num_dropped_without_parsing += bam_packet_batch.packet_batch().len();
+                        continue;
                     }
-                };
-                stats.num_received += bam_packet_batch.packet_batch().len();
 
-                // If BAM is not enabled, drain the channel
-                if !is_bam_enabled {
-                    stats.num_dropped_without_parsing += stats.num_received;
-                    continue;
+                    stats.accumulate(self.handle_packet_batch_message(
+                        container,
+                        &root_bank,
+                        &working_bank,
+                        bam_packet_batch,
+                    ));
                 }
-
-                stats.accumulate(self.handle_packet_batch_message(
-                    container,
-                    &root_bank,
-                    &working_bank,
-                    bam_packet_batch,
-                ));
-            },
+            }
             BufferedPacketsDecision::ForwardAndHold | BufferedPacketsDecision::Forward => {
                 // Send back any batches that were received while in Forward/Hold state
                 // Don't sleep too long here so one can pick up new bank fast

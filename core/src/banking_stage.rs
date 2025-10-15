@@ -668,7 +668,7 @@ impl BankingStage {
 
         // Spawn BAM workers
         // Create channels for communication between scheduler and workers
-        const NUM_BAM_WORKERS: usize = 8;
+        const NUM_BAM_WORKERS: usize = 12;
         let num_workers = NUM_BAM_WORKERS;
 
         let (work_sender, work_receiver) = bounded(10_000);
