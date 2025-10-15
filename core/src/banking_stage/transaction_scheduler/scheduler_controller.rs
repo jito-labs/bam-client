@@ -123,6 +123,7 @@ where
             if self.receive_and_buffer_packets(&decision).is_err() {
                 break;
             }
+
             // Report metrics only if there is data.
             // Reset intervals when appropriate, regardless of report.
             let should_report = self.count_metrics.interval_has_data() && self.scheduling_enabled();

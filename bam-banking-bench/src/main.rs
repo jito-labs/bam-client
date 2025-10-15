@@ -70,7 +70,7 @@ fn main() {
         .map(|_| Keypair::new())
         .collect::<Vec<_>>();
 
-    let mint_total = 10_000 * 1_000_000_000; // 10k SOL
+    let mint_total = 100_000 * 1_000_000_000; // 100k SOL
     let GenesisConfigInfo {
         genesis_config,
         mint_keypair,

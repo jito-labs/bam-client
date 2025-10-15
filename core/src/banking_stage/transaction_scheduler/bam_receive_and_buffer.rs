@@ -101,24 +101,6 @@ impl BamReceiveAndBuffer {
         let transaction_account_lock_limit = working_bank.get_transaction_account_lock_limit();
         let mut error_counters = TransactionErrorMetrics::default();
 
-        stats.num_received += bam_packet_batch.packet_batch().len();
-
-        // Throw away batches that are marked as discard from bad signature
-        if bam_packet_batch.meta().discard {
-            self.bam_response_handle
-                .send_bad_signature(bam_packet_batch.meta().seq_id);
-            stats.num_dropped_without_parsing += bam_packet_batch.packet_batch().len();
-            return stats;
-        }
-
-        // Throw away batches that are outside the maximum schedulable slot
-        if bam_packet_batch.meta().max_schedule_slot > working_bank.slot() {
-            self.bam_response_handle
-                .send_outside_leader_slot_bundle_result(bam_packet_batch.meta().seq_id);
-            stats.num_dropped_without_parsing += bam_packet_batch.packet_batch().len();
-            return stats;
-        }
-
         // The 5 packet check exists when creating the VerifiedBamPacketBatch, but might get removed in the future.
         // This check exists to ensure that we don't accidentally overflow the transactions ArrayVec below.
         if bam_packet_batch.packet_batch().len() > EXTRA_CAPACITY {
@@ -384,6 +366,24 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
                         continue;
                     }
 
+                    stats.num_received += bam_packet_batch.packet_batch().len();
+
+                    // Throw away batches that are marked as discard from bad signature
+                    if bam_packet_batch.meta().discard {
+                        self.bam_response_handle
+                            .send_bad_signature(bam_packet_batch.meta().seq_id);
+                        stats.num_dropped_without_parsing += bam_packet_batch.packet_batch().len();
+                        continue;
+                    }
+
+                    // Throw away batches that are outside the maximum schedulable slot
+                    if bam_packet_batch.meta().max_schedule_slot > working_bank.slot() {
+                        self.bam_response_handle
+                            .send_outside_leader_slot_bundle_result(bam_packet_batch.meta().seq_id);
+                        stats.num_dropped_without_parsing += bam_packet_batch.packet_batch().len();
+                        continue;
+                    }
+
                     stats.accumulate(self.handle_packet_batch_message(
                         container,
                         &root_bank,
@@ -414,6 +414,11 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
                 }
             }
         }
+
+        info!(
+            "Dropped without parsing: {:?}",
+            stats.num_dropped_without_parsing
+        );
 
         Ok(stats)
     }
