@@ -114,7 +114,16 @@ impl BamResponseHandle {
             .try_send(BamOutboundMessage::AtomicTxnBatchResult(
                 jito_protos::proto::bam_types::AtomicTxnBatchResult {
                     seq_id,
-                    result: None, // TODO (LB): something bad
+                    result: Some(atomic_txn_batch_result::Result::NotCommitted(
+                        jito_protos::proto::bam_types::NotCommitted {
+                            reason: Some(jito_protos::proto::bam_types::not_committed::Reason::TransactionError(
+                                jito_protos::proto::bam_types::TransactionError {
+                                    index: 0,
+                                    reason: TransactionErrorReason::SignatureFailure as i32,
+                                },
+                            )),
+                        },
+                    )),
                 },
             ))
             .is_ok()

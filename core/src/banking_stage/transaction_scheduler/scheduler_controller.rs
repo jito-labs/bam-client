@@ -144,6 +144,59 @@ where
         Ok(())
     }
 
+    pub fn run_bam_loop(mut self) -> Result<(), SchedulerError> {
+        while !self.exit.load(Ordering::Relaxed) {
+            // BufferedPacketsDecision is shared with legacy BankingStage, which will forward
+            // packets. Initially, not renaming these decision variants but the actions taken
+            // are different, since new BankingStage will not forward packets.
+            // For `Forward` and `ForwardAndHold`, we want to receive packets but will not
+            // forward them to the next leader. In this case, `ForwardAndHold` is
+            // indistinguishable from `Hold`.
+            //
+            // `Forward` will drop packets from the buffer instead of forwarding.
+            // During receiving, since packets would be dropped from buffer anyway, we can
+            // bypass sanitization and buffering and immediately drop the packets.
+            let (decision, decision_time_us) =
+                measure_us!(self.decision_maker.make_consume_or_forward_decision());
+            self.timing_metrics.update(|timing_metrics| {
+                timing_metrics.decision_time_us += decision_time_us;
+            });
+            let new_leader_slot = decision.bank().map(|b| b.slot());
+            self.count_metrics
+                .maybe_report_and_reset_slot(new_leader_slot);
+            self.timing_metrics
+                .maybe_report_and_reset_slot(new_leader_slot);
+
+            // no work to receive completion on with the bam loop
+            // self.receive_completed(&decision)?;
+
+            // Pull transactions from the container into the priority graph
+            self.process_transactions(&decision)?;
+            // Pull transactions from the channel into the container
+            if self.receive_and_buffer_packets(&decision).is_err() {
+                break;
+            }
+
+            // Report metrics only if there is data.
+            // Reset intervals when appropriate, regardless of report.
+            let should_report = self.count_metrics.interval_has_data() && self.scheduling_enabled();
+            let priority_min_max = self.container.get_min_max_priority();
+            self.count_metrics.update(|count_metrics| {
+                count_metrics.update_priority_stats(priority_min_max);
+            });
+            self.count_metrics
+                .maybe_report_and_reset_interval(should_report);
+            self.timing_metrics
+                .maybe_report_and_reset_interval(should_report);
+            self.worker_metrics
+                .iter()
+                .for_each(|metrics| metrics.maybe_report_and_reset());
+            self.scheduling_details.maybe_report();
+        }
+
+        Ok(())
+    }
+
     /// Process packets based on decision.
     fn process_transactions(
         &mut self,

@@ -2,6 +2,14 @@
 //! to construct a software pipeline. The stage uses all available CPU cores and
 //! can do its processing in parallel with signature verification on the GPU.
 
+use crate::banking_stage::{
+    scheduler_messages::{ConsumeWork, FinishedConsumeWork},
+    transaction_scheduler::{
+        bam_priority_graph::BamPriorityGraphContainer,
+        transaction_state_container::RuntimeTransactionView,
+    },
+};
+use crossbeam_channel::bounded;
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
 use {
@@ -17,7 +25,6 @@ use {
             transaction_scheduler::{
                 prio_graph_scheduler::PrioGraphScheduler,
                 scheduler_controller::SchedulerController, scheduler_error::SchedulerError,
-                transaction_state_container::SharedBytes,
             },
         },
         bundle_stage::bundle_account_locker::BundleAccountLocker,
@@ -25,10 +32,9 @@ use {
         verified_bam_packet_batch::VerifiedBamPacketBatch,
     },
     agave_banking_stage_ingress_types::BankingPacketReceiver,
-    agave_transaction_view::resolved_transaction_view::ResolvedTransactionView,
     conditional_mod::conditional_vis_mod,
     consumer::TipProcessingDependencies,
-    crossbeam_channel::{bounded, unbounded, Receiver, Sender},
+    crossbeam_channel::{unbounded, Receiver, Sender},
     histogram::Histogram,
     solana_gossip::{cluster_info::ClusterInfo, contact_info::ContactInfoQuery},
     solana_ledger::blockstore_processor::TransactionStatusSender,
@@ -39,7 +45,7 @@ use {
         bank::Bank, bank_forks::BankForks, prioritization_fee_cache::PrioritizationFeeCache,
         vote_sender_types::ReplayVoteSender,
     },
-    solana_runtime_transaction::runtime_transaction::RuntimeTransaction,
+    // solana_runtime_transaction::runtime_transaction::RuntimeTransaction,
     solana_time_utils::AtomicInterval,
     std::{
         collections::HashSet,
@@ -54,7 +60,7 @@ use {
     },
     transaction_scheduler::{
         bam_receive_and_buffer::BamReceiveAndBuffer,
-        bam_scheduler::BamScheduler,
+        // bam_scheduler::BamScheduler,
         greedy_scheduler::{GreedyScheduler, GreedySchedulerConfig},
         prio_graph_scheduler::PrioGraphSchedulerConfig,
         receive_and_buffer::{
@@ -669,20 +675,21 @@ impl BankingStage {
         // Spawn BAM workers
         // Create channels for communication between scheduler and workers
         const NUM_BAM_WORKERS: usize = 12;
-        let num_workers = NUM_BAM_WORKERS;
 
-        let (work_sender, work_receiver) = bounded(10_000);
-        let (finished_work_sender, finished_work_receiver) = bounded(10_000);
+        let bam_priority_graph = BamPriorityGraphContainer::new();
+
+        let bam_work_receiver: Receiver<ConsumeWork<RuntimeTransactionView>> = bounded(1).1;
+        let bam_consumed_sender: Sender<FinishedConsumeWork<RuntimeTransactionView>> = bounded(1).0;
 
         // Spawn the worker threads
-        let mut worker_metrics = Vec::with_capacity(num_workers);
-        for index in 0..num_workers {
+        // let mut worker_metrics = Vec::with_capacity(num_workers);
+        for index in 0..NUM_BAM_WORKERS {
             let id = index as u32;
 
             let consume_worker = ConsumeWorker::new_with_tip_processing_deps(
                 id,
                 exit.clone(),
-                work_receiver.clone(),
+                bam_work_receiver.clone(),
                 Consumer::new(
                     context.committer.clone(),
                     context.transaction_recorder.clone(),
@@ -690,9 +697,11 @@ impl BankingStage {
                     context.log_messages_bytes_limit,
                     bundle_account_locker.clone(),
                 ),
-                finished_work_sender.clone(),
+                bam_consumed_sender.clone(),
                 context.poh_recorder.read().unwrap().shared_working_bank(),
                 tip_processing_dependencies.clone(),
+                bam_priority_graph.clone(),
+                bam_response_handle.clone(),
             );
 
             worker_metrics.push(consume_worker.metrics_handle());
@@ -701,52 +710,32 @@ impl BankingStage {
                 Builder::new()
                     .name(format!("solCoWorker{id:02}"))
                     .spawn(move || {
-                        let _ = consume_worker.run(|_| 0);
+                        let _ = consume_worker.run_bam_loop();
                     })
                     .unwrap(),
             )
         }
 
-        // Spawn the BAM scheduler thread
+        // Spawn the BAM receive and buffer thread
+        // This pushes transactions into the BamPriorityGraphContainer
         let bam_scheduler_exit = exit.clone();
+        let decision_maker = decision_maker.clone();
         thread_hdls.push(
             Builder::new()
-                .name("solBamSched".to_string())
+                .name("solBamRecvBuffer".to_string())
                 .spawn(move || {
-                    let scheduler = BamScheduler::<
-                        RuntimeTransaction<ResolvedTransactionView<SharedBytes>>,
-                    >::new(
-                        work_sender,
-                        finished_work_receiver,
-                        bam_response_handle.clone(),
-                        context.bank_forks.clone(),
-                    );
                     let receive_and_buffer = BamReceiveAndBuffer::new(
                         bam_enabled.clone(),
                         verified_bam_batch_receiver,
                         bam_response_handle.clone(),
                         context.bank_forks.clone(),
                         blacklisted_accounts,
+                        bam_priority_graph.clone(),
+                        exit.clone(),
+                        decision_maker,
                     );
 
-                    let scheduler_controller = SchedulerController::new(
-                        bam_scheduler_exit,
-                        decision_maker.clone(),
-                        receive_and_buffer,
-                        context.bank_forks,
-                        scheduler,
-                        worker_metrics,
-                        true,
-                        bam_enabled,
-                    );
-
-                    match scheduler_controller.run() {
-                        Ok(_) => {}
-                        Err(SchedulerError::DisconnectedRecvChannel(_)) => {}
-                        Err(SchedulerError::DisconnectedSendChannel(_)) => {
-                            warn!("Unexpected worker disconnect from scheduler")
-                        }
-                    }
+                    receive_and_buffer.run();
                 })
                 .unwrap(),
         );

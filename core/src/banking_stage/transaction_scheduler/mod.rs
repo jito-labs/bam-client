@@ -1,5 +1,6 @@
 use conditional_mod::conditional_vis_mod;
 
+pub(crate) mod bam_priority_graph;
 pub(crate) mod bam_receive_and_buffer;
 pub(crate) mod bam_scheduler;
 mod batch_id_generator;

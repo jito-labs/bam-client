@@ -8,7 +8,16 @@ use {
             TransactionResult,
         },
     },
-    crate::banking_stage::consumer::TipProcessingDependencies,
+    crate::{
+        bam_response_handle::BamResponseHandle,
+        banking_stage::{
+            consumer::TipProcessingDependencies,
+            transaction_scheduler::{
+                bam_priority_graph::{BamPriorityGraphContainer, BamPriorityGraphWork},
+                bam_receive_and_buffer::priority_to_seq_id,
+            },
+        },
+    },
     crossbeam_channel::{Receiver, RecvError, SendError, Sender},
     jito_protos::proto::bam_types::TransactionCommittedResult,
     solana_measure::measure_us,
@@ -46,6 +55,8 @@ pub(crate) struct ConsumeWorker<Tx> {
     metrics: Arc<ConsumeWorkerMetrics>,
 
     tip_processing_dependencies: Option<TipProcessingDependencies>,
+    bam_priority_graph: Option<BamPriorityGraphContainer>,
+    bam_response_handle: Option<BamResponseHandle>,
 }
 
 impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
@@ -65,6 +76,8 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
             shared_working_bank,
             metrics: Arc::new(ConsumeWorkerMetrics::new(id)),
             tip_processing_dependencies: None,
+            bam_priority_graph: None,
+            bam_response_handle: None,
         }
     }
 
@@ -76,6 +89,8 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         consumed_sender: Sender<FinishedConsumeWork<Tx>>,
         shared_working_bank: SharedWorkingBank,
         tip_processing_dependencies: Option<TipProcessingDependencies>,
+        bam_priority_graph: BamPriorityGraphContainer,
+        bam_response_handle: BamResponseHandle,
     ) -> Self {
         Self {
             exit,
@@ -85,6 +100,8 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
             shared_working_bank,
             metrics: Arc::new(ConsumeWorkerMetrics::new(id)),
             tip_processing_dependencies,
+            bam_priority_graph: Some(bam_priority_graph),
+            bam_response_handle: Some(bam_response_handle),
         }
     }
 
@@ -99,6 +116,73 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
             self.consume_loop(work, &reservation_cb)?;
         }
         Ok(())
+    }
+
+    pub fn run_bam_loop(self) -> Result<(), ConsumeWorkerError<Tx>> {
+        while !self.exit.load(Ordering::Relaxed) {
+            let (maybe_consume_bank, _get_bank_us) = measure_us!(self.working_bank_with_timeout());
+            let Some(bank) = maybe_consume_bank else {
+                warn!("No bank found");
+                continue;
+            };
+            if bank.is_complete() {
+                warn!("Bank is complete; not doing work.");
+                continue;
+            }
+            self.pop_and_consume_priority_graph(&bank);
+        }
+        Ok(())
+    }
+
+    fn pop_and_consume_priority_graph(&self, bank: &Arc<Bank>) {
+        let Some(BamPriorityGraphWork {
+            batch_priority_id,
+            revert_on_error,
+            max_schedule_slot,
+            transactions,
+            max_ages,
+        }) = self.bam_priority_graph.as_ref().unwrap().get_work()
+        else {
+            warn!("No work found; not doing work.");
+            return;
+        };
+
+        // Update tip account receivers if needed
+        if !self.run_tip_programs_if_needed(bank, &transactions, &|_| 0) {
+            error!(
+                "Error running tip programs for transactions: {:?}",
+                transactions
+            );
+            datapoint_error!(
+                "consume-worker-error",
+                ("error", "tip_programs_error", String),
+            );
+        }
+
+        let output = self.consumer.process_and_record_aged_transactions(
+            bank,
+            &transactions,
+            &max_ages,
+            &|_| 0,
+            revert_on_error,
+        );
+
+        self.metrics.update_for_consume(&output);
+        self.metrics.has_data.store(true, Ordering::Relaxed);
+
+        let extra_info = Self::generate_extra_info(&output, &transactions, bank);
+        self.bam_response_handle.as_ref().unwrap().send_result(
+            priority_to_seq_id(batch_priority_id.priority),
+            revert_on_error,
+            extra_info.processed_results,
+        );
+        // if you don't drop transactions, you will get an error on the Arc<Vec<u8>> strong count memory in the TransactionViewStateContainer
+        // because the transactions are still borrowed from the container
+        drop(transactions);
+        self.bam_priority_graph
+            .as_ref()
+            .unwrap()
+            .notify_worker_consumed(batch_priority_id);
     }
 
     #[allow(clippy::result_large_err)]
@@ -198,7 +282,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         self.metrics.has_data.store(true, Ordering::Relaxed);
 
         let extra_info = if work.respond_with_extra_info {
-            Some(Self::generate_extra_info(&output, &work, bank))
+            Some(Self::generate_extra_info(&output, &work.transactions, bank))
         } else {
             None
         };
@@ -318,7 +402,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
 
     fn generate_extra_info(
         output: &ProcessTransactionBatchOutput,
-        work: &ConsumeWork<Tx>,
+        transactions: &[impl TransactionWithMeta],
         bank: &Arc<Bank>,
     ) -> FinishedConsumeWorkExtraInfo {
         let Ok(commit_transactions_result) = output
@@ -331,7 +415,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
                     TransactionResult::NotCommitted(
                         NotCommittedReason::PohTimeout,
                     );
-                    work.transactions.len()
+                    transactions.len()
                 ],
             };
         };
@@ -348,7 +432,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
                         TransactionCommittedResult {
                             cus_consumed: *compute_units as u32,
                             feepayer_balance_lamports: bank
-                                .get_balance(work.transactions[i].fee_payer()),
+                                .get_balance(transactions[i].fee_payer()),
                             loaded_accounts_data_size: *loaded_accounts_data_size,
                             execution_success: result.is_ok(),
                         },

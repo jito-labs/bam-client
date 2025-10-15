@@ -58,8 +58,10 @@ pub(crate) struct TransactionStateContainer<Tx: TransactionWithMeta> {
 }
 
 pub struct BatchInfo {
+    #[allow(unused)]
     pub(crate) max_schedule_slot: u64,
     pub(crate) transaction_ids: SmallVec<[TransactionId; 5]>,
+    #[allow(unused)]
     pub(crate) revert_on_error: bool,
 }
 
@@ -258,7 +260,9 @@ impl<Tx: TransactionWithMeta> StateContainer<Tx> for TransactionStateContainer<T
             transaction_ids, ..
         } = self.batch_ids_to_batch_info.remove(id);
         for transaction_id in transaction_ids {
-            self.id_to_transaction_state.remove(transaction_id);
+            // info!("Removing transaction from batch: {}", transaction_id);
+            let t = self.id_to_transaction_state.remove(transaction_id);
+            drop(t);
         }
     }
 
@@ -386,6 +390,8 @@ impl TransactionViewStateContainer {
         let vacant_entry = self.inner.get_vacant_map_entry();
         let transaction_id = vacant_entry.key();
 
+        // info!("Adding transaction to map: {}", transaction_id);
+
         // Get the vacant space in the bytes buffer.
         let bytes_entry = &mut self.bytes_buffer[transaction_id];
         // Assert the entry is unique, then copy the packet data.
@@ -398,7 +404,12 @@ impl TransactionViewStateContainer {
             // entry in the slab was not cleared. However, since we share
             // indexing between the slab and our `bytes_buffer`, we know that
             // `vacant_entry` is not occupied.
-            assert_eq!(Arc::strong_count(bytes_entry), 1, "entry must be unique");
+            assert_eq!(
+                Arc::strong_count(bytes_entry),
+                1,
+                "entry {} must be unique",
+                transaction_id
+            );
             let bytes = Arc::make_mut(bytes_entry);
 
             // Clear and copy the packet data into the bytes buffer.

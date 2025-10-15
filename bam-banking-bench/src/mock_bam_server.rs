@@ -79,6 +79,7 @@ struct BankStats {
     start_time: Instant,
 
     sent_transactions_and_results: HashMap<u32, BamTransactionAndResult>,
+    num_results_received: usize,
 }
 
 impl BankStats {
@@ -86,7 +87,8 @@ impl BankStats {
         Self {
             bank_slot,
             start_time: Instant::now(),
-            sent_transactions_and_results: HashMap::with_capacity(50_000),
+            sent_transactions_and_results: HashMap::with_capacity(200_000),
+            num_results_received: 0,
         }
     }
 
@@ -214,6 +216,7 @@ impl MockBamServer {
                         time_received: Instant::now(),
                         result,
                     });
+                    bank_stats.num_results_received += 1;
                 }
                 _msg => {
                     panic!("unexpected message");
@@ -226,21 +229,16 @@ impl MockBamServer {
         outbound_receiver: &Receiver<BamOutboundMessage>,
         bank_stats: &mut BankStats,
     ) {
-        loop {
-            let num_results_received = bank_stats
-                .sent_transactions_and_results
-                .iter()
-                .filter(|(_, result)| result.result.is_some())
-                .count();
-            if num_results_received == bank_stats.sent_transactions_and_results.len() {
-                break;
-            }
-            info!(
-                "waiting for {} results",
-                bank_stats.sent_transactions_and_results.len() - num_results_received
-            );
+        println!(
+            "sent: {}, received: {}",
+            bank_stats.sent_transactions_and_results.len(),
+            bank_stats.num_results_received
+        );
+        let now = Instant::now();
+        while bank_stats.num_results_received < bank_stats.sent_transactions_and_results.len() {
             Self::handle_outbound_messages(outbound_receiver, bank_stats);
         }
+        println!("time taken: {:?}", now.elapsed());
     }
 
     fn send_transactions(
@@ -255,7 +253,7 @@ impl MockBamServer {
             let tx = make_transfer_transaction_with_compute_unit_price(
                 keypair,
                 &keypair.pubkey(),
-                *nonce % 1_000_000,
+                *nonce,
                 bank.last_blockhash(),
                 1,
             );

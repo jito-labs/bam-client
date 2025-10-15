@@ -3,40 +3,20 @@
 //! this implementation only functions during the `Consume/Hold` phase; otherwise it will send them back
 //! to BAM with a `Retryable` result.
 use crate::bam_response_handle::BamResponseHandle;
-use crate::banking_stage::consumer::Consumer;
-use crate::banking_stage::transaction_scheduler::receive_and_buffer::calculate_max_age;
-use crate::banking_stage::transaction_scheduler::receive_and_buffer::calculate_priority_and_cost;
-use crate::banking_stage::transaction_scheduler::receive_and_buffer::DisconnectedError;
+use crate::banking_stage::decision_maker::DecisionMaker;
+use crate::banking_stage::scheduler_messages::TransactionResult;
+use crate::banking_stage::transaction_scheduler::bam_priority_graph::BamPriorityGraphContainer;
+use crate::banking_stage::transaction_scheduler::bam_priority_graph::InsertError;
+use crate::banking_stage::transaction_scheduler::bam_priority_graph::InsertResult;
 use crate::banking_stage::transaction_scheduler::receive_and_buffer::ReceivingStats;
-use crate::banking_stage::transaction_scheduler::transaction_priority_id::TransactionPriorityId;
-use crate::banking_stage::transaction_scheduler::transaction_state::TransactionState;
-use crate::banking_stage::transaction_scheduler::transaction_state_container::SharedBytes;
-
-use crate::banking_stage::transaction_scheduler::transaction_state_container::StateContainer;
-use crate::banking_stage::transaction_scheduler::transaction_state_container::TransactionViewState;
-use crate::banking_stage::transaction_scheduler::transaction_state_container::TransactionViewStateContainer;
-use crate::banking_stage::transaction_scheduler::transaction_state_container::EXTRA_CAPACITY;
 use crate::verified_bam_packet_batch::VerifiedBamPacketBatch;
-use agave_transaction_view::resolved_transaction_view::ResolvedTransactionView;
-use agave_transaction_view::transaction_version::TransactionVersion;
-use agave_transaction_view::transaction_view::SanitizedTransactionView;
 
-use arrayvec::ArrayVec;
-use crossbeam_channel::{Receiver, RecvTimeoutError, TryRecvError};
-use solana_clock::MAX_PROCESSING_AGE;
-use solana_svm_transaction::svm_message::SVMMessage;
+use crossbeam_channel::{Receiver, RecvTimeoutError};
 
-use solana_accounts_db::account_locks::validate_account_locks;
-
-use solana_fee_structure::FeeBudgetLimits;
-use solana_measure::measure_us;
-
+use jito_protos::proto::bam_types::TransactionCommittedResult;
 // use solana_perf::sigverify::ed25519_verify_cpu;
 use solana_pubkey::Pubkey;
 use solana_runtime::bank::Bank;
-use solana_runtime_transaction::transaction_meta::StaticMeta;
-use solana_svm::transaction_error_metrics::TransactionErrorMetrics;
-use solana_transaction::sanitized::MessageHash;
 
 use std::time::Instant;
 use std::{
@@ -49,10 +29,8 @@ use std::{
 };
 
 use {
-    super::receive_and_buffer::ReceiveAndBuffer,
     crate::banking_stage::decision_maker::BufferedPacketsDecision,
     solana_runtime::bank_forks::BankForks,
-    solana_runtime_transaction::runtime_transaction::RuntimeTransaction,
 };
 
 #[derive(Debug)]
@@ -70,6 +48,9 @@ pub struct BamReceiveAndBuffer {
     bank_forks: Arc<RwLock<BankForks>>,
     #[allow(unused)]
     blacklisted_accounts: HashSet<Pubkey>,
+    bam_priority_graph_container: BamPriorityGraphContainer,
+    exit: Arc<AtomicBool>,
+    decision_maker: DecisionMaker,
 }
 
 impl BamReceiveAndBuffer {
@@ -79,6 +60,9 @@ impl BamReceiveAndBuffer {
         bam_response_handle: BamResponseHandle,
         bank_forks: Arc<RwLock<BankForks>>,
         blacklisted_accounts: HashSet<Pubkey>,
+        bam_priority_graph_container: BamPriorityGraphContainer,
+        exit: Arc<AtomicBool>,
+        decision_maker: DecisionMaker,
     ) -> Self {
         Self {
             bam_enabled,
@@ -86,341 +70,151 @@ impl BamReceiveAndBuffer {
             bam_packet_batch_receiver,
             bank_forks,
             blacklisted_accounts,
+            bam_priority_graph_container,
+            exit,
+            decision_maker,
         }
     }
 
-    fn handle_packet_batch_message(
-        &mut self,
-        container: &mut TransactionViewStateContainer,
-        root_bank: &Bank,
-        working_bank: &Bank,
-        bam_packet_batch: VerifiedBamPacketBatch,
-    ) -> ReceivingStats {
-        let mut stats = ReceivingStats::default();
-
-        let transaction_account_lock_limit = working_bank.get_transaction_account_lock_limit();
-        let mut error_counters = TransactionErrorMetrics::default();
-
-        // The 5 packet check exists when creating the VerifiedBamPacketBatch, but might get removed in the future.
-        // This check exists to ensure that we don't accidentally overflow the transactions ArrayVec below.
-        if bam_packet_batch.packet_batch().len() > EXTRA_CAPACITY {
-            self.bam_response_handle
-                .send_sanitization_error(bam_packet_batch.meta().seq_id, 0);
-            stats.num_dropped_without_parsing += bam_packet_batch.packet_batch().len();
-            return stats;
+    fn maybe_report_stats(stats: &mut ReceivingStats, last_report: &mut Instant) {
+        if stats.num_received > 0 && last_report.elapsed() > Duration::from_secs(1) {
+            // TODO (LB): emit metrics
+            *stats = ReceivingStats::default();
+            *last_report = Instant::now();
         }
+    }
 
-        let mut packet_data = ArrayVec::<_, EXTRA_CAPACITY>::new();
-        packet_data.extend(
-            bam_packet_batch
-                .packet_batch()
-                .iter()
-                .map(|p| p.data(..).unwrap()),
-        );
+    pub(crate) fn run(&self) {
+        let mut stats = ReceivingStats::default();
+        let mut last_report = Instant::now();
+        let mut last_slot = None;
 
-        let lock_results: [_; EXTRA_CAPACITY] = core::array::from_fn(|_| Ok(()));
+        while !self.exit.load(Ordering::Relaxed) {
+            Self::maybe_report_stats(&mut stats, &mut last_report);
 
-        let mut packet_index = 0;
-        let mut insert_map_error = None;
-        match container.try_insert_map_only_with_batch(
-            packet_data.as_slice(),
-            bam_packet_batch.meta().revert_on_error,
-            bam_packet_batch.meta().max_schedule_slot,
-            |bytes| match Self::try_handle_packet(
-                bytes,
-                root_bank,
-                working_bank,
-                transaction_account_lock_limit,
-                &self.blacklisted_accounts,
-            ) {
-                Ok(state) => {
-                    packet_index += 1;
-                    Ok(state)
+            let bam_packet_batch = match self
+                .bam_packet_batch_receiver
+                .recv_timeout(Duration::from_millis(100))
+            {
+                Ok(bam_packet_batch) => bam_packet_batch,
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => {
+                    warn!("BAM packet batch receiver disconnected, exiting...");
+                    break;
                 }
-                Err(PacketHandlingError::Sanitization) => {
-                    insert_map_error = Some((packet_index, PacketHandlingError::Sanitization));
-                    stats.num_dropped_on_parsing_and_sanitization += 1;
-                    packet_index += 1;
-                    Err(())
-                }
-                Err(PacketHandlingError::LockValidation) => {
-                    insert_map_error = Some((packet_index, PacketHandlingError::LockValidation));
-                    stats.num_dropped_on_lock_validation += 1;
-                    packet_index += 1;
-                    Err(())
-                }
-                Err(PacketHandlingError::ComputeBudget) => {
-                    insert_map_error = Some((packet_index, PacketHandlingError::ComputeBudget));
-                    stats.num_dropped_on_compute_budget += 1;
-                    packet_index += 1;
-                    Err(())
-                }
-                Err(PacketHandlingError::BlacklistedAccount) => {
-                    insert_map_error =
-                        Some((packet_index, PacketHandlingError::BlacklistedAccount));
-                    stats.num_dropped_on_blacklisted_account += 1;
-                    packet_index += 1;
-                    Err(())
-                }
-            },
-        ) {
-            Ok(Some(batch_id)) => {
-                let transaction_ids = {
-                    let batch_info = container.get_batch(batch_id).expect("batch must exist");
-                    let mut transaction_ids = ArrayVec::<_, EXTRA_CAPACITY>::new();
-                    transaction_ids.extend(batch_info.transaction_ids.iter().cloned());
-                    transaction_ids
-                };
+            };
 
-                // Note: mega-batching these transaction checks would probably speed things up
-                let mut transactions = ArrayVec::<_, EXTRA_CAPACITY>::new();
-                transactions.extend(transaction_ids.iter().map(|id| {
-                    container
-                        .get_transaction(*id)
-                        .expect("transaction must exist")
-                }));
-                let check_results = working_bank.check_transactions::<RuntimeTransaction<_>>(
-                    &transactions,
-                    &lock_results[..transactions.len()],
-                    MAX_PROCESSING_AGE,
-                    &mut error_counters,
+            // info!("Received sequence id: {:?}", bam_packet_batch.meta().seq_id);
+
+            stats.num_received += bam_packet_batch.packet_batch().len();
+
+            let decision = self.decision_maker.make_consume_or_forward_decision();
+            let new_leader_slot = decision.bank().map(|b| b.slot());
+            if new_leader_slot != last_slot {
+                info!(
+                    "Detected slot change, draining priority graph: {:?}",
+                    new_leader_slot
                 );
-
-                let mut error = None;
-                for (index, (result, _transaction_id)) in
-                    check_results.iter().zip(transaction_ids.iter()).enumerate()
-                {
-                    match result {
-                        Ok(_) => {
-                            if let Err(e) = Consumer::check_fee_payer_unlocked(
-                                working_bank,
-                                transactions[index],
-                                &mut error_counters,
-                            ) {
-                                stats.num_dropped_on_fee_payer += transaction_ids.len();
-                                error = Some((index, e));
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            error = Some((index, e.clone()));
-                            break;
-                        }
-                    }
-                }
-                drop(transactions);
-
-                if let Some((error_index, error)) = error {
-                    container.remove_batch_by_id(batch_id);
-                    self.bam_response_handle.send_not_committed_result(
-                        bam_packet_batch.meta().seq_id,
-                        error_index,
-                        error,
-                    );
-                } else {
-                    container.push_batch_id_into_queue(TransactionPriorityId::new(
-                        seq_id_to_priority(bam_packet_batch.meta().seq_id),
-                        batch_id,
-                    ));
-                }
+                let mut num_drained = 0;
+                self.bam_priority_graph_container
+                    .drain_with_callback(|batch_priority_id| {
+                        let sequence_id = priority_to_seq_id(batch_priority_id.priority);
+                        self.bam_response_handle.send_result(
+                            sequence_id,
+                            false,
+                            vec![TransactionResult::Committed(
+                                TransactionCommittedResult::default(),
+                            )],
+                        );
+                        num_drained += 1;
+                    });
+                info!("Drained {} batches", num_drained);
+                last_slot = new_leader_slot;
             }
-            // Ok(None) means an error occurred during insertion, all of the transactions were removed from the container and insert_map_error is set
-            Ok(None) => {}
-            // container is full, nothing was added
-            Err(()) => {
-                // error!("Container is full, nothing was added");
-                stats.num_dropped_on_capacity += bam_packet_batch.packet_batch().len();
-                self.bam_response_handle
-                    .send_container_full_txn_batch_result(bam_packet_batch.meta().seq_id);
-            }
-        }
 
-        // TODO (LB): send back specific error to BAM
-        if let Some((index, error)) = insert_map_error {
-            error!("Sanitization error: {:?}", error);
-            self.bam_response_handle
-                .send_sanitization_error(bam_packet_batch.meta().seq_id, index);
-        }
-
-        stats.num_buffered += bam_packet_batch.packet_batch().len();
-
-        stats
-    }
-
-    // See TransactionViewReceiveAndBuffer::try_handle_packet
-    fn try_handle_packet(
-        bytes: SharedBytes,
-        root_bank: &Bank,
-        working_bank: &Bank,
-        transaction_account_lock_limit: usize,
-        blacklisted_accounts: &HashSet<Pubkey>,
-    ) -> Result<TransactionViewState, PacketHandlingError> {
-        let alt_bank = root_bank;
-        let sanitized_epoch = root_bank.epoch();
-
-        // Parsing and basic sanitization checks
-        let Ok(view) = SanitizedTransactionView::try_new_sanitized(bytes) else {
-            return Err(PacketHandlingError::Sanitization);
-        };
-
-        let Ok(view) = RuntimeTransaction::<SanitizedTransactionView<_>>::try_from(
-            view,
-            MessageHash::Compute,
-            None,
-        ) else {
-            return Err(PacketHandlingError::Sanitization);
-        };
-
-        // Discard non-vote packets if in vote-only mode.
-        if root_bank.vote_only_bank() && !view.is_simple_vote_transaction() {
-            return Err(PacketHandlingError::Sanitization);
-        }
-
-        // Check if the transaction has too many account locks before loading ALTs
-        if view.total_num_accounts() as usize > transaction_account_lock_limit {
-            return Err(PacketHandlingError::LockValidation);
-        }
-
-        // Load addresses for transaction.
-        let load_addresses_result = match view.version() {
-            TransactionVersion::Legacy => Ok((None, u64::MAX)),
-            TransactionVersion::V0 => alt_bank
-                .load_addresses_from_ref(view.address_table_lookup_iter())
-                .map(|(loaded_addresses, deactivation_slot)| {
-                    (Some(loaded_addresses), deactivation_slot)
-                }),
-        };
-        let Ok((loaded_addresses, deactivation_slot)) = load_addresses_result else {
-            return Err(PacketHandlingError::Sanitization);
-        };
-
-        let Ok(view) = RuntimeTransaction::<ResolvedTransactionView<_>>::try_from(
-            view,
-            loaded_addresses,
-            root_bank.get_reserved_account_keys(),
-        ) else {
-            return Err(PacketHandlingError::Sanitization);
-        };
-
-        if validate_account_locks(view.account_keys(), transaction_account_lock_limit).is_err() {
-            return Err(PacketHandlingError::LockValidation);
-        }
-
-        if view
-            .account_keys()
-            .iter()
-            .any(|account| blacklisted_accounts.contains(account))
-        {
-            return Err(PacketHandlingError::BlacklistedAccount);
-        }
-
-        let Ok(compute_budget_limits) = view
-            .compute_budget_instruction_details()
-            .sanitize_and_convert_to_compute_budget_limits(&working_bank.feature_set)
-        else {
-            return Err(PacketHandlingError::ComputeBudget);
-        };
-
-        let max_age = calculate_max_age(sanitized_epoch, deactivation_slot, alt_bank.slot());
-        let fee_budget_limits = FeeBudgetLimits::from(compute_budget_limits);
-        let (priority, cost) = calculate_priority_and_cost(&view, &fee_budget_limits, working_bank);
-
-        Ok(TransactionState::new(view, max_age, priority, cost))
-    }
-}
-
-impl ReceiveAndBuffer for BamReceiveAndBuffer {
-    type Transaction = RuntimeTransaction<ResolvedTransactionView<SharedBytes>>;
-    type Container = TransactionViewStateContainer;
-
-    fn receive_and_buffer_packets(
-        &mut self,
-        container: &mut Self::Container,
-        decision: &BufferedPacketsDecision,
-    ) -> Result<ReceivingStats, DisconnectedError> {
-        let is_bam_enabled = self.bam_enabled.load(Ordering::Relaxed);
-        let mut stats = ReceivingStats::default();
-
-        let (root_bank, working_bank) = {
-            let bank_forks = self.bank_forks.read().unwrap();
-            let root_bank = bank_forks.root_bank();
-            let working_bank = bank_forks.working_bank();
-            (root_bank, working_bank)
-        };
-
-        match decision {
-            BufferedPacketsDecision::Consume(_) | BufferedPacketsDecision::Hold => {
-                loop {
-                    let bam_packet_batch = match self.bam_packet_batch_receiver.try_recv() {
-                        Ok(bam_packet_batch) => bam_packet_batch,
-                        Err(TryRecvError::Disconnected) => return Err(DisconnectedError),
-                        Err(TryRecvError::Empty) => {
-                            // If the channel is empty, work here is done.
-                            break;
-                        }
-                    };
-
-                    // If BAM is not enabled, drain the channel
-                    if !is_bam_enabled {
-                        stats.num_dropped_without_parsing += bam_packet_batch.packet_batch().len();
-                        continue;
-                    }
-
-                    stats.num_received += bam_packet_batch.packet_batch().len();
-
-                    // Throw away batches that are marked as discard from bad signature
-                    if bam_packet_batch.meta().discard {
-                        self.bam_response_handle
-                            .send_bad_signature(bam_packet_batch.meta().seq_id);
-                        stats.num_dropped_without_parsing += bam_packet_batch.packet_batch().len();
-                        continue;
-                    }
-
-                    // Throw away batches that are outside the maximum schedulable slot
-                    if bam_packet_batch.meta().max_schedule_slot > working_bank.slot() {
-                        self.bam_response_handle
-                            .send_outside_leader_slot_bundle_result(bam_packet_batch.meta().seq_id);
-                        stats.num_dropped_without_parsing += bam_packet_batch.packet_batch().len();
-                        continue;
-                    }
+            match decision {
+                BufferedPacketsDecision::Consume(working_bank) => {
+                    let root_bank = self.bank_forks.read().unwrap().root_bank();
 
                     stats.accumulate(self.handle_packet_batch_message(
-                        container,
                         &root_bank,
                         &working_bank,
                         bam_packet_batch,
                     ));
-                }
-            }
-            BufferedPacketsDecision::ForwardAndHold | BufferedPacketsDecision::Forward => {
-                // Send back any batches that were received while in Forward/Hold state
-                // Don't sleep too long here so one can pick up new bank fast
-                let deadline = Instant::now() + Duration::from_millis(10);
-                loop {
-                    let (batch, receive_time_us) =
-                        measure_us!(self.bam_packet_batch_receiver.recv_deadline(deadline));
-                    stats.receive_time_us += receive_time_us;
-
-                    let batch = match batch {
-                        Ok(batch) => batch,
-                        Err(RecvTimeoutError::Disconnected) => return Err(DisconnectedError),
-                        Err(RecvTimeoutError::Timeout) => {
-                            break;
+                    while !working_bank.is_complete() {
+                        if let Ok(bam_packet_batch) = self.bam_packet_batch_receiver.try_recv() {
+                            stats.accumulate(self.handle_packet_batch_message(
+                                &root_bank,
+                                &working_bank,
+                                bam_packet_batch,
+                            ));
                         }
-                    };
+                    }
+                }
+                BufferedPacketsDecision::Forward => {
+                    stats.num_dropped_without_parsing += bam_packet_batch.packet_batch().len();
                     self.bam_response_handle
-                        .send_outside_leader_slot_bundle_result(batch.meta().seq_id);
-                    stats.num_dropped_without_parsing += 1;
+                        .send_outside_leader_slot_bundle_result(bam_packet_batch.meta().seq_id);
+                }
+                BufferedPacketsDecision::ForwardAndHold => {
+                    // info!("no bank brother");
+                    stats.num_dropped_without_parsing += bam_packet_batch.packet_batch().len();
+                    self.bam_response_handle
+                        .send_outside_leader_slot_bundle_result(bam_packet_batch.meta().seq_id);
+                }
+                BufferedPacketsDecision::Hold => {
+                    // info!("no bank brother");
+                    stats.num_dropped_without_parsing += bam_packet_batch.packet_batch().len();
+                    self.bam_response_handle
+                        .send_outside_leader_slot_bundle_result(bam_packet_batch.meta().seq_id);
                 }
             }
         }
+    }
 
-        info!(
-            "Dropped without parsing: {:?}",
-            stats.num_dropped_without_parsing
-        );
+    fn handle_packet_batch_message(
+        &self,
+        root_bank: &Arc<Bank>,
+        working_bank: &Arc<Bank>,
+        bam_packet_batch: VerifiedBamPacketBatch,
+    ) -> ReceivingStats {
+        let mut stats = ReceivingStats::default();
 
-        Ok(stats)
+        let seq_id = bam_packet_batch.meta().seq_id;
+        let revert_on_error = bam_packet_batch.meta().revert_on_error;
+
+        // Inserts into both the container and the priority graph
+        let InsertResult {
+            result,
+            receiving_stats,
+        } = self
+            .bam_priority_graph_container
+            .try_insert_and_notify_workers(
+                bam_packet_batch,
+                root_bank,
+                working_bank,
+                &self.blacklisted_accounts,
+            );
+
+        match result {
+            Ok(()) => {
+                // let the slot change drain this guy
+            }
+            Err((index, InsertError::BadSignature)) => {
+                self.bam_response_handle.send_bad_signature(seq_id);
+            }
+            Err((index, InsertError::OutsideLeaderSlot)) => {
+                self.bam_response_handle
+                    .send_outside_leader_slot_bundle_result(seq_id);
+            }
+            Err((index, e)) => {
+                self.bam_response_handle
+                    .send_sanitization_error(seq_id, index);
+            }
+        }
+        stats.accumulate(receiving_stats);
+
+        stats
     }
 }
 
