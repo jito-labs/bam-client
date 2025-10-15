@@ -79,6 +79,7 @@ struct BankStats {
     start_time: Instant,
 
     sent_transactions_and_results: HashMap<u32, BamTransactionAndResult>,
+    num_received_results: usize,
 }
 
 impl BankStats {
@@ -87,6 +88,7 @@ impl BankStats {
             bank_slot,
             start_time: Instant::now(),
             sent_transactions_and_results: HashMap::with_capacity(50_000),
+            num_received_results: 0,
         }
     }
 
@@ -214,6 +216,7 @@ impl MockBamServer {
                         time_received: Instant::now(),
                         result,
                     });
+                    bank_stats.num_received_results += 1;
                 }
                 _msg => {
                     panic!("unexpected message");
@@ -226,21 +229,16 @@ impl MockBamServer {
         outbound_receiver: &Receiver<BamOutboundMessage>,
         bank_stats: &mut BankStats,
     ) {
-        loop {
-            let num_results_received = bank_stats
-                .sent_transactions_and_results
-                .iter()
-                .filter(|(_, result)| result.result.is_some())
-                .count();
-            if num_results_received == bank_stats.sent_transactions_and_results.len() {
-                break;
-            }
-            info!(
-                "waiting for {} results",
-                bank_stats.sent_transactions_and_results.len() - num_results_received
-            );
+        let now = Instant::now();
+        let num_waiting =
+            bank_stats.sent_transactions_and_results.len() - bank_stats.num_received_results;
+        while bank_stats.num_received_results < bank_stats.sent_transactions_and_results.len() {
             Self::handle_outbound_messages(outbound_receiver, bank_stats);
         }
+        println!(
+            "time taken to receive {num_waiting} results: {:?}",
+            now.elapsed()
+        );
     }
 
     fn send_transactions(

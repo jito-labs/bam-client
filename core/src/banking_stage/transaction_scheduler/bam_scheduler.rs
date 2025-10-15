@@ -59,8 +59,6 @@ pub struct BamScheduler<Tx: TransactionWithMeta> {
     prio_graph: SchedulerPrioGraph,
     slot: Option<Slot>,
     bank_forks: Arc<RwLock<BankForks>>,
-
-    last_schedule_time: Instant,
 }
 
 impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
@@ -79,7 +77,6 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             prio_graph: PrioGraph::new(|id, _graph_node| *id),
             slot: None,
             bank_forks,
-            last_schedule_time: Instant::now(),
         }
     }
 
@@ -196,16 +193,6 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             };
             let _ = self.consume_work_sender.send(work);
 
-            let now = Instant::now();
-            let elapsed_since_last_schedule = self.last_schedule_time.elapsed().as_nanos();
-            self.last_schedule_time = now;
-
-            info!(
-                "elapsed_since_last_schedule: {}ns len: {}",
-                elapsed_since_last_schedule,
-                self.consume_work_sender.len(),
-            );
-
             self.inflight_batches.insert(
                 batch_priority_id.id as u64,
                 InflightBatchInfo { batch_priority_id },
@@ -268,23 +255,17 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
 
         // On slot boundaries, all the transactions are removed from the container and the priority graph is cleared.
         // Anything left in the container at the end of the slot is outside the leader slot window.
+        let start = Instant::now();
         while let Some((next_batch_id, _)) = self.prio_graph.pop_and_unblock() {
-            // info!("popping batch: {}", next_batch_id.id);
             container.remove_batch_by_id(next_batch_id.id);
             self.bam_response_handle
                 .send_outside_leader_slot_bundle_result(priority_to_seq_id(next_batch_id.priority));
         }
-
-        // info!(
-        //     "pqueue size: {}, buffer size: {}, batch queue size: {}, batch buffer size: {}",
-        //     container.queue_size(),
-        //     container.buffer_size(),
-        //     container.batch_queue_size(),
-        //     container.batch_buffer_size(),
-        // );
-
-        // self.prio_graph.clear();
-
+        info!(
+            "Done popping batches. Time taken: {:?}us",
+            start.elapsed().as_micros()
+        );
+        self.prio_graph.clear();
         self.report_histogram_metrics();
     }
 

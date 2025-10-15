@@ -415,11 +415,6 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
             }
         }
 
-        info!(
-            "Dropped without parsing: {:?}",
-            stats.num_dropped_without_parsing
-        );
-
         Ok(stats)
     }
 }
