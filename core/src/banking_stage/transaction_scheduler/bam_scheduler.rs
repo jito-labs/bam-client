@@ -147,7 +147,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         num_scheduled: &mut usize,
         num_filtered_out: &mut usize,
     ) {
-        const MAX_INFLIGHT_BATCHES: usize = 500;
+        const MAX_INFLIGHT_BATCHES: usize = 100;
 
         let working_bank = self.bank_forks.read().unwrap().working_bank();
 
@@ -212,6 +212,10 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 respond_with_extra_info: true,
                 max_schedule_slot: Some(max_schedule_slot),
             };
+            // println!(
+            //     "consume_work_sender len: {}",
+            //     self.consume_work_sender.len()
+            // );
             let _ = self.consume_work_sender.send(work);
             *num_scheduled += transaction_ids.len();
 
@@ -220,7 +224,6 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 InflightBatchInfo { batch_priority_id },
             );
 
-            // Limit how much work needs to come back from the workers, which is helpful at slot boundaries under high load.
             if self.inflight_batches.len() > MAX_INFLIGHT_BATCHES {
                 break;
             }
@@ -478,6 +481,10 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
         self.maybe_bank_boundary_actions(decision, container);
 
         let num_transactions = 0;
+        // println!(
+        //     "finished_consume_work_receiver len: {}",
+        //     self.finished_consume_work_receiver.len()
+        // );
         while let Ok(result) = self.finished_consume_work_receiver.try_recv() {
             let inflight_batch_info = self
                 .inflight_batches

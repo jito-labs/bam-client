@@ -236,12 +236,18 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         let Some(tip_processing_dependencies) = &self.tip_processing_dependencies else {
             return true;
         };
+
         let TipProcessingDependencies {
             tip_manager,
             last_tip_updated_slot,
             block_builder_fee_info,
             cluster_info,
         } = tip_processing_dependencies;
+
+        let mut last_tip_updated_slot_guard = last_tip_updated_slot.lock().unwrap();
+        if bank.slot() == *last_tip_updated_slot_guard {
+            return true;
+        }
 
         // Return true if no tip accounts touched
         let tip_accounts = tip_manager.get_tip_accounts();
@@ -250,11 +256,6 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
                 .iter()
                 .any(|key| tip_accounts.contains(key))
         }) {
-            return true;
-        }
-
-        let mut last_tip_updated_slot_guard = last_tip_updated_slot.lock().unwrap();
-        if bank.slot() == *last_tip_updated_slot_guard {
             return true;
         }
 
