@@ -700,7 +700,7 @@ impl BankingStage {
 
             thread_hdls.push(
                 Builder::new()
-                    .name(format!("solCoWorker{id:02}"))
+                    .name(format!("solBamCoWorker{id:02}"))
                     .spawn(move || {
                         let _ = consume_worker.run(|_| 0);
                     })

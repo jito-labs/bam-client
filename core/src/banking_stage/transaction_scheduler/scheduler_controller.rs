@@ -118,6 +118,7 @@ where
             self.timing_metrics
                 .maybe_report_and_reset_slot(new_leader_slot);
 
+            // println!("loop");
             self.receive_completed(&decision)?;
             self.process_transactions(&decision)?;
             if self.receive_and_buffer_packets(&decision).is_err() {
