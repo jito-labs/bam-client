@@ -52,7 +52,6 @@ struct InflightBatchInfo {
 
 pub struct BamScheduler<Tx: TransactionWithMeta> {
     consume_work_sender: Sender<ConsumeWork<Tx>>,
-    consume_work_receiver: Receiver<ConsumeWork<Tx>>,
     finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
     bam_response_handle: BamResponseHandle,
 
@@ -68,7 +67,6 @@ pub struct BamScheduler<Tx: TransactionWithMeta> {
 impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
     pub fn new(
         consume_work_sender: Sender<ConsumeWork<Tx>>,
-        consume_work_receiver: Receiver<ConsumeWork<Tx>>,
         finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
         bam_response_handle: BamResponseHandle,
         bank_forks: Arc<RwLock<BankForks>>,
@@ -90,7 +88,6 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
 
         Self {
             consume_work_sender,
-            consume_work_receiver,
             finished_consume_work_receiver,
             bam_response_handle,
             inflight_batches: HashMap::with_capacity(capacity),
@@ -150,6 +147,8 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         num_scheduled: &mut usize,
         num_filtered_out: &mut usize,
     ) {
+        const MAX_INFLIGHT_BATCHES: usize = 500;
+
         let working_bank = self.bank_forks.read().unwrap().working_bank();
 
         while let Some(batch_priority_id) = self.prio_graph.pop() {
@@ -214,13 +213,17 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 max_schedule_slot: Some(max_schedule_slot),
             };
             let _ = self.consume_work_sender.send(work);
+            *num_scheduled += transaction_ids.len();
 
             self.inflight_batches.insert(
                 batch_priority_id.id as u64,
                 InflightBatchInfo { batch_priority_id },
             );
 
-            *num_scheduled += transaction_ids.len();
+            // Limit how much work needs to come back from the workers, which is helpful at slot boundaries under high load.
+            if self.inflight_batches.len() > MAX_INFLIGHT_BATCHES {
+                break;
+            }
         }
     }
 
@@ -248,33 +251,8 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             self.slot = None;
         }
 
-        // First, let's drain the consume_work_receiver.
-        // Given it's a new slot, there might be a lot of work enqueued in the consume_work channels. Given the multi-threaded nature of this scheduler,
-        // This work enqueed can take awhile to come back. Instead of waiting for it to come back, it's intercepted here and the results are sent back to BAM.
-        let mut num_drained = 0;
-        while let Ok(work) = self.consume_work_receiver.try_recv() {
-            let batch_info = self
-                .inflight_batches
-                .remove(&work.batch_id.0)
-                .expect("batch must be inflight");
-            self.prio_graph_ids.remove(&batch_info.batch_priority_id);
-
-            // the container will be cleared later
-            // container.remove_batch_by_id(batch_info.batch_priority_id.id);
-            // self.prio_graph.unblock(&batch_info.batch_priority_id);
-            self.bam_response_handle
-                .send_outside_leader_slot_bundle_result(priority_to_seq_id(
-                    batch_info.batch_priority_id.priority,
-                ));
-            num_drained += 1;
-        }
-        println!("drained {num_drained} work from the consume_work_receiver");
-
-        debug!(
-            "Waiting for {} pending results",
-            self.inflight_batches.len()
-        );
         let start = Instant::now();
+        let mut num_drained = 0;
         while !self.inflight_batches.is_empty() {
             let Ok(work) = self.finished_consume_work_receiver.recv() else {
                 break;
@@ -293,9 +271,10 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 .send_outside_leader_slot_bundle_result(priority_to_seq_id(
                     batch_info.batch_priority_id.priority,
                 ));
+            num_drained += 1;
         }
-        debug!(
-            "Done waiting for anything pending. Time taken: {:?}us",
+        println!(
+            "inflight_batches: drained {num_drained} batches in {:?}us",
             start.elapsed().as_micros()
         );
 
@@ -303,23 +282,32 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         // Anything left in the container at the end of the slot is outside the leader slot window.
         // The prio_graph_ids is used instead of the priority graph pop_and_unblock because its much faster.
         let start = Instant::now();
+        let mut num_drained = 0;
         for next_batch_id in self.prio_graph_ids.drain() {
             // container.remove_batch_by_id(next_batch_id.id);
             self.bam_response_handle
                 .send_outside_leader_slot_bundle_result(priority_to_seq_id(next_batch_id.priority));
+            num_drained += 1;
         }
+        println!(
+            "prio_graph_ids: drained {num_drained} batches in {:?}us",
+            start.elapsed().as_micros()
+        );
 
         // Anything left in the container was pushed into the queue but hasn't been pulled into the priority graph yet
+        let mut num_drained = 0;
+        let start = Instant::now();
         while let Some(next_batch_id) = container.pop_batch() {
             // container.remove_batch_by_id(next_batch_id.id);
             self.bam_response_handle
                 .send_outside_leader_slot_bundle_result(priority_to_seq_id(next_batch_id.priority));
+            num_drained += 1;
         }
-
-        debug!(
-            "Done popping batches. Time taken: {:?}us",
+        println!(
+            "container: drained {num_drained} batches in {:?}us",
             start.elapsed().as_micros()
         );
+
         debug!(
             "container size: {}, batch buffer size: {}, queue size: {}, batch queue size: {}",
             container.buffer_size(),

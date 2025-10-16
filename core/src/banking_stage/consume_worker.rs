@@ -156,7 +156,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
 
             if let Some(max_schedule_slot) = work.max_schedule_slot {
                 if max_schedule_slot < bank.slot() {
-                    return self.retry(work);
+                    return self.retry_drain(work);
                 }
             }
 

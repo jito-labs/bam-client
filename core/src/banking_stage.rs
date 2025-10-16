@@ -718,7 +718,6 @@ impl BankingStage {
                         RuntimeTransaction<ResolvedTransactionView<SharedBytes>>,
                     >::new(
                         work_sender,
-                        work_receiver,
                         finished_work_receiver,
                         bam_response_handle.clone(),
                         context.bank_forks.clone(),
