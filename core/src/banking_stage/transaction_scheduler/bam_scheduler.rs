@@ -175,32 +175,32 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
 
             // Save bounce between between the coordinator, worker, and back for common errors.
             // It's expected that BAM will handle most of these errors, but durable nonces are annoying.
-            let lock_results = (0..transactions.len())
-                .map(|_| Ok(()))
-                .collect::<Vec<solana_transaction_error::TransactionResult<()>>>();
-            let check_result = working_bank.check_transactions::<Tx>(
-                &transactions,
-                lock_results.as_slice(),
-                MAX_PROCESSING_AGE,
-                &mut TransactionErrorMetrics::default(),
-            );
-            if let Some((index, err)) = check_result
-                .iter()
-                .find_position(|res| res.is_err())
-                .map(|(i, res)| (i, res.as_ref().err().unwrap()))
-            {
-                container.remove_batch_by_id(batch_priority_id.id);
-                self.prio_graph.unblock(&batch_priority_id);
+            // let lock_results = (0..transactions.len())
+            //     .map(|_| Ok(()))
+            //     .collect::<Vec<solana_transaction_error::TransactionResult<()>>>();
+            // let check_result = working_bank.check_transactions::<Tx>(
+            //     &transactions,
+            //     lock_results.as_slice(),
+            //     MAX_PROCESSING_AGE,
+            //     &mut TransactionErrorMetrics::default(),
+            // );
+            // if let Some((index, err)) = check_result
+            //     .iter()
+            //     .find_position(|res| res.is_err())
+            //     .map(|(i, res)| (i, res.as_ref().err().unwrap()))
+            // {
+            //     container.remove_batch_by_id(batch_priority_id.id);
+            //     self.prio_graph.unblock(&batch_priority_id);
 
-                self.bam_response_handle.send_not_committed_result(
-                    priority_to_seq_id(batch_priority_id.priority),
-                    index,
-                    err.clone(),
-                );
+            //     self.bam_response_handle.send_not_committed_result(
+            //         priority_to_seq_id(batch_priority_id.priority),
+            //         index,
+            //         err.clone(),
+            //     );
 
-                *num_filtered_out += transaction_ids.len();
-                continue;
-            }
+            //     *num_filtered_out += transaction_ids.len();
+            //     continue;
+            // }
 
             // Schedule it
             let work = ConsumeWork {

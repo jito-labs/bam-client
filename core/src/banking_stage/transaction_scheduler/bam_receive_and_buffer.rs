@@ -118,7 +118,7 @@ impl BamReceiveAndBuffer {
                 .map(|p| p.data(..).unwrap()),
         );
 
-        let lock_results: [_; EXTRA_CAPACITY] = core::array::from_fn(|_| Ok(()));
+        // let lock_results: [_; EXTRA_CAPACITY] = core::array::from_fn(|_| Ok(()));
 
         let mut packet_index = 0;
         let mut insert_map_error = None;
@@ -172,43 +172,44 @@ impl BamReceiveAndBuffer {
                     transaction_ids
                 };
 
-                // Note: mega-batching these transaction checks would probably speed things up
-                let mut transactions = ArrayVec::<_, EXTRA_CAPACITY>::new();
-                transactions.extend(transaction_ids.iter().map(|id| {
-                    container
-                        .get_transaction(*id)
-                        .expect("transaction must exist")
-                }));
-                let check_results = working_bank.check_transactions::<RuntimeTransaction<_>>(
-                    &transactions,
-                    &lock_results[..transactions.len()],
-                    MAX_PROCESSING_AGE,
-                    &mut error_counters,
-                );
-
                 let mut error = None;
-                for (index, (result, _transaction_id)) in
-                    check_results.iter().zip(transaction_ids.iter()).enumerate()
-                {
-                    match result {
-                        Ok(_) => {
-                            if let Err(e) = Consumer::check_fee_payer_unlocked(
-                                working_bank,
-                                transactions[index],
-                                &mut error_counters,
-                            ) {
-                                stats.num_dropped_on_fee_payer += transaction_ids.len();
-                                error = Some((index, e));
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            error = Some((index, e.clone()));
-                            break;
-                        }
-                    }
-                }
-                drop(transactions);
+
+                // Note: mega-batching these transaction checks would probably speed things up
+                // let mut transactions = ArrayVec::<_, EXTRA_CAPACITY>::new();
+                // transactions.extend(transaction_ids.iter().map(|id| {
+                //     container
+                //         .get_transaction(*id)
+                //         .expect("transaction must exist")
+                // }));
+                // let check_results = working_bank.check_transactions::<RuntimeTransaction<_>>(
+                //     &transactions,
+                //     &lock_results[..transactions.len()],
+                //     MAX_PROCESSING_AGE,
+                //     &mut error_counters,
+                // );
+
+                // for (index, (result, _transaction_id)) in
+                //     check_results.iter().zip(transaction_ids.iter()).enumerate()
+                // {
+                //     match result {
+                //         Ok(_) => {
+                //             if let Err(e) = Consumer::check_fee_payer_unlocked(
+                //                 working_bank,
+                //                 transactions[index],
+                //                 &mut error_counters,
+                //             ) {
+                //                 stats.num_dropped_on_fee_payer += transaction_ids.len();
+                //                 error = Some((index, e));
+                //                 break;
+                //             }
+                //         }
+                //         Err(e) => {
+                //             error = Some((index, e.clone()));
+                //             break;
+                //         }
+                //     }
+                // }
+                // drop(transactions);
 
                 if let Some((error_index, error)) = error {
                     container.remove_batch_by_id(batch_id);
