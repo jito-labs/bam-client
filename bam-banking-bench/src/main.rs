@@ -120,6 +120,11 @@ fn main() {
     });
 
     let shared_working_bank = poh_recorder.read().unwrap().shared_working_bank();
+    while shared_working_bank.load().is_none() {
+        println!("waiting for working bank before starting...");
+        sleep(Duration::from_millis(100));
+    }
+
     let mock_bam_server = MockBamServer::run(
         batch_sender,
         outbound_receiver,
@@ -201,7 +206,7 @@ fn bank_setting_loop(
 
     while !exit.load(Ordering::Relaxed) {
         if let Ok((_bank, (entry, _tick_height))) =
-            signal_receiver.recv_timeout(Duration::from_millis(10))
+            signal_receiver.recv_timeout(Duration::from_millis(1))
         {
             total_txs += entry.transactions.len();
         }

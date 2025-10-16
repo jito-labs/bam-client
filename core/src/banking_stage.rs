@@ -28,7 +28,7 @@ use {
     agave_transaction_view::resolved_transaction_view::ResolvedTransactionView,
     conditional_mod::conditional_vis_mod,
     consumer::TipProcessingDependencies,
-    crossbeam_channel::{bounded, unbounded, Receiver, Sender},
+    crossbeam_channel::{unbounded, Receiver, Sender},
     histogram::Histogram,
     solana_gossip::{cluster_info::ClusterInfo, contact_info::ContactInfoQuery},
     solana_ledger::blockstore_processor::TransactionStatusSender,
@@ -671,8 +671,9 @@ impl BankingStage {
         const NUM_BAM_WORKERS: usize = 12;
         let num_workers = NUM_BAM_WORKERS;
 
-        let (work_sender, work_receiver) = bounded(10_000);
-        let (finished_work_sender, finished_work_receiver) = bounded(10_000);
+        // It's very important these channels are unbounded because if not, you can end up in a deadlock inside the consume worker
+        let (work_sender, work_receiver) = unbounded();
+        let (finished_work_sender, finished_work_receiver) = unbounded();
 
         // Spawn the worker threads
         let mut worker_metrics = Vec::with_capacity(num_workers);
@@ -717,6 +718,7 @@ impl BankingStage {
                         RuntimeTransaction<ResolvedTransactionView<SharedBytes>>,
                     >::new(
                         work_sender,
+                        work_receiver,
                         finished_work_receiver,
                         bam_response_handle.clone(),
                         context.bank_forks.clone(),

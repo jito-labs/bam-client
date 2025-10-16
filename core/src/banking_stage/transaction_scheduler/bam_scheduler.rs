@@ -9,6 +9,7 @@ use crate::banking_stage::transaction_scheduler::scheduler_common::SchedulingCom
 use crate::banking_stage::transaction_scheduler::transaction_state::TransactionState;
 use crate::banking_stage::transaction_scheduler::transaction_state_container::BatchInfo;
 
+use ahash::{HashSet, HashSetExt};
 use itertools::Itertools;
 use solana_clock::{Slot, MAX_PROCESSING_AGE};
 use solana_runtime::bank_forks::BankForks;
@@ -51,6 +52,7 @@ struct InflightBatchInfo {
 
 pub struct BamScheduler<Tx: TransactionWithMeta> {
     consume_work_sender: Sender<ConsumeWork<Tx>>,
+    consume_work_receiver: Receiver<ConsumeWork<Tx>>,
     finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
     bam_response_handle: BamResponseHandle,
 
@@ -59,24 +61,43 @@ pub struct BamScheduler<Tx: TransactionWithMeta> {
     prio_graph: SchedulerPrioGraph,
     slot: Option<Slot>,
     bank_forks: Arc<RwLock<BankForks>>,
+    // pop_and_unblock() on the priority graph is slow at slot boundary, so we store the ids here to avoid the slow path.
+    prio_graph_ids: HashSet<TransactionPriorityId>,
 }
 
 impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
     pub fn new(
         consume_work_sender: Sender<ConsumeWork<Tx>>,
+        consume_work_receiver: Receiver<ConsumeWork<Tx>>,
         finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
         bam_response_handle: BamResponseHandle,
         bank_forks: Arc<RwLock<BankForks>>,
     ) -> Self {
         let capacity = consume_work_sender.capacity().unwrap_or(1024);
+
+        // Scheduler deadlock can occur when using bounded channels. The scheduler can enqueue too many tranasctions to the consumer, but
+        // the consumer can get blocked on a bounded finished_consume_work channel since the loop uses a blocking send.
+        // By using unbounded channels, we avoid this deadlock.
+        // Alternatively, one could check to make sure the finished_consume_work_receiver isn't full in the loop.
+        assert!(
+            finished_consume_work_receiver.capacity().is_none(),
+            "finished_consume_work_receiver must be unbounded to avoid scheduler deadlock"
+        );
+        assert!(
+            consume_work_sender.capacity().is_none(),
+            "consume_work_sender must be unbounded to avoid scheduler deadlock"
+        );
+
         Self {
             consume_work_sender,
+            consume_work_receiver,
             finished_consume_work_receiver,
             bam_response_handle,
             inflight_batches: HashMap::with_capacity(capacity),
             prio_graph: PrioGraph::new(|id, _graph_node| *id),
             slot: None,
             bank_forks,
+            prio_graph_ids: HashSet::with_capacity(capacity),
         }
     }
 
@@ -118,6 +139,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 next_batch_id,
                 Self::get_transactions_account_access(txns.into_iter()),
             );
+            self.prio_graph_ids.insert(next_batch_id);
         }
     }
 
@@ -226,8 +248,29 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             self.slot = None;
         }
 
-        // It's assumed that all accounting for inflight batches is correct
-        info!(
+        // First, let's drain the consume_work_receiver.
+        // Given it's a new slot, there might be a lot of work enqueued in the consume_work channels. Given the multi-threaded nature of this scheduler,
+        // This work enqueed can take awhile to come back. Instead of waiting for it to come back, it's intercepted here and the results are sent back to BAM.
+        let mut num_drained = 0;
+        while let Ok(work) = self.consume_work_receiver.try_recv() {
+            let batch_info = self
+                .inflight_batches
+                .remove(&work.batch_id.0)
+                .expect("batch must be inflight");
+            self.prio_graph_ids.remove(&batch_info.batch_priority_id);
+
+            // the container will be cleared later
+            // container.remove_batch_by_id(batch_info.batch_priority_id.id);
+            // self.prio_graph.unblock(&batch_info.batch_priority_id);
+            self.bam_response_handle
+                .send_outside_leader_slot_bundle_result(priority_to_seq_id(
+                    batch_info.batch_priority_id.priority,
+                ));
+            num_drained += 1;
+        }
+        println!("drained {num_drained} work from the consume_work_receiver");
+
+        debug!(
             "Waiting for {} pending results",
             self.inflight_batches.len()
         );
@@ -240,32 +283,58 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 .inflight_batches
                 .remove(&work.work.batch_id.0)
                 .expect("batch must be inflight");
+            self.prio_graph_ids.remove(&batch_info.batch_priority_id);
 
-            container.remove_batch_by_id(batch_info.batch_priority_id.id);
+            // the container and the priority graph will be cleared later
+            // container.remove_batch_by_id(batch_info.batch_priority_id.id);
+            // self.prio_graph.unblock(&batch_info.batch_priority_id);
+
             self.bam_response_handle
                 .send_outside_leader_slot_bundle_result(priority_to_seq_id(
                     batch_info.batch_priority_id.priority,
                 ));
-            self.prio_graph.unblock(&batch_info.batch_priority_id);
         }
-        info!(
+        debug!(
             "Done waiting for anything pending. Time taken: {:?}us",
             start.elapsed().as_micros()
         );
 
         // On slot boundaries, all the transactions are removed from the container and the priority graph is cleared.
         // Anything left in the container at the end of the slot is outside the leader slot window.
+        // The prio_graph_ids is used instead of the priority graph pop_and_unblock because its much faster.
         let start = Instant::now();
-        while let Some((next_batch_id, _)) = self.prio_graph.pop_and_unblock() {
-            container.remove_batch_by_id(next_batch_id.id);
+        for next_batch_id in self.prio_graph_ids.drain() {
+            // container.remove_batch_by_id(next_batch_id.id);
             self.bam_response_handle
                 .send_outside_leader_slot_bundle_result(priority_to_seq_id(next_batch_id.priority));
         }
-        info!(
+
+        // Anything left in the container was pushed into the queue but hasn't been pulled into the priority graph yet
+        while let Some(next_batch_id) = container.pop_batch() {
+            // container.remove_batch_by_id(next_batch_id.id);
+            self.bam_response_handle
+                .send_outside_leader_slot_bundle_result(priority_to_seq_id(next_batch_id.priority));
+        }
+
+        debug!(
             "Done popping batches. Time taken: {:?}us",
             start.elapsed().as_micros()
         );
+        debug!(
+            "container size: {}, batch buffer size: {}, queue size: {}, batch queue size: {}",
+            container.buffer_size(),
+            container.batch_buffer_size(),
+            container.queue_size(),
+            container.batch_queue_size()
+        );
+
+        // assert_eq!(container.batch_buffer_size(), 0);
+        // assert_eq!(container.batch_queue_size(), 0);
+        // assert_eq!(container.buffer_size(), 0);
+        // assert_eq!(container.queue_size(), 0);
+
         self.prio_graph.clear();
+        container.clear();
         self.report_histogram_metrics();
     }
 
@@ -429,6 +498,8 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
 
             self.prio_graph
                 .unblock(&inflight_batch_info.batch_priority_id);
+            self.prio_graph_ids
+                .remove(&inflight_batch_info.batch_priority_id);
             container.remove_batch_by_id(inflight_batch_info.batch_priority_id.id);
 
             self.bam_response_handle.send_result(

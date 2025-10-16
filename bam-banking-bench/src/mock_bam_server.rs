@@ -59,7 +59,7 @@ fn make_transfer_transaction_with_compute_unit_price(
 }
 
 struct BamOutboundMessageResult {
-    time_received: Instant,
+    // time_received: Instant,
     result: AtomicTxnBatchResult,
 }
 
@@ -93,20 +93,20 @@ impl BankStats {
     }
 
     fn print_stats(&self) {
-        let mut time_diffs = self
-            .sent_transactions_and_results
-            .values()
-            .map(|tx_and_result| {
-                tx_and_result
-                    .result
-                    .as_ref()
-                    .unwrap()
-                    .time_received
-                    .duration_since(tx_and_result.transaction.time_sent)
-                    .as_millis()
-            })
-            .collect::<Vec<_>>();
-        time_diffs.sort();
+        // let mut time_diffs = self
+        //     .sent_transactions_and_results
+        //     .values()
+        //     .map(|tx_and_result| {
+        //         tx_and_result
+        //             .result
+        //             .as_ref()
+        //             .unwrap()
+        //             .time_received
+        //             .duration_since(tx_and_result.transaction.time_sent)
+        //             .as_millis()
+        //     })
+        //     .collect::<Vec<_>>();
+        // time_diffs.sort();
 
         let num_outside_leader_slot = self
             .sent_transactions_and_results
@@ -123,10 +123,10 @@ impl BankStats {
             })
             .count();
 
-        let median_time_diff = time_diffs[time_diffs.len() / 2];
-        let average_time_diff = time_diffs.iter().sum::<u128>() / time_diffs.len() as u128;
-        let max_time_diff = time_diffs.iter().max().unwrap();
-        let min_time_diff = time_diffs.iter().min().unwrap();
+        // let median_time_diff = time_diffs[time_diffs.len() / 2];
+        // let average_time_diff = time_diffs.iter().sum::<u128>() / time_diffs.len() as u128;
+        // let max_time_diff = time_diffs.iter().max().unwrap();
+        // let min_time_diff = time_diffs.iter().min().unwrap();
         let num_committed = self
             .sent_transactions_and_results
             .values()
@@ -150,10 +150,10 @@ impl BankStats {
             num_committed,
             num_outside_leader_slot
         );
-        println!(
-            "==> rtt: median time diff: {}ms, average time diff: {}ms, max time diff: {}ms, min time diff: {}ms",
-            median_time_diff, average_time_diff, max_time_diff, min_time_diff
-        );
+        // println!(
+        //     "==> rtt: median time diff: {}ms, average time diff: {}ms, max time diff: {}ms, min time diff: {}ms",
+        //     median_time_diff, average_time_diff, max_time_diff, min_time_diff
+        // );
     }
 }
 
@@ -213,7 +213,7 @@ impl MockBamServer {
                         .get_mut(&result.seq_id)
                         .unwrap();
                     transaction_info.result = Some(BamOutboundMessageResult {
-                        time_received: Instant::now(),
+                        // time_received: Instant::now(),
                         result,
                     });
                     bank_stats.num_received_results += 1;
@@ -232,12 +232,14 @@ impl MockBamServer {
         let now = Instant::now();
         let num_waiting =
             bank_stats.sent_transactions_and_results.len() - bank_stats.num_received_results;
+        let num_messages_pending = outbound_receiver.len();
+        println!("waiting for {num_waiting} results, num_messages_pending: {num_messages_pending}");
         while bank_stats.num_received_results < bank_stats.sent_transactions_and_results.len() {
             Self::handle_outbound_messages(outbound_receiver, bank_stats);
         }
         println!(
-            "time taken to receive {num_waiting} results: {:?}",
-            now.elapsed()
+            "done waiting for results after {:?}ms",
+            now.elapsed().as_millis()
         );
     }
 
