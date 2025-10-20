@@ -12,6 +12,8 @@ use std::{
         Arc, Mutex, RwLock,
     },
 };
+use solana_signer::Signer;
+
 use {
     crate::{
         admin_rpc_post_init::{KeyUpdaterType, KeyUpdaters},
@@ -26,7 +28,36 @@ use {
     solana_poh::poh_recorder::PohRecorder,
     solana_pubkey::Pubkey,
     solana_runtime::bank::Bank,
+    solana_quic_definitions::NotifyKeyUpdate
 };
+
+pub struct BamConnectionKeyUpdater {
+    bam_url: Arc<Mutex<Option<String>>>,
+}
+
+impl NotifyKeyUpdate for BamConnectionKeyUpdater {
+    fn update_key(&self, key: &solana_keypair::Keypair) -> Result<(), Box<dyn core::error::Error>> {
+        let disconnect_url = self.bam_url
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map_or("None".to_string(), |u| u.clone());
+
+        datapoint_error!(
+            "bam-manager-identity-changed",
+            ("count", 1, i64),
+            ("identity_changed_to", key.pubkey().to_string(), String),
+            ("bam_url", disconnect_url, String)
+        );
+        error!(
+            "BAM Manager: validator identity changed! Triggered by change to {}. Disconnecting from BAM at url {:?}",
+            key.pubkey(),
+            disconnect_url
+        );
+        *self.bam_url.lock().unwrap() = None;
+        Ok(())
+    }
+}
 
 pub struct BamManager {
     thread: std::thread::JoinHandle<()>,
@@ -79,6 +110,10 @@ impl BamManager {
             bam_url.clone(),
             dependencies.clone(),
         );
+
+        let key_updater = Some(Arc::new(BamConnectionKeyUpdater {
+            bam_url: bam_url.clone(),
+        }) as Arc<dyn NotifyKeyUpdate + Sync + Send>);
 
         let mut key_notifiers = key_notifiers.write().unwrap();
         if let Some(key_updater) = key_updater {
