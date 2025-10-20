@@ -1,4 +1,3 @@
-use crate::bam_response_handle::BamResponseHandle;
 use crate::banking_stage::scheduler_messages::MaxAge;
 /// A Scheduler implementation that pulls batches off the container, and then
 /// schedules them to workers in a FIFO, account-aware manner. This is facilitated by the
@@ -8,9 +7,13 @@ use crate::banking_stage::transaction_scheduler::scheduler::PreLockFilterAction;
 use crate::banking_stage::transaction_scheduler::scheduler_common::SchedulingCommon;
 use crate::banking_stage::transaction_scheduler::transaction_state::TransactionState;
 use crate::banking_stage::transaction_scheduler::transaction_state_container::BatchInfo;
+use crate::{
+    bam_response_handle::BamResponseHandle,
+    banking_stage::transaction_scheduler::bam_work_assembler::BamWorkAssembler,
+};
 
 use ahash::{HashSet, HashSetExt};
-use itertools::Itertools;
+use itertools::{max, Itertools};
 use solana_clock::{Slot, MAX_PROCESSING_AGE};
 use solana_runtime::bank_forks::BankForks;
 use solana_svm::transaction_error_metrics::TransactionErrorMetrics;
@@ -46,8 +49,20 @@ type SchedulerPrioGraph = PrioGraph<
     fn(&TransactionPriorityId, &GraphNode<TransactionPriorityId>) -> TransactionPriorityId,
 >;
 
+// Inflight batches contain many batches
 struct InflightBatchInfo {
-    batch_priority_id: TransactionPriorityId,
+    batch_priority_ids: Vec<(
+        TransactionPriorityId,
+        usize, /* number of txs in the batch */
+    )>,
+}
+
+impl Default for InflightBatchInfo {
+    fn default() -> Self {
+        Self {
+            batch_priority_ids: Vec::new(),
+        }
+    }
 }
 
 pub struct BamScheduler<Tx: TransactionWithMeta> {
@@ -62,6 +77,8 @@ pub struct BamScheduler<Tx: TransactionWithMeta> {
     bank_forks: Arc<RwLock<BankForks>>,
     // pop_and_unblock() on the priority graph is slow at slot boundary, so we store the ids here to avoid the slow path.
     prio_graph_ids: HashSet<TransactionPriorityId>,
+
+    batch_id: u64,
 }
 
 impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
@@ -71,8 +88,6 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         bam_response_handle: BamResponseHandle,
         bank_forks: Arc<RwLock<BankForks>>,
     ) -> Self {
-        let capacity = consume_work_sender.capacity().unwrap_or(1024);
-
         // Scheduler deadlock can occur when using bounded channels. The scheduler can enqueue too many tranasctions to the consumer, but
         // the consumer can get blocked on a bounded finished_consume_work channel since the loop uses a blocking send.
         // By using unbounded channels, we avoid this deadlock.
@@ -90,11 +105,12 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             consume_work_sender,
             finished_consume_work_receiver,
             bam_response_handle,
-            inflight_batches: HashMap::with_capacity(capacity),
+            inflight_batches: HashMap::with_capacity(10_000),
             prio_graph: PrioGraph::new(|id, _graph_node| *id),
             slot: None,
             bank_forks,
-            prio_graph_ids: HashSet::with_capacity(capacity),
+            prio_graph_ids: HashSet::with_capacity(10_000),
+            batch_id: 0,
         }
     }
 
@@ -151,30 +167,64 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
 
         let working_bank = self.bank_forks.read().unwrap().working_bank();
 
+        let mut bam_work_assembler: BamWorkAssembler<Tx> = BamWorkAssembler::new();
+
         while let Some(batch_priority_id) = self.prio_graph.pop() {
             let batch_info = container
                 .get_batch(batch_priority_id.id)
                 .expect("batch must exist");
 
             let max_schedule_slot = batch_info.max_schedule_slot;
-            let transaction_ids = batch_info.transaction_ids.to_vec();
+            let transaction_ids = batch_info.transaction_ids.clone();
             let revert_on_error = batch_info.revert_on_error;
 
-            // Assumption: priority graph gets cleared on slot boundary
-            // Otherwise would be worth checking the max_schedule_slot here
+            // bam_work_assembler.assemble_work(
+            //     container,
+            //     max_schedule_slot,
+            //     &transaction_ids,
+            //     revert_on_error,
+            //     &mut self.batch_id,
+            // );
 
-            let (transactions, max_ages): (Vec<Tx>, Vec<MaxAge>) = transaction_ids
-                .iter()
-                .map(|txn_id| {
-                    let tx = container
-                        .get_mut_transaction_state(*txn_id)
-                        .expect("transaction must exist");
-                    tx.take_transaction_for_scheduling()
-                })
-                .unzip();
+            // let maybe_work =
+            //     bam_work_assembler.assemble_work(container, batch_info, &mut self.batch_id);
 
-            // Save bounce between between the coordinator, worker, and back for common errors.
-            // It's expected that BAM will handle most of these errors, but durable nonces are annoying.
+            // if Self::can_add_to_consume_work(&consume_work, &batch_info) {
+            //     let max_schedule_slot = batch_info.max_schedule_slot;
+            //     let transaction_ids = batch_info.transaction_ids.clone();
+            //     let revert_on_error = batch_info.revert_on_error;
+
+            //     Self::add_to_consume_work(
+            //         &mut consume_work,
+            //         &mut inflight_batch,
+            //         &mut container,
+            //         batch_priority_id,
+            //         max_schedule_slot,
+            //         transaction_ids,
+            //         revert_on_error,
+            //     );
+            // } else {
+            //     // Send + create a new one
+            //     let _ = self.consume_work_sender.send(consume_work);
+            //     consume_work = self.get_consume_work();
+            //     inflight_batch = InflightBatchInfo::default();
+            // }
+
+            // // Assumption: priority graph gets cleared on slot boundary
+            // // Otherwise would be worth checking the max_schedule_slot here
+
+            // let (transactions, max_ages): (Vec<Tx>, Vec<MaxAge>) = transaction_ids
+            //     .iter()
+            //     .map(|txn_id| {
+            //         let tx = container
+            //             .get_mut_transaction_state(*txn_id)
+            //             .expect("transaction must exist");
+            //         tx.take_transaction_for_scheduling()
+            //     })
+            //     .unzip();
+
+            // // Save bounce between between the coordinator, worker, and back for common errors.
+            // // It's expected that BAM will handle most of these errors, but durable nonces are annoying.
             // let lock_results = (0..transactions.len())
             //     .map(|_| Ok(()))
             //     .collect::<Vec<solana_transaction_error::TransactionResult<()>>>();
@@ -202,31 +252,31 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             //     continue;
             // }
 
-            // Schedule it
-            let work = ConsumeWork {
-                batch_id: TransactionBatchId::new(batch_priority_id.id as u64),
-                ids: transaction_ids.to_vec(),
-                transactions,
-                max_ages,
-                revert_on_error,
-                respond_with_extra_info: true,
-                max_schedule_slot: Some(max_schedule_slot),
-            };
-            // println!(
-            //     "consume_work_sender len: {}",
-            //     self.consume_work_sender.len()
+            // // Schedule it
+            // let work = ConsumeWork {
+            //     batch_id: TransactionBatchId::new(batch_priority_id.id as u64),
+            //     ids: transaction_ids.to_vec(),
+            //     transactions,
+            //     max_ages,
+            //     revert_on_error,
+            //     respond_with_extra_info: true,
+            //     max_schedule_slot: Some(max_schedule_slot),
+            // };
+            // // println!(
+            // //     "consume_work_sender len: {}",
+            // //     self.consume_work_sender.len()
+            // // );
+            // let _ = self.consume_work_sender.send(work);
+            // *num_scheduled += transaction_ids.len();
+
+            // self.inflight_batches.insert(
+            //     batch_priority_id.id as u64,
+            //     InflightBatchInfo { batch_priority_id },
             // );
-            let _ = self.consume_work_sender.send(work);
-            *num_scheduled += transaction_ids.len();
 
-            self.inflight_batches.insert(
-                batch_priority_id.id as u64,
-                InflightBatchInfo { batch_priority_id },
-            );
-
-            if self.inflight_batches.len() > MAX_INFLIGHT_BATCHES {
-                break;
-            }
+            // if self.inflight_batches.len() > MAX_INFLIGHT_BATCHES {
+            //     break;
+            // }
         }
     }
 
@@ -264,16 +314,16 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 .inflight_batches
                 .remove(&work.work.batch_id.0)
                 .expect("batch must be inflight");
-            self.prio_graph_ids.remove(&batch_info.batch_priority_id);
+            // self.prio_graph_ids.remove(&batch_info.batch_priority_id);
 
             // the container and the priority graph will be cleared later
             // container.remove_batch_by_id(batch_info.batch_priority_id.id);
             // self.prio_graph.unblock(&batch_info.batch_priority_id);
 
-            self.bam_response_handle
-                .send_outside_leader_slot_bundle_result(priority_to_seq_id(
-                    batch_info.batch_priority_id.priority,
-                ));
+            // self.bam_response_handle
+            //     .send_outside_leader_slot_bundle_result(priority_to_seq_id(
+            //         batch_info.batch_priority_id.priority,
+            //     ));
             num_drained += 1;
         }
         println!(
@@ -491,20 +541,20 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                 .remove(&result.work.batch_id.0)
                 .expect("batch must be inflight to be removed");
 
-            self.prio_graph
-                .unblock(&inflight_batch_info.batch_priority_id);
-            self.prio_graph_ids
-                .remove(&inflight_batch_info.batch_priority_id);
-            container.remove_batch_by_id(inflight_batch_info.batch_priority_id.id);
+            // self.prio_graph
+            //     .unblock(&inflight_batch_info.batch_priority_id);
+            // self.prio_graph_ids
+            //     .remove(&inflight_batch_info.batch_priority_id);
+            // container.remove_batch_by_id(inflight_batch_info.batch_priority_id.id);
 
-            self.bam_response_handle.send_result(
-                priority_to_seq_id(inflight_batch_info.batch_priority_id.priority),
-                result.work.revert_on_error,
-                result
-                    .extra_info
-                    .expect("bam requires extra info")
-                    .processed_results,
-            );
+            // self.bam_response_handle.send_result(
+            //     priority_to_seq_id(inflight_batch_info.batch_priority_id.priority),
+            //     result.work.revert_on_error,
+            //     result
+            //         .extra_info
+            //         .expect("bam requires extra info")
+            //         .processed_results,
+            // );
         }
 
         Ok((num_transactions, 0))
