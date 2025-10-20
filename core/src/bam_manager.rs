@@ -14,6 +14,7 @@ use std::{
 };
 use {
     crate::{
+        admin_rpc_post_init::{KeyUpdaterType, KeyUpdaters},
         bam_connection::BamConnection, bam_dependencies::BamDependencies,
         bam_fallback_manager::BamFallbackManager, proxy::block_engine_stage::BlockBuilderFeeInfo,
     },
@@ -38,6 +39,7 @@ impl BamManager {
         bam_txns_per_slot_threshold: Arc<RwLock<u64>>,
         dependencies: BamDependencies,
         poh_recorder: Arc<RwLock<PohRecorder>>,
+        key_notifiers: Arc<RwLock<KeyUpdaters>>,
     ) -> Self {
         Self {
             thread: std::thread::spawn(move || {
@@ -47,6 +49,7 @@ impl BamManager {
                     bam_txns_per_slot_threshold,
                     dependencies,
                     poh_recorder,
+                    key_notifiers,
                 )
             }),
         }
@@ -58,6 +61,7 @@ impl BamManager {
         bam_txns_per_slot_threshold: Arc<RwLock<u64>>,
         dependencies: BamDependencies,
         poh_recorder: Arc<RwLock<PohRecorder>>,
+        key_notifiers: Arc<RwLock<KeyUpdaters>>,
     ) {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(8)
@@ -75,6 +79,11 @@ impl BamManager {
             bam_url.clone(),
             dependencies.clone(),
         );
+
+        let mut key_notifiers = key_notifiers.write().unwrap();
+        if let Some(key_updater) = key_updater {
+            key_notifiers.add(KeyUpdaterType::BamConnection, key_updater);
+        }
 
         while !exit.load(Ordering::Relaxed) {
             // Update if bam is enabled
