@@ -46,7 +46,7 @@ impl NotifyKeyUpdate for BamConnectionKeyUpdater {
             .map_or("None".to_string(), |u| u.clone());
 
         datapoint_error!(
-            "bam-manager-identity-changed",
+            "bam-manager_identity-changed",
             ("count", 1, i64),
             ("identity_changed_to", key.pubkey().to_string(), String),
             ("bam_url", disconnect_url, String)
