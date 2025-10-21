@@ -12,13 +12,13 @@ use std::{
         Arc, Mutex, RwLock,
     },
 };
-use solana_signer::Signer;
-
 use {
     crate::{
         admin_rpc_post_init::{KeyUpdaterType, KeyUpdaters},
-        bam_connection::BamConnection, bam_dependencies::BamDependencies,
-        bam_fallback_manager::BamFallbackManager, proxy::block_engine_stage::BlockBuilderFeeInfo,
+        bam_connection::BamConnection,
+        bam_dependencies::BamDependencies,
+        bam_fallback_manager::BamFallbackManager,
+        proxy::block_engine_stage::BlockBuilderFeeInfo,
     },
     jito_protos::proto::{
         bam_api::ConfigResponse,
@@ -27,8 +27,9 @@ use {
     solana_gossip::cluster_info::ClusterInfo,
     solana_poh::poh_recorder::PohRecorder,
     solana_pubkey::Pubkey,
+    solana_quic_definitions::NotifyKeyUpdate,
     solana_runtime::bank::Bank,
-    solana_quic_definitions::NotifyKeyUpdate
+    solana_signer::Signer,
 };
 
 pub struct BamConnectionKeyUpdater {
@@ -37,7 +38,8 @@ pub struct BamConnectionKeyUpdater {
 
 impl NotifyKeyUpdate for BamConnectionKeyUpdater {
     fn update_key(&self, key: &solana_keypair::Keypair) -> Result<(), Box<dyn core::error::Error>> {
-        let disconnect_url = self.bam_url
+        let disconnect_url = self
+            .bam_url
             .lock()
             .unwrap()
             .as_ref()
@@ -278,7 +280,7 @@ impl BamManager {
         }
         let mut block_builder_fee_info = block_builder_fee_info.lock().unwrap();
         block_builder_fee_info.block_builder = pubkey;
-        block_builder_fee_info.block_builder_commission = commission;
+        block_builder_fee_info.block_builder_commission = commission as u64;
     }
 
     fn update_bam_recipient_and_commission(
