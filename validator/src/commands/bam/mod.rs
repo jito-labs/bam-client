@@ -254,14 +254,14 @@ mod tests {
     #[test_case("   ", ""; "spaces only")]
     #[test_case("\t\n ", "" ; "whitespace only")]
     fn test_extract_bam_url_empty_inputs(input: &str, expected: &str) {
-        let matches = create_test_matches(Some(input.as_ref()));
+        let matches = create_test_matches(Some(input));
         let result = extract_bam_url(&matches);
         assert_eq!(
             result.unwrap(),
             expected.to_string().into(),
             "Failed for input: '{}', expected: '{}'",
-            input.to_string(),
-            expected.to_string(),
+            input,
+            expected,
         );
     }
 
