@@ -35,6 +35,11 @@ const DEFAULT_BAM_HTTPS_PORT: u16 = 50056;
 /// # Errors
 /// Returns an error if the URL is invalid or uses an unsupported scheme.
 fn normalize_bam_url(url_str: &str) -> Result<String, BamUrlError> {
+    // If empty, return empty string to disable BAM
+    if url_str.trim().is_empty() {
+        return Ok(String::new());
+    }
+
     let url_str_to_parse = if url_str.contains("://") {
         url_str.into()
     } else {
@@ -245,16 +250,18 @@ mod tests {
     }
 
     // Empty inputs
-    #[test_case("" ; "empty string")]
-    #[test_case("   " ; "spaces only")]
-    #[test_case("\t\n " ; "whitespace only")]
-    fn test_extract_bam_url_empty_inputs(input: &str) {
-        assert_extract_bam_url_error(
-            input,
-            BamUrlError::InvalidUrlFormat {
-                url: input.to_string(),
-                source: ParseError::EmptyHost,
-            },
+    #[test_case("", ""; "empty string")]
+    #[test_case("   ", ""; "spaces only")]
+    #[test_case("\t\n ", "" ; "whitespace only")]
+    fn test_extract_bam_url_empty_inputs(input: &str, expected: &str) {
+        let matches = create_test_matches(Some(input.as_ref()));
+        let result = extract_bam_url(&matches);
+        assert_eq!(
+            result.unwrap(),
+            expected.to_string().into(),
+            "Failed for input: '{}', expected: '{}'",
+            input.to_string(),
+            expected.to_string(),
         );
     }
 
