@@ -57,7 +57,8 @@ impl NotifyKeyUpdate for BamConnectionKeyUpdater {
             disconnect_url,
             key.pubkey(),
         );
-        self.identity_changed_force_reconnect.store(true, Ordering::Relaxed);
+        self.identity_changed_force_reconnect
+            .store(true, Ordering::Relaxed);
         Ok(())
     }
 }
@@ -114,8 +115,11 @@ impl BamManager {
             dependencies.clone(),
         );
 
+        let identity_changed = Arc::new(AtomicBool::new(false));
+
         let key_updater = Some(Arc::new(BamConnectionKeyUpdater {
             bam_url: bam_url.clone(),
+            identity_changed_force_reconnect: identity_changed.clone(),
         }) as Arc<dyn NotifyKeyUpdate + Sync + Send>);
 
         let mut key_notifiers = key_notifiers.write().unwrap();
@@ -159,10 +163,16 @@ impl BamManager {
                 continue;
             };
 
-            // Check if connection is healthy; if no then disconnect
-            if !connection.is_healthy() {
+            // Check if connection is healthy or if the identity changed; if no then disconnect
+            // Disconnecting will cause a reconnect attempt, with the new identity if it changed
+            if !connection.is_healthy() || identity_changed.load(Ordering::Relaxed)
+            {
                 current_connection = None;
                 cached_builder_config = None;
+                if identity_changed.load(Ordering::Relaxed) {
+                    identity_changed.store(false, Ordering::Relaxed);
+                    info!("BAM validator identity changed");
+                }
                 warn!("BAM connection lost");
                 continue;
             }
