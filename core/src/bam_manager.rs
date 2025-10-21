@@ -104,7 +104,11 @@ impl BamManager {
                                 "bam-manager-connected",
                                 ("count", 1, i64),
                                 ("slot", slot, i64),
-                                ("prev_bam_url", prev_bam_url.as_deref().unwrap_or("None"), String),
+                                (
+                                    "prev_bam_url",
+                                    prev_bam_url.as_deref().unwrap_or("None"),
+                                    String
+                                ),
                                 ("bam_url", url.clone(), String)
                             );
                             prev_bam_url = Some(url);
@@ -143,7 +147,10 @@ impl BamManager {
                         url.as_deref().unwrap_or("None")
                     );
                 } else {
-                    info!("BAM URL set to {:?} from None", url.as_deref().unwrap_or("None"));
+                    info!(
+                        "BAM URL set to {:?} from None",
+                        url.as_deref().unwrap_or("None")
+                    );
                 }
                 continue;
             }

@@ -1,9 +1,14 @@
 use {
-    crate::bam_dependencies::BamDependencies, ahash::HashSet, solana_clock::Slot, solana_poh::poh_recorder::{PohRecorder, SharedWorkingBank}, solana_runtime::bank_forks::BankForks, std::{
+    crate::bam_dependencies::BamDependencies,
+    ahash::HashSet,
+    solana_clock::Slot,
+    solana_poh::poh_recorder::{PohRecorder, SharedWorkingBank},
+    solana_runtime::bank_forks::BankForks,
+    std::{
         collections::BTreeSet,
         sync::{Arc, Mutex, RwLock},
         time::Instant,
-    }
+    },
 };
 
 pub struct BamFallbackManager {
