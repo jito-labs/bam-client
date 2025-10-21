@@ -101,7 +101,7 @@ impl BamManager {
                             let slot = poh_recorder.read().unwrap().current_poh_slot();
                             info!("BAM connection established");
                             datapoint_info!(
-                                "bam-manager-connected",
+                                "bam_manager-connected",
                                 ("count", 1, i64),
                                 ("slot", slot, i64),
                                 (

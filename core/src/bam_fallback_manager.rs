@@ -112,7 +112,7 @@ impl BamFallbackManager {
                         .as_ref()
                         .map_or("None".to_string(), |u| u.clone());
                     datapoint_error!(
-                        "bam-fallback-manager-disconnected",
+                        "bam_fallback_manager-disconnected",
                         ("count", 1, i64),
                         ("triggered_by_slot", most_recent, i64),
                         ("bam_url", disconnect_url, String)
@@ -133,7 +133,7 @@ impl BamFallbackManager {
             }
 
             datapoint_info!(
-                "bam-fallback-manager-evaluation",
+                "bam_fallback_manager-evaluation",
                 ("leader_slots_tracked", scheduled_leader_slots.len(), i64),
                 ("slots_below_threshold", evaluation.failing_slots.len(), i64),
                 (
