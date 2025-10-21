@@ -528,6 +528,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             container.remove_by_id(next_batch_id.id);
         }
 
+        self.prio_graph.clear();
         self.insertion_to_prio_graph_time.clear();
 
         // Only report timing metrics when slot has ended
