@@ -108,6 +108,12 @@ impl BamValidator {
             .arg(compute_shred_version(&genesis_config.hash(), None).to_string())
             .arg("--bam-url")
             .arg(&cluster_config.bam_url)
+            .arg("--bam-transactions-per-slot-fallback-threshold")
+            .arg(
+                cluster_config
+                    .bam_transactions_per_slot_fallback_threshold
+                    .to_string(),
+            )
             .arg("--tip-distribution-program-pubkey")
             .arg(&cluster_config.tip_distribution_program_id)
             .arg("--tip-payment-program-pubkey")

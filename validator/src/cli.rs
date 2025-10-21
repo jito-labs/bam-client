@@ -962,7 +962,8 @@ pub fn test_app<'a>(version: &'a str, default_args: &'a DefaultTestArgs) -> App<
                      silently ignored",
                 ),
         )
-        .arg(commands::bam::argument())
+        .arg(commands::bam::bam_url_argument())
+        .arg(commands::bam::bam_transactions_per_slot_fallback_threshold_argument())
 }
 
 pub struct DefaultTestArgs {
