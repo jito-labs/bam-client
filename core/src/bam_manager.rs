@@ -34,6 +34,7 @@ use {
 
 pub struct BamConnectionKeyUpdater {
     bam_url: Arc<Mutex<Option<String>>>,
+    identity_changed_force_reconnect: Arc<AtomicBool>,
 }
 
 impl NotifyKeyUpdate for BamConnectionKeyUpdater {
@@ -52,11 +53,11 @@ impl NotifyKeyUpdate for BamConnectionKeyUpdater {
             ("bam_url", disconnect_url, String)
         );
         error!(
-            "BAM Manager: validator identity changed! Triggered by change to {}. Disconnecting from BAM at url {:?}",
+            "BAM Manager: validator identity changed! Reconnecting to BAM at url {:?} from new identity {}",
+            disconnect_url,
             key.pubkey(),
-            disconnect_url
         );
-        *self.bam_url.lock().unwrap() = None;
+        self.identity_changed_force_reconnect.store(true, Ordering::Relaxed);
         Ok(())
     }
 }
