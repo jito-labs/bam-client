@@ -788,11 +788,12 @@ mod tests {
                 impl IntoIterator<Item = impl Borrow<Pubkey>>,
                 u64,
                 u64,
+                u64,
             ),
         >,
     ) -> TransactionStateContainer<RuntimeTransaction<SanitizedTransaction>> {
         let mut container = TransactionStateContainer::with_capacity(10 * 1024);
-        for (from_keypair, to_pubkeys, lamports, compute_unit_price) in tx_infos.into_iter() {
+        for (from_keypair, to_pubkeys, lamports, compute_unit_price, max_schedule_slot) in tx_infos.into_iter() {
             let transaction = prioritized_tranfers(
                 from_keypair.borrow(),
                 to_pubkeys,
@@ -805,7 +806,7 @@ mod tests {
                 compute_unit_price,
                 TEST_TRANSACTION_COST,
                 false,
-                0,
+                max_schedule_slot
             );
         }
 
@@ -866,24 +867,28 @@ mod tests {
                 vec![Pubkey::new_unique()],
                 1000,
                 seq_id_to_priority(1),
+                u64::MAX,
             ),
             (
                 &keypair_a,
                 vec![first_recipient],
                 1500,
                 seq_id_to_priority(0),
+                u64::MAX,
             ),
             (
                 &keypair_a,
                 vec![Pubkey::new_unique()],
                 1500,
                 seq_id_to_priority(2),
+                u64::MAX,
             ),
             (
                 &Keypair::new(),
                 vec![second_recipient],
                 2000,
                 seq_id_to_priority(3),
+                u64::MAX,
             ),
         ]);
 
@@ -1156,7 +1161,6 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "node must exist")]
-    #[ignore]
     fn test_prio_graph_clears_on_slot_boundary() {
         let (bank_forks, _) = test_bank_forks();
         let TestScheduler {
@@ -1165,29 +1169,23 @@ mod tests {
             finished_consume_work_sender: _,
             response_receiver: _,
         } = create_test_scheduler(4, &bank_forks);
+        scheduler.extra_checks_enabled = false;
 
         let keypair_a = Keypair::new();
         let keypair_b = Keypair::new();
 
-        // Create container with some transactions
+        let bank = bank_forks.read().unwrap().working_bank();
+
+        // Set initial slot with bank start
         let mut container = create_container(vec![
             (
                 &keypair_a,
                 vec![Pubkey::new_unique()],
                 1000,
                 seq_id_to_priority(0),
-            ),
-            (
-                &keypair_b,
-                vec![Pubkey::new_unique()],
-                2000,
-                seq_id_to_priority(1),
+                u64::MAX,
             ),
         ]);
-
-        let bank = bank_forks.read().unwrap().working_bank();
-
-        // Set initial slot with bank start
         let decision = BufferedPacketsDecision::Consume(bank.clone());
 
         scheduler
@@ -1196,6 +1194,23 @@ mod tests {
         assert_eq!(scheduler.slot, Some(bank.slot()));
 
         // Pull transactions into prio_graph
+        // Create container with some transactions
+        let mut container = create_container(vec![
+            (
+                &keypair_a,
+                vec![Pubkey::new_unique()],
+                1000,
+                seq_id_to_priority(0),
+                u64::MAX,
+            ),
+            (
+                &keypair_b,
+                vec![Pubkey::new_unique()],
+                2000,
+                seq_id_to_priority(1),
+                u64::MAX,
+            ),
+        ]);
         scheduler.pull_into_prio_graph(&mut container);
         assert!(
             !scheduler.prio_graph.is_empty(),
