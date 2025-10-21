@@ -1,22 +1,23 @@
-use crate::banking_stage::scheduler_messages::MaxAge;
-/// A Scheduler implementation that pulls batches off the container, and then
-/// schedules them to workers in a FIFO, account-aware manner. This is facilitated by the
-/// `PrioGraph` data structure, which is a directed graph that tracks the dependencies.
-///
+//! A Scheduler implementation that pulls batches off the container, and then
+//! schedules them to workers in a FIFO, account-aware manner. This is facilitated by the
+//! `PrioGraph` data structure, which is a directed graph that tracks the dependencies.
+use crate::banking_stage::scheduler_messages::{MaxAge, TransactionBatchId};
 use crate::banking_stage::transaction_scheduler::scheduler::PreLockFilterAction;
 use crate::banking_stage::transaction_scheduler::scheduler_common::SchedulingCommon;
 use crate::banking_stage::transaction_scheduler::transaction_state::TransactionState;
 use crate::banking_stage::transaction_scheduler::transaction_state_container::BatchInfo;
-use crate::{
-    bam_response_handle::BamResponseHandle,
-    banking_stage::transaction_scheduler::bam_work_assembler::BamWorkAssembler,
-};
+use crate::{bam_response_handle::BamResponseHandle, banking_stage::consumer::Consumer};
 
 use ahash::{HashSet, HashSetExt};
-use itertools::{max, Itertools};
+use arrayvec::ArrayVec;
+use itertools::{izip, Itertools};
 use solana_clock::{Slot, MAX_PROCESSING_AGE};
+use solana_runtime::bank::Bank;
 use solana_runtime::bank_forks::BankForks;
 use solana_svm::transaction_error_metrics::TransactionErrorMetrics;
+use solana_transaction_error::TransactionResult;
+
+use std::mem::replace;
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
@@ -33,7 +34,7 @@ use {
     },
     crate::banking_stage::{
         decision_maker::BufferedPacketsDecision,
-        scheduler_messages::{ConsumeWork, FinishedConsumeWork, TransactionBatchId},
+        scheduler_messages::{ConsumeWork, FinishedConsumeWork},
     },
     crossbeam_channel::{Receiver, Sender},
     prio_graph::{AccessKind, GraphNode, PrioGraph},
@@ -163,121 +164,245 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         num_scheduled: &mut usize,
         num_filtered_out: &mut usize,
     ) {
-        const MAX_INFLIGHT_BATCHES: usize = 100;
+        const CHECK_TRANSACTIONS_BATCH_SIZE: usize = 128;
+
+        let mut batch_priority_ids: ArrayVec<TransactionPriorityId, CHECK_TRANSACTIONS_BATCH_SIZE> =
+            ArrayVec::new();
+        let mut batch_lengths: ArrayVec<usize, CHECK_TRANSACTIONS_BATCH_SIZE> = ArrayVec::new();
+        let mut revert_on_errors: ArrayVec<bool, CHECK_TRANSACTIONS_BATCH_SIZE> = ArrayVec::new();
+        let mut transactions: ArrayVec<Tx, CHECK_TRANSACTIONS_BATCH_SIZE> = ArrayVec::new();
+        let mut max_ages: ArrayVec<MaxAge, CHECK_TRANSACTIONS_BATCH_SIZE> = ArrayVec::new();
 
         let working_bank = self.bank_forks.read().unwrap().working_bank();
 
-        let mut bam_work_assembler: BamWorkAssembler<Tx> = BamWorkAssembler::new();
-
+        // Accumulate work until we get to an appropriate spot to batch the operations
         while let Some(batch_priority_id) = self.prio_graph.pop() {
             let batch_info = container
                 .get_batch(batch_priority_id.id)
                 .expect("batch must exist");
+            // don't overflow the ArrayVec
+            if transactions.len() + batch_info.transaction_ids.len() > CHECK_TRANSACTIONS_BATCH_SIZE
+            {
+                let (scheduled, filtered) =
+                    Self::check_transactions_and_send_work::<CHECK_TRANSACTIONS_BATCH_SIZE>(
+                        container,
+                        &mut self.prio_graph,
+                        &working_bank,
+                        &mut batch_priority_ids,
+                        &mut batch_lengths,
+                        &mut revert_on_errors,
+                        &mut transactions,
+                        &mut max_ages,
+                        &mut self.batch_id,
+                        &self.consume_work_sender,
+                        &self.bam_response_handle,
+                        &mut self.inflight_batches,
+                    );
+                *num_scheduled += scheduled;
+                *num_filtered_out += filtered;
+            } else {
+                batch_priority_ids.push(batch_priority_id);
+                batch_lengths.push(batch_info.transaction_ids.len());
+                revert_on_errors.push(batch_info.revert_on_error);
+                let transaction_ids = batch_info.transaction_ids.clone();
 
-            let max_schedule_slot = batch_info.max_schedule_slot;
-            let transaction_ids = batch_info.transaction_ids.clone();
-            let revert_on_error = batch_info.revert_on_error;
-
-            // bam_work_assembler.assemble_work(
-            //     container,
-            //     max_schedule_slot,
-            //     &transaction_ids,
-            //     revert_on_error,
-            //     &mut self.batch_id,
-            // );
-
-            // let maybe_work =
-            //     bam_work_assembler.assemble_work(container, batch_info, &mut self.batch_id);
-
-            // if Self::can_add_to_consume_work(&consume_work, &batch_info) {
-            //     let max_schedule_slot = batch_info.max_schedule_slot;
-            //     let transaction_ids = batch_info.transaction_ids.clone();
-            //     let revert_on_error = batch_info.revert_on_error;
-
-            //     Self::add_to_consume_work(
-            //         &mut consume_work,
-            //         &mut inflight_batch,
-            //         &mut container,
-            //         batch_priority_id,
-            //         max_schedule_slot,
-            //         transaction_ids,
-            //         revert_on_error,
-            //     );
-            // } else {
-            //     // Send + create a new one
-            //     let _ = self.consume_work_sender.send(consume_work);
-            //     consume_work = self.get_consume_work();
-            //     inflight_batch = InflightBatchInfo::default();
-            // }
-
-            // // Assumption: priority graph gets cleared on slot boundary
-            // // Otherwise would be worth checking the max_schedule_slot here
-
-            // let (transactions, max_ages): (Vec<Tx>, Vec<MaxAge>) = transaction_ids
-            //     .iter()
-            //     .map(|txn_id| {
-            //         let tx = container
-            //             .get_mut_transaction_state(*txn_id)
-            //             .expect("transaction must exist");
-            //         tx.take_transaction_for_scheduling()
-            //     })
-            //     .unzip();
-
-            // // Save bounce between between the coordinator, worker, and back for common errors.
-            // // It's expected that BAM will handle most of these errors, but durable nonces are annoying.
-            // let lock_results = (0..transactions.len())
-            //     .map(|_| Ok(()))
-            //     .collect::<Vec<solana_transaction_error::TransactionResult<()>>>();
-            // let check_result = working_bank.check_transactions::<Tx>(
-            //     &transactions,
-            //     lock_results.as_slice(),
-            //     MAX_PROCESSING_AGE,
-            //     &mut TransactionErrorMetrics::default(),
-            // );
-            // if let Some((index, err)) = check_result
-            //     .iter()
-            //     .find_position(|res| res.is_err())
-            //     .map(|(i, res)| (i, res.as_ref().err().unwrap()))
-            // {
-            //     container.remove_batch_by_id(batch_priority_id.id);
-            //     self.prio_graph.unblock(&batch_priority_id);
-
-            //     self.bam_response_handle.send_not_committed_result(
-            //         priority_to_seq_id(batch_priority_id.priority),
-            //         index,
-            //         err.clone(),
-            //     );
-
-            //     *num_filtered_out += transaction_ids.len();
-            //     continue;
-            // }
-
-            // // Schedule it
-            // let work = ConsumeWork {
-            //     batch_id: TransactionBatchId::new(batch_priority_id.id as u64),
-            //     ids: transaction_ids.to_vec(),
-            //     transactions,
-            //     max_ages,
-            //     revert_on_error,
-            //     respond_with_extra_info: true,
-            //     max_schedule_slot: Some(max_schedule_slot),
-            // };
-            // // println!(
-            // //     "consume_work_sender len: {}",
-            // //     self.consume_work_sender.len()
-            // // );
-            // let _ = self.consume_work_sender.send(work);
-            // *num_scheduled += transaction_ids.len();
-
-            // self.inflight_batches.insert(
-            //     batch_priority_id.id as u64,
-            //     InflightBatchInfo { batch_priority_id },
-            // );
-
-            // if self.inflight_batches.len() > MAX_INFLIGHT_BATCHES {
-            //     break;
-            // }
+                for txn_id in transaction_ids {
+                    let tx = container
+                        .get_mut_transaction_state(txn_id)
+                        .expect("transaction must exist");
+                    let (tx, max_age) = tx.take_transaction_for_scheduling();
+                    transactions.push(tx);
+                    max_ages.push(max_age);
+                }
+            }
         }
+        let (scheduled, filtered) =
+            Self::check_transactions_and_send_work::<CHECK_TRANSACTIONS_BATCH_SIZE>(
+                container,
+                &mut self.prio_graph,
+                &working_bank,
+                &mut batch_priority_ids,
+                &mut batch_lengths,
+                &mut revert_on_errors,
+                &mut transactions,
+                &mut max_ages,
+                &mut self.batch_id,
+                &self.consume_work_sender,
+                &self.bam_response_handle,
+                &mut self.inflight_batches,
+            );
+        *num_scheduled += scheduled;
+        *num_filtered_out += filtered;
+    }
+
+    fn check_transactions_and_send_work<const LEN: usize>(
+        container: &mut impl StateContainer<Tx>,
+        prio_graph: &mut SchedulerPrioGraph,
+        working_bank: &Arc<Bank>,
+        batch_priority_ids: &mut ArrayVec<TransactionPriorityId, LEN>,
+        batch_lengths: &mut ArrayVec<usize, LEN>,
+        revert_on_errors: &mut ArrayVec<bool, LEN>,
+        transactions: &mut ArrayVec<Tx, LEN>,
+        max_ages: &mut ArrayVec<MaxAge, LEN>,
+        batch_id: &mut u64,
+        consume_work_sender: &Sender<ConsumeWork<Tx>>,
+        bam_response_handle: &BamResponseHandle,
+        inflight_batches: &mut HashMap<u64, InflightBatchInfo>,
+    ) -> (
+        usize, /* num scheduled  */
+        usize, /* num filtered out */
+    ) {
+        const CONSUME_WORK_BATCH_SIZE: usize = 4;
+
+        let mut num_scheduled = 0;
+        let mut num_filtered_out = 0;
+        let mut error_counters = TransactionErrorMetrics::new();
+
+        let lock_results: [_; LEN] = core::array::from_fn(|_| Ok(()));
+
+        // check already processed, bad blockhash, or bad nonce
+        let mut check_results: ArrayVec<TransactionResult<()>, LEN> = working_bank
+            .check_transactions::<Tx>(
+                &transactions,
+                lock_results.as_slice(),
+                MAX_PROCESSING_AGE,
+                &mut error_counters,
+            )
+            .into_iter()
+            .map(|r| match r {
+                Ok(_) => Ok(()),
+                Err(e) => Err(e),
+            })
+            .collect();
+
+        // check to make sure fee payer has enough to process the transaction and remain rent-exempt
+        for (tx, check_result) in transactions.iter().zip(check_results.iter_mut()) {
+            match check_result {
+                Ok(()) => {
+                    *check_result =
+                        Consumer::check_fee_payer_unlocked(&working_bank, tx, &mut error_counters);
+                }
+                Err(_) => {}
+            }
+        }
+
+        let mut consume_work_batch_priority_ids = Vec::with_capacity(CONSUME_WORK_BATCH_SIZE);
+        let mut consume_work_transactions = Vec::with_capacity(CONSUME_WORK_BATCH_SIZE);
+        let mut consume_work_max_ages = Vec::with_capacity(CONSUME_WORK_BATCH_SIZE);
+
+        let mut transactions_iter = transactions.drain(..);
+        let mut max_ages_iter = max_ages.drain(..);
+        let mut check_results_iter = check_results.drain(..);
+
+        for (batch_priority_id, batch_length, is_revert_on_error) in izip!(
+            batch_priority_ids.drain(..),
+            batch_lengths.drain(..),
+            revert_on_errors.drain(..)
+        ) {
+            // if any of the check results are bad, the entire batch can be dropped from the container and
+            // the priority graph should be cleared out.
+            if let Some((index, res)) = check_results_iter
+                .by_ref()
+                .take(batch_length)
+                .enumerate()
+                .find(|(_, res)| res.is_err())
+            {
+                bam_response_handle.send_not_committed_result(
+                    priority_to_seq_id(batch_priority_id.priority),
+                    index,
+                    res.unwrap_err(),
+                );
+
+                prio_graph.unblock(&batch_priority_id);
+                container.remove_batch_by_id(batch_priority_id.id);
+
+                num_filtered_out += batch_length;
+            } else if is_revert_on_error {
+                let transactions: Vec<Tx> = transactions_iter.by_ref().take(batch_length).collect();
+                let num_txs = transactions.len();
+                let max_ages = max_ages_iter.by_ref().take(batch_length).collect();
+
+                *batch_id += 1;
+                let work = ConsumeWork {
+                    batch_id: TransactionBatchId::new(*batch_id),
+                    ids: vec![],
+                    transactions,
+                    max_ages,
+                    revert_on_error: true,
+                    respond_with_extra_info: true,
+                    max_schedule_slot: Some(working_bank.slot()),
+                };
+                let _ = consume_work_sender.send(work);
+                num_scheduled += num_txs;
+                inflight_batches.insert(
+                    *batch_id,
+                    InflightBatchInfo {
+                        batch_priority_ids: vec![(batch_priority_id, batch_length)],
+                    },
+                );
+            } else {
+                consume_work_batch_priority_ids.push((batch_priority_id, batch_length));
+                consume_work_transactions.extend(transactions_iter.by_ref().take(batch_length));
+
+                consume_work_max_ages.extend(max_ages_iter.by_ref().take(batch_length));
+
+                let num_to_schedule = consume_work_transactions.len();
+                if num_to_schedule > CONSUME_WORK_BATCH_SIZE {
+                    *batch_id += 1;
+                    let work = ConsumeWork {
+                        batch_id: TransactionBatchId::new(*batch_id),
+                        ids: vec![], // TODO (LB): fix
+                        transactions: replace(
+                            &mut consume_work_transactions,
+                            Vec::with_capacity(CONSUME_WORK_BATCH_SIZE),
+                        ),
+                        max_ages: replace(
+                            &mut consume_work_max_ages,
+                            Vec::with_capacity(CONSUME_WORK_BATCH_SIZE),
+                        ),
+                        revert_on_error: false,
+                        respond_with_extra_info: true,
+                        max_schedule_slot: Some(working_bank.slot()),
+                    };
+
+                    let _ = consume_work_sender.send(work);
+                    num_scheduled += num_to_schedule;
+                    let batch_priority_ids = replace(
+                        &mut consume_work_batch_priority_ids,
+                        Vec::with_capacity(CONSUME_WORK_BATCH_SIZE),
+                    );
+                    inflight_batches.insert(*batch_id, InflightBatchInfo { batch_priority_ids });
+                }
+            }
+        }
+
+        // finish the rest
+        if !consume_work_transactions.is_empty() {
+            *batch_id += 1;
+            let num_to_schedule = consume_work_transactions.len();
+
+            let work = ConsumeWork {
+                batch_id: TransactionBatchId::new(*batch_id),
+                ids: vec![], // TODO (LB): fix
+                transactions: consume_work_transactions,
+                max_ages: consume_work_max_ages,
+                revert_on_error: false,
+                respond_with_extra_info: true,
+                max_schedule_slot: Some(working_bank.slot()),
+            };
+
+            let _ = consume_work_sender.send(work);
+            num_scheduled += num_to_schedule;
+
+            inflight_batches.insert(
+                *batch_id,
+                InflightBatchInfo {
+                    batch_priority_ids: consume_work_batch_priority_ids,
+                },
+            );
+        }
+
+        (num_scheduled, num_filtered_out)
     }
 
     /// On bank boundaries, the container is emptied and the priority graph is cleared
@@ -304,8 +429,6 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             self.slot = None;
         }
 
-        let start = Instant::now();
-        let mut num_drained = 0;
         while !self.inflight_batches.is_empty() {
             let Ok(work) = self.finished_consume_work_receiver.recv() else {
                 break;
@@ -314,177 +437,33 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 .inflight_batches
                 .remove(&work.work.batch_id.0)
                 .expect("batch must be inflight");
-            // self.prio_graph_ids.remove(&batch_info.batch_priority_id);
-
-            // the container and the priority graph will be cleared later
-            // container.remove_batch_by_id(batch_info.batch_priority_id.id);
-            // self.prio_graph.unblock(&batch_info.batch_priority_id);
-
-            // self.bam_response_handle
-            //     .send_outside_leader_slot_bundle_result(priority_to_seq_id(
-            //         batch_info.batch_priority_id.priority,
-            //     ));
-            num_drained += 1;
+            for (batch_priority_id, _) in batch_info.batch_priority_ids {
+                self.prio_graph_ids.remove(&batch_priority_id);
+                self.bam_response_handle
+                    .send_outside_leader_slot_bundle_result(priority_to_seq_id(
+                        batch_priority_id.priority,
+                    ));
+            }
         }
-        println!(
-            "inflight_batches: drained {num_drained} batches in {:?}us",
-            start.elapsed().as_micros()
-        );
 
         // On slot boundaries, all the transactions are removed from the container and the priority graph is cleared.
         // Anything left in the container at the end of the slot is outside the leader slot window.
         // The prio_graph_ids is used instead of the priority graph pop_and_unblock because its much faster.
-        let start = Instant::now();
-        let mut num_drained = 0;
         for next_batch_id in self.prio_graph_ids.drain() {
             // container.remove_batch_by_id(next_batch_id.id);
             self.bam_response_handle
                 .send_outside_leader_slot_bundle_result(priority_to_seq_id(next_batch_id.priority));
-            num_drained += 1;
         }
-        println!(
-            "prio_graph_ids: drained {num_drained} batches in {:?}us",
-            start.elapsed().as_micros()
-        );
 
         // Anything left in the container was pushed into the queue but hasn't been pulled into the priority graph yet
-        let mut num_drained = 0;
-        let start = Instant::now();
         while let Some(next_batch_id) = container.pop_batch() {
             // container.remove_batch_by_id(next_batch_id.id);
             self.bam_response_handle
                 .send_outside_leader_slot_bundle_result(priority_to_seq_id(next_batch_id.priority));
-            num_drained += 1;
         }
-        println!(
-            "container: drained {num_drained} batches in {:?}us",
-            start.elapsed().as_micros()
-        );
-
-        debug!(
-            "container size: {}, batch buffer size: {}, queue size: {}, batch queue size: {}",
-            container.buffer_size(),
-            container.batch_buffer_size(),
-            container.queue_size(),
-            container.batch_queue_size()
-        );
-
-        // assert_eq!(container.batch_buffer_size(), 0);
-        // assert_eq!(container.batch_queue_size(), 0);
-        // assert_eq!(container.buffer_size(), 0);
-        // assert_eq!(container.queue_size(), 0);
 
         self.prio_graph.clear();
         container.clear();
-        self.report_histogram_metrics();
-    }
-
-    fn report_histogram_metrics(&mut self) {
-        // datapoint_info!(
-        //     "bam_scheduler_bank_boundary-metrics",
-        //     (
-        //         "time_in_priograph_us_p50",
-        //         self.time_in_priograph_us
-        //             .percentile(50.0)
-        //             .unwrap_or_default(),
-        //         i64
-        //     ),
-        //     (
-        //         "time_in_priograph_us_p75",
-        //         self.time_in_priograph_us
-        //             .percentile(75.0)
-        //             .unwrap_or_default(),
-        //         i64
-        //     ),
-        //     (
-        //         "time_in_priograph_us_p90",
-        //         self.time_in_priograph_us
-        //             .percentile(90.0)
-        //             .unwrap_or_default(),
-        //         i64
-        //     ),
-        //     (
-        //         "time_in_priograph_us_p99",
-        //         self.time_in_priograph_us
-        //             .percentile(99.0)
-        //             .unwrap_or_default(),
-        //         i64
-        //     ),
-        //     (
-        //         "time_in_priograph_us_max",
-        //         self.time_in_priograph_us.maximum().unwrap_or_default(),
-        //         i64
-        //     ),
-        // );
-        // self.time_in_priograph_us.clear();
-
-        // datapoint_info!(
-        //     "bam_scheduler_worker_time_metrics",
-        //     (
-        //         "time_in_worker_us_p50",
-        //         self.time_in_worker_us.percentile(50.0).unwrap_or_default(),
-        //         i64
-        //     ),
-        //     (
-        //         "time_in_worker_us_p75",
-        //         self.time_in_worker_us.percentile(75.0).unwrap_or_default(),
-        //         i64
-        //     ),
-        //     (
-        //         "time_in_worker_us_p90",
-        //         self.time_in_worker_us.percentile(90.0).unwrap_or_default(),
-        //         i64
-        //     ),
-        //     (
-        //         "time_in_worker_us_p99",
-        //         self.time_in_worker_us.percentile(99.0).unwrap_or_default(),
-        //         i64
-        //     ),
-        //     (
-        //         "time_in_worker_us_max",
-        //         self.time_in_worker_us.maximum().unwrap_or_default(),
-        //         i64
-        //     ),
-        // );
-        // self.time_in_worker_us.clear();
-
-        // datapoint_info!(
-        //     "bam_scheduler_time_between_schedules_metrics",
-        //     (
-        //         "time_between_schedule_us_p50",
-        //         self.time_between_schedule_us
-        //             .percentile(50.0)
-        //             .unwrap_or_default(),
-        //         i64
-        //     ),
-        //     (
-        //         "time_between_schedule_us_p75",
-        //         self.time_between_schedule_us
-        //             .percentile(75.0)
-        //             .unwrap_or_default(),
-        //         i64
-        //     ),
-        //     (
-        //         "time_between_schedule_us_p90",
-        //         self.time_between_schedule_us
-        //             .percentile(90.0)
-        //             .unwrap_or_default(),
-        //         i64
-        //     ),
-        //     (
-        //         "time_between_schedule_us_p99",
-        //         self.time_between_schedule_us
-        //             .percentile(99.0)
-        //             .unwrap_or_default(),
-        //         i64
-        //     ),
-        //     (
-        //         "time_between_schedule_us_max",
-        //         self.time_between_schedule_us.maximum().unwrap_or_default(),
-        //         i64
-        //     ),
-        // );
-        // self.time_between_schedule_us.clear();
     }
 }
 
@@ -531,30 +510,29 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
         self.maybe_bank_boundary_actions(decision, container);
 
         let num_transactions = 0;
-        // println!(
-        //     "finished_consume_work_receiver len: {}",
-        //     self.finished_consume_work_receiver.len()
-        // );
         while let Ok(result) = self.finished_consume_work_receiver.try_recv() {
             let inflight_batch_info = self
                 .inflight_batches
                 .remove(&result.work.batch_id.0)
                 .expect("batch must be inflight to be removed");
 
-            // self.prio_graph
-            //     .unblock(&inflight_batch_info.batch_priority_id);
-            // self.prio_graph_ids
-            //     .remove(&inflight_batch_info.batch_priority_id);
-            // container.remove_batch_by_id(inflight_batch_info.batch_priority_id.id);
+            for (batch_priority_id, _) in inflight_batch_info.batch_priority_ids {
+                self.prio_graph.unblock(&batch_priority_id);
+                self.prio_graph_ids.remove(&batch_priority_id);
+                container.remove_batch_by_id(batch_priority_id.id);
 
-            // self.bam_response_handle.send_result(
-            //     priority_to_seq_id(inflight_batch_info.batch_priority_id.priority),
-            //     result.work.revert_on_error,
-            //     result
-            //         .extra_info
-            //         .expect("bam requires extra info")
-            //         .processed_results,
-            // );
+                // TODO (LB): need to do the batching based on batch_length here!
+                // self.bam_response_handle.send_result(
+                //     priority_to_seq_id(batch_priority_id.priority),
+                //     result.work.revert_on_error,
+                //     result
+                //         .extra_info
+                //         .as_ref()
+                //         .expect("bam requires extra info")
+                //         .processed_results
+                //         .clone(),
+                // );
+            }
         }
 
         Ok((num_transactions, 0))

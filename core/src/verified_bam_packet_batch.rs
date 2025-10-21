@@ -12,6 +12,7 @@ pub enum BamPacketBatchError {
     MissingMeta,
     InconsistentRevertOnError,
     PacketTooLarge,
+    MultiplePacketsNotAllowed,
 }
 
 pub struct BamPacketBatchMeta {
@@ -123,6 +124,12 @@ impl VerifiedBamPacketBatch {
             return Err(BamPacketBatchError::InconsistentRevertOnError);
         };
 
+        // Handling multiple packets in the same batch which don't revert needs downstream changes in the container
+        // and other data structures
+        if !revert_on_error && atomic_txn_batch.packets.len() > 1 {
+            return Err(BamPacketBatchError::MultiplePacketsNotAllowed);
+        }
+
         Ok(revert_on_error)
     }
 }
@@ -132,23 +139,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_max_schedule_slot_out_of_range_returns_error() {}
+    fn test_max_schedule_slot_out_of_range_returns_error() {
+        panic!("add me");
+    }
 
     #[test]
-    fn test_empty_batch_returns_error() {}
+    fn test_empty_batch_returns_error() {
+        panic!("add me");
+    }
 
     #[test]
-    fn test_too_many_packets_returns_error() {}
+    fn test_too_many_packets_returns_error() {
+        panic!("add me");
+    }
 
     #[test]
-    fn test_packet_too_large_returns_error() {}
+    fn test_packet_too_large_returns_error() {
+        panic!("add me");
+    }
 
     #[test]
-    fn test_packet_meta_size_too_large_returns_error() {}
+    fn test_packet_meta_size_too_large_returns_error() {
+        panic!("add me");
+    }
 
     #[test]
-    fn test_packet_meta_missing_returns_error() {}
+    fn test_packet_meta_missing_returns_error() {
+        panic!("add me");
+    }
 
     #[test]
-    fn test_inconsistent_revert_on_error_returns_error() {}
+    fn test_inconsistent_revert_on_error_returns_error() {
+        panic!("add me");
+    }
 }

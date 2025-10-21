@@ -59,6 +59,7 @@ pub(crate) struct TransactionStateContainer<Tx: TransactionWithMeta> {
 
 #[derive(Clone)]
 pub struct BatchInfo {
+    #[allow(dead_code)]
     pub(crate) max_schedule_slot: u64,
     pub(crate) transaction_ids: SmallVec<[TransactionId; 5]>,
     pub(crate) revert_on_error: bool,

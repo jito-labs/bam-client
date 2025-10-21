@@ -1,7 +1,6 @@
 use {
     crossbeam_channel::{Receiver, Sender},
     jito_protos::proto::bam_types::AtomicTxnBatchResult,
-    log::info,
     solana_compute_budget_interface::ComputeBudgetInstruction,
     solana_core::{
         bam_dependencies::BamOutboundMessage,
@@ -64,12 +63,14 @@ struct BamOutboundMessageResult {
 }
 
 struct BamTransactionInfo {
+    #[allow(dead_code)]
     time_sent: Instant,
     #[allow(dead_code)]
     transaction: Transaction,
 }
 
 struct BamTransactionAndResult {
+    #[allow(dead_code)]
     transaction: BamTransactionInfo,
     result: Option<BamOutboundMessageResult>,
 }

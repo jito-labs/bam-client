@@ -3,16 +3,12 @@
 //! this implementation only functions during the `Consume/Hold` phase; otherwise it will send them back
 //! to BAM with a `Retryable` result.
 use crate::bam_response_handle::BamResponseHandle;
-use crate::banking_stage::consumer::Consumer;
 use crate::banking_stage::transaction_scheduler::receive_and_buffer::calculate_max_age;
 use crate::banking_stage::transaction_scheduler::receive_and_buffer::calculate_priority_and_cost;
 use crate::banking_stage::transaction_scheduler::receive_and_buffer::DisconnectedError;
 use crate::banking_stage::transaction_scheduler::receive_and_buffer::ReceivingStats;
-use crate::banking_stage::transaction_scheduler::transaction_priority_id::TransactionPriorityId;
 use crate::banking_stage::transaction_scheduler::transaction_state::TransactionState;
 use crate::banking_stage::transaction_scheduler::transaction_state_container::SharedBytes;
-
-use crate::banking_stage::transaction_scheduler::transaction_state_container::StateContainer;
 use crate::banking_stage::transaction_scheduler::transaction_state_container::TransactionViewState;
 use crate::banking_stage::transaction_scheduler::transaction_state_container::TransactionViewStateContainer;
 use crate::banking_stage::transaction_scheduler::transaction_state_container::EXTRA_CAPACITY;
@@ -23,7 +19,6 @@ use agave_transaction_view::transaction_view::SanitizedTransactionView;
 
 use arrayvec::ArrayVec;
 use crossbeam_channel::{Receiver, RecvTimeoutError, TryRecvError};
-use solana_clock::MAX_PROCESSING_AGE;
 use solana_svm_transaction::svm_message::SVMMessage;
 
 use solana_accounts_db::account_locks::validate_account_locks;
@@ -35,7 +30,6 @@ use solana_measure::measure_us;
 use solana_pubkey::Pubkey;
 use solana_runtime::bank::Bank;
 use solana_runtime_transaction::transaction_meta::StaticMeta;
-use solana_svm::transaction_error_metrics::TransactionErrorMetrics;
 use solana_transaction::sanitized::MessageHash;
 
 use std::time::Instant;
@@ -99,10 +93,9 @@ impl BamReceiveAndBuffer {
         let mut stats = ReceivingStats::default();
 
         let transaction_account_lock_limit = working_bank.get_transaction_account_lock_limit();
-        let mut error_counters = TransactionErrorMetrics::default();
 
-        // The 5 packet check exists when creating the VerifiedBamPacketBatch, but might get removed in the future.
-        // This check exists to ensure that we don't accidentally overflow the transactions ArrayVec below.
+        // This check exists to ensure that we don't accidentally overflow the transactions ArrayVec below, even though
+        // the code should have already checked the max packet batch length
         if bam_packet_batch.packet_batch().len() > EXTRA_CAPACITY {
             self.bam_response_handle
                 .send_sanitization_error(bam_packet_batch.meta().seq_id, 0);
@@ -117,8 +110,6 @@ impl BamReceiveAndBuffer {
                 .iter()
                 .map(|p| p.data(..).unwrap()),
         );
-
-        // let lock_results: [_; EXTRA_CAPACITY] = core::array::from_fn(|_| Ok(()));
 
         let mut packet_index = 0;
         let mut insert_map_error = None;
@@ -164,15 +155,15 @@ impl BamReceiveAndBuffer {
                 }
             },
         ) {
-            Ok(Some(batch_id)) => {
-                let transaction_ids = {
-                    let batch_info = container.get_batch(batch_id).expect("batch must exist");
-                    let mut transaction_ids = ArrayVec::<_, EXTRA_CAPACITY>::new();
-                    transaction_ids.extend(batch_info.transaction_ids.iter().cloned());
-                    transaction_ids
-                };
+            Ok(Some(_batch_id)) => {
+                // let transaction_ids = {
+                //     let batch_info = container.get_batch(batch_id).expect("batch must exist");
+                //     let mut transaction_ids = ArrayVec::<_, EXTRA_CAPACITY>::new();
+                //     transaction_ids.extend(batch_info.transaction_ids.iter().cloned());
+                //     transaction_ids
+                // };
 
-                let mut error = None;
+                // let mut error = None;
 
                 // Note: mega-batching these transaction checks would probably speed things up
                 // let mut transactions = ArrayVec::<_, EXTRA_CAPACITY>::new();
@@ -211,19 +202,19 @@ impl BamReceiveAndBuffer {
                 // }
                 // drop(transactions);
 
-                if let Some((error_index, error)) = error {
-                    container.remove_batch_by_id(batch_id);
-                    self.bam_response_handle.send_not_committed_result(
-                        bam_packet_batch.meta().seq_id,
-                        error_index,
-                        error,
-                    );
-                } else {
-                    container.push_batch_id_into_queue(TransactionPriorityId::new(
-                        seq_id_to_priority(bam_packet_batch.meta().seq_id),
-                        batch_id,
-                    ));
-                }
+                // if let Some((error_index, error)) = error {
+                //     container.remove_batch_by_id(batch_id);
+                //     self.bam_response_handle.send_not_committed_result(
+                //         bam_packet_batch.meta().seq_id,
+                //         error_index,
+                //         error,
+                //     );
+                // } else {
+                //     container.push_batch_id_into_queue(TransactionPriorityId::new(
+                //         seq_id_to_priority(bam_packet_batch.meta().seq_id),
+                //         batch_id,
+                //     ));
+                // }
             }
             // Ok(None) means an error occurred during insertion, all of the transactions were removed from the container and insert_map_error is set
             Ok(None) => {}
