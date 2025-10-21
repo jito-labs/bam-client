@@ -52,7 +52,7 @@ pub(crate) struct TransactionStateContainer<Tx: TransactionWithMeta> {
 struct BatchInfo {
     batch_id: usize,
     revert_on_error: bool,
-    valid_for_slot: u64,
+    max_schedule_slot: u64,
 }
 
 enum BatchIdOrTransactionState<Tx: TransactionWithMeta> {
@@ -175,7 +175,7 @@ impl<Tx: TransactionWithMeta> StateContainer<Tx> for TransactionStateContainer<T
         Some((
             self.batch_id_to_transaction_ids.get(&batch_info.batch_id)?,
             batch_info.revert_on_error,
-            batch_info.valid_for_slot,
+            batch_info.max_schedule_slot,
         ))
     }
 
@@ -270,7 +270,7 @@ impl<Tx: TransactionWithMeta> TransactionStateContainer<Tx> {
         priority: u64,
         cost: u64,
         revert_on_error: bool,
-        valid_for_slot: u64,
+        max_schedule_slot: u64,
     ) -> Option<usize> {
         let capacity_required = self.id_to_transaction_state.len() + txns_max_age.len() + 1;
         if capacity_required >= self.id_to_transaction_state.capacity() {
@@ -282,7 +282,7 @@ impl<Tx: TransactionWithMeta> TransactionStateContainer<Tx> {
         entry.insert(BatchIdOrTransactionState::Batch(BatchInfo {
             batch_id,
             revert_on_error,
-            valid_for_slot,
+            max_schedule_slot,
         }));
 
         let mut transaction_ids = SmallVec::with_capacity(txns_max_age.len());
