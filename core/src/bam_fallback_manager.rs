@@ -257,7 +257,7 @@ impl BamFallbackManager {
         }
 
         let poh_recorder = poh_recorder.read().unwrap();
-        // Check if we're somwewhere in the middle of a leader rotation
+        // Check if we're somewhere in the middle of a leader rotation
         // The range is [leader_first_tick_height, leader_last_tick_height]
         poh_recorder.would_be_leader(0)
     }

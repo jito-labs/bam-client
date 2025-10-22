@@ -22,6 +22,7 @@ use {
     solana_geyser_plugin_manager::GeyserPluginManagerRequest,
     solana_gossip::contact_info::{ContactInfo, Protocol, SOCKET_ADDR_UNSPECIFIED},
     solana_keypair::{read_keypair_file, Keypair},
+    solana_metrics::datapoint_info,
     solana_pubkey::Pubkey,
     solana_rpc::rpc::verify_pubkey,
     solana_rpc_client_api::{config::RpcAccountIndex, custom_error::RpcCustomError},
@@ -572,6 +573,12 @@ impl AdminRpc for AdminRpcImpl {
                         "Could not create endpoint: {e}"
                     )));
                 }
+            } else {
+                datapoint_info!(
+                    "bam_manually_disconnected",
+                    ("count", 1, i64),
+                    ("previous_bam_url", old_bam_url.unwrap_or_default(), String)
+                );
             }
         }
 
@@ -1747,12 +1754,8 @@ mod tests {
     fn test_set_bam_url() {
         let test_validator = TestValidatorWithAdminRpc::new();
 
-        let some_bam_url = "http://example.com:8080/bam";
-
-        let set_initial_bam_url_request = format!(
-            r#"{{"jsonrpc":"2.0","id":1,"method":"setBamUrl","params":["{some_bam_url}"]}}"#,
-        );
-        let response = test_validator.handle_request(&set_initial_bam_url_request);
+        let set_initial_bam_url_request = r#"{{"jsonrpc":"2.0","id":1,"method":"setBamUrl","params":["{http://example.com:8080/bam}"]}}"#;
+        let response = test_validator.handle_request(set_initial_bam_url_request);
 
         let expected_parsed_response: Value = serde_json::from_str(
             r#"{
