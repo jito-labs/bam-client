@@ -17,12 +17,14 @@ use {
             transaction_scheduler::{
                 prio_graph_scheduler::PrioGraphScheduler,
                 scheduler_controller::SchedulerController, scheduler_error::SchedulerError,
+                transaction_state_container::SharedBytes,
             },
         },
         bundle_stage::bundle_account_locker::BundleAccountLocker,
         validator::{BlockProductionMethod, TransactionStructure},
     },
     agave_banking_stage_ingress_types::BankingPacketReceiver,
+    agave_transaction_view::resolved_transaction_view::ResolvedTransactionView,
     conditional_mod::conditional_vis_mod,
     consumer::TipProcessingDependencies,
     crossbeam_channel::{unbounded, Receiver, Sender},
@@ -38,7 +40,6 @@ use {
     },
     solana_runtime_transaction::runtime_transaction::RuntimeTransaction,
     solana_time_utils::AtomicInterval,
-    solana_transaction::sanitized::SanitizedTransaction,
     std::{
         collections::HashSet,
         num::{NonZeroUsize, Saturating},
@@ -701,13 +702,14 @@ impl BankingStage {
                 Builder::new()
                     .name("solBamSched".to_string())
                     .spawn(move || {
-                        let scheduler =
-                            BamScheduler::<RuntimeTransaction<SanitizedTransaction>>::new(
-                                work_sender,
-                                finished_work_receiver,
-                                bam_dependencies.outbound_sender.clone(),
-                                context.bank_forks.clone(),
-                            );
+                        let scheduler = BamScheduler::<
+                            RuntimeTransaction<ResolvedTransactionView<SharedBytes>>,
+                        >::new(
+                            work_sender,
+                            finished_work_receiver,
+                            bam_dependencies.outbound_sender.clone(),
+                            context.bank_forks.clone(),
+                        );
                         let receive_and_buffer = BamReceiveAndBuffer::new(
                             bam_scheduler_exit.clone(),
                             bam_dependencies.bam_enabled.clone(),

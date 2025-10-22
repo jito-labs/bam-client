@@ -2,20 +2,26 @@
 //! and buffers from into the the `TransactionStateContainer`. Key thing to note:
 //! this implementation only functions during the `Consume/Hold` phase; otherwise it will send them back
 //! to BAM with a `Retryable` result.
+use crate::banking_stage::immutable_deserialized_packet::DeserializedPacketError;
 use crate::banking_stage::scheduler_messages::MaxAge;
 use crate::banking_stage::transaction_scheduler::receive_and_buffer::DisconnectedError;
+use crate::banking_stage::transaction_scheduler::transaction_state_container::SharedBytes;
 use crate::{
     bam_dependencies::BamOutboundMessage,
     banking_stage::transaction_scheduler::receive_and_buffer::ReceivingStats,
 };
+use agave_transaction_view::resolved_transaction_view::ResolvedTransactionView;
+use agave_transaction_view::transaction_version::TransactionVersion;
+use agave_transaction_view::transaction_view::SanitizedTransactionView;
 use crossbeam_channel::{RecvTimeoutError, TryRecvError};
 use solana_clock::{Slot, MAX_PROCESSING_AGE};
 use solana_measure::{measure::Measure, measure_us};
 use solana_packet::{PacketFlags, PACKET_DATA_SIZE};
 
 use solana_perf::sigverify::ed25519_verify_cpu;
+use solana_svm_transaction::svm_message::SVMMessage;
 use solana_pubkey::Pubkey;
-use solana_transaction::sanitized::SanitizedTransaction;
+use solana_transaction::sanitized::MessageHash;
 use std::{
     cmp::min,
     collections::HashSet,
@@ -34,7 +40,6 @@ use {
     crate::banking_stage::{
         consumer::Consumer,
         decision_maker::BufferedPacketsDecision,
-        immutable_deserialized_packet::{DeserializedPacketError, ImmutableDeserializedPacket},
         transaction_scheduler::{
             bam_utils::{convert_deserialize_error_to_proto, convert_txn_error_to_proto},
             receive_and_buffer::{calculate_max_age, calculate_priority_and_cost},
@@ -58,9 +63,9 @@ use {
 type PrevalidationResult = Result<(AtomicTxnBatch, bool, u32, u64), (Reason, u32)>;
 type PrevalidationOutput = (Vec<PrevalidationResult>, ReceivingStats);
 
-type DeserializationResult =
-    Result<(Vec<ImmutableDeserializedPacket>, bool, u32, u64), (Reason, u32)>;
-type DeserializationOutput = (Vec<DeserializationResult>, ReceivingStats);
+type VerifyResult =
+    Result<(Vec<SharedBytes>, bool, u32, u64), (Reason, u32)>;
+type VerifyOutput = (Vec<VerifyResult>, ReceivingStats);
 
 pub struct BamReceiveAndBuffer {
     bam_enabled: Arc<AtomicBool>,
@@ -71,7 +76,7 @@ pub struct BamReceiveAndBuffer {
 }
 
 struct ParsedBatch {
-    pub txns_max_age: Vec<(RuntimeTransaction<SanitizedTransaction>, MaxAge)>,
+    pub txns_max_age: Vec<(RuntimeTransaction<ResolvedTransactionView<SharedBytes>>, MaxAge)>,
     pub cost: u64,
     priority: u64,
     pub revert_on_error: bool,
@@ -159,8 +164,8 @@ impl BamReceiveAndBuffer {
                 }
             }
     
-            let ((deserialized_batches_results, deserialize_stats), duration_us) =
-                measure_us!(Self::batch_deserialize_and_verify(
+            let ((verify_results, deserialize_stats), duration_us) =
+                measure_us!(Self::batch_verify(
                     &recv_buffer,
                     bank_forks.read().unwrap().working_bank().slot(),
                     &mut metrics));
@@ -168,15 +173,15 @@ impl BamReceiveAndBuffer {
             metrics.increment_total_us(duration_us);
             recv_buffer.clear();
 
-            for result in deserialized_batches_results {
+            for result in verify_results {
                 match result {
-                    Ok((deserialized_batch, revert_on_error, seq_id, max_schedule_slot)) => {
+                    Ok((verified_batch, revert_on_error, seq_id, max_schedule_slot)) => {
                         metrics
                             .sigverify_metrics
                             .increment_total_batches_verified(1);
                         let ((parse_result, parse_stats), duration_us) =
-                            measure_us!(Self::parse_deserialized_batch(
-                                deserialized_batch,
+                            measure_us!(Self::parse_batch(
+                                verified_batch,
                                 seq_id,
                                 revert_on_error,
                                 max_schedule_slot,
@@ -263,8 +268,8 @@ impl BamReceiveAndBuffer {
             ));
     }
 
-    fn parse_deserialized_batch(
-        deserialized_batch: Vec<ImmutableDeserializedPacket>,
+    fn parse_batch(
+        verified_batch: Vec<SharedBytes>,
         seq_id: u32,
         revert_on_error: bool,
         max_schedule_slot: u64,
@@ -285,15 +290,52 @@ impl BamReceiveAndBuffer {
         let transaction_account_lock_limit = working_bank.get_transaction_account_lock_limit();
         let vote_only = working_bank.vote_only_bank();
 
-        let mut packets = vec![];
         let mut cost: u64 = 0;
         let mut txns_max_age = vec![];
 
         // Checks are taken from receive_and_buffer.rs:
         // SanitizedTransactionReceiveAndBuffer::buffer_packets
-        for (index, parsed_packet) in deserialized_batch.into_iter().enumerate() {
+        for (index, verified_packet) in verified_batch.into_iter().enumerate() {
+            if vote_only {
+                return (
+                    Err(Reason::DeserializationError(
+                        jito_protos::proto::bam_types::DeserializationError {
+                            index: index as u32,
+                            reason: DeserializationErrorReason::SanitizeError as i32,
+                        },
+                    )),
+                    stats,
+                );
+            }
+
+            // Parsing and basic sanitization checks
+            let sanitization_start = Instant::now();
+            let Ok(view) = SanitizedTransactionView::try_new_sanitized(verified_packet) else {
+                return (Err(Reason::DeserializationError(
+                    jito_protos::proto::bam_types::DeserializationError {
+                        index: index as u32,
+                        reason: DeserializationErrorReason::SanitizeError as i32,
+                    },
+                )), stats);
+            };
+
+            let Ok(view) = RuntimeTransaction::<SanitizedTransactionView<_>>::try_from(
+                view,
+                MessageHash::Compute,
+                None,
+            ) else {
+                return (Err(Reason::DeserializationError(
+                    jito_protos::proto::bam_types::DeserializationError {
+                        index: index as u32,
+                        reason: DeserializationErrorReason::SanitizeError as i32,
+                    },
+                )), stats);
+            };
+            let sanitization_end = Instant::now();
+            metrics.increment_sanitization_us(sanitization_end.duration_since(sanitization_start).as_micros() as u64);
+
             // Check 0: Reject vote transactions
-            if parsed_packet.is_simple_vote() {
+            if view.is_simple_vote_transaction() {
                 stats.num_dropped_on_parsing_and_sanitization += 1;
                 return (
                     Err(Reason::DeserializationError(
@@ -306,31 +348,50 @@ impl BamReceiveAndBuffer {
                 );
             }
 
-            // Check 1: Ensure the transaction is valid
-            let (Some((tx, deactivation_slot)), duration_us) = measure_us!(parsed_packet
-                .build_sanitized_transaction(
-                    vote_only,
-                    root_bank.as_ref(),
-                    root_bank.get_reserved_account_keys(),
-                ))
-            else {
-                stats.num_dropped_on_parsing_and_sanitization += 1;
+            // Check 1: Load addresses for transaction and convert to ResolvedTransactionView
+            let resolution_start = sanitization_end;
+            let load_addresses_result = match view.version() {
+                TransactionVersion::Legacy => Ok((None, u64::MAX)),
+                TransactionVersion::V0 => root_bank
+                    .load_addresses_from_ref(view.address_table_lookup_iter())
+                    .map(|(loaded_addresses, deactivation_slot)| {
+                        (Some(loaded_addresses), deactivation_slot)
+                    }),
+            };
+            let Ok((loaded_addresses, deactivation_slot)) = load_addresses_result else {
                 return (
                     Err(Reason::DeserializationError(
                         jito_protos::proto::bam_types::DeserializationError {
-                            index: 0,
+                            index: index as u32,
                             reason: DeserializationErrorReason::SanitizeError as i32,
                         },
                     )),
                     stats,
                 );
             };
-            metrics.increment_sanitization_us(duration_us);
+
+            let Ok(view) = RuntimeTransaction::<ResolvedTransactionView<_>>::try_from(
+                view,
+                loaded_addresses,
+                root_bank.get_reserved_account_keys(),
+            ) else {
+                return (
+                    Err(Reason::DeserializationError(
+                        jito_protos::proto::bam_types::DeserializationError {
+                            index: index as u32,
+                            reason: DeserializationErrorReason::SanitizeError as i32,
+                        },
+                    )),
+                    stats,
+                );
+            };
+            let resolution_end = Instant::now();
+            metrics.increment_resolution_us(resolution_end.duration_since(resolution_start).as_micros() as u64);
 
             // Check 2: Ensure no duplicates and valid number of account locks
             let start = Instant::now();
             if let Err(err) =
-                validate_account_locks(tx.message().account_keys(), transaction_account_lock_limit)
+                validate_account_locks(view.account_keys(), transaction_account_lock_limit)
             {
                 let reason = convert_txn_error_to_proto(err);
                 stats.num_dropped_on_lock_validation += 1;
@@ -347,7 +408,7 @@ impl BamReceiveAndBuffer {
             metrics.increment_lock_validation_us(start.elapsed().as_micros() as u64);
 
             // Check 3: Ensure the compute budget limits are valid
-            let (result, duration_us) = measure_us!(tx
+            let (result, duration_us) = measure_us!(view
                 .compute_budget_instruction_details()
                 .sanitize_and_convert_to_compute_budget_limits(&working_bank.feature_set));
             metrics.increment_fee_budget_extraction_us(duration_us);
@@ -371,7 +432,7 @@ impl BamReceiveAndBuffer {
             // Check 4: Ensure valid blockhash and blockhash is not too old
             let lock_results: [_; 1] = core::array::from_fn(|_| Ok(()));
             let (check_results, duration_us) = measure_us!(working_bank.check_transactions(
-                std::slice::from_ref(&tx),
+                std::slice::from_ref(&view),
                 &lock_results,
                 MAX_PROCESSING_AGE,
                 &mut TransactionErrorMetrics::default(),
@@ -394,7 +455,7 @@ impl BamReceiveAndBuffer {
             // Check 5: Ensure the fee payer has enough to pay for the transaction fee
             let (result, duration_us) = measure_us!(Consumer::check_fee_payer_unlocked(
                 &working_bank,
-                &tx,
+                &view,
                 &mut TransactionErrorMetrics::default(),
             ));
             metrics.increment_fee_payer_check_us(duration_us);
@@ -413,8 +474,7 @@ impl BamReceiveAndBuffer {
             }
 
             // Check 6: Ensure none of the accounts touch blacklisted accounts
-            let (contains_blacklisted_account, duration_us) = measure_us!(tx
-                .message()
+            let (contains_blacklisted_account, duration_us) = measure_us!(view
                 .account_keys()
                 .iter()
                 .any(|key| blacklisted_accounts.contains(key)));
@@ -435,10 +495,9 @@ impl BamReceiveAndBuffer {
             let max_age = calculate_max_age(sanitized_epoch, deactivation_slot, alt_resolved_slot);
 
             let (_, txn_cost) =
-                calculate_priority_and_cost(&tx, &fee_budget_limits.into(), &working_bank);
+                calculate_priority_and_cost(&view, &fee_budget_limits.into(), &working_bank);
             cost = cost.saturating_add(txn_cost);
-            txns_max_age.push((tx, max_age));
-            packets.push(Arc::new(parsed_packet));
+            txns_max_age.push((view, max_age));
         }
 
         let priority = seq_id_to_priority(seq_id);
@@ -559,11 +618,11 @@ impl BamReceiveAndBuffer {
         (prevalidated, stats)
     }
 
-    fn batch_deserialize_and_verify(
+    fn batch_verify(
         atomic_txn_batches: &[AtomicTxnBatch],
         current_slot: Slot,
         metrics: &mut BamReceiveAndBufferMetrics
-    ) -> DeserializationOutput {
+    ) -> VerifyOutput {
         fn proto_packet_to_packet(from_packet: &Packet) -> solana_packet::Packet {
             let mut to_packet = solana_packet::Packet::default();
             to_packet.meta_mut().size = from_packet.data.len();
@@ -586,12 +645,12 @@ impl BamReceiveAndBuffer {
             to_packet
         }
 
-        fn pkt_to_idp(
+        fn pkt_to_shared_bytes(
             solana_packet_ref: &solana_perf::packet::PacketRef,
             i: usize,
             seq_id: u32,
             metrics: &mut BamReceiveAndBufferMetrics,
-        ) -> Result<ImmutableDeserializedPacket, (Reason, u32)> {
+        ) -> Result<SharedBytes, (Reason, u32)> {
             if solana_packet_ref.meta().discard() {
                 let reason =
                     convert_deserialize_error_to_proto(&DeserializedPacketError::SanitizeError(
@@ -608,29 +667,27 @@ impl BamReceiveAndBuffer {
                 ));
             }
 
-            let (packet_result, duration_us) = measure_us!(ImmutableDeserializedPacket::new(
-                *solana_packet_ref
-            )
-            .map_err(|e| (i, e)));
-            metrics.increment_deserialization_us(duration_us);
+            metrics
+                .sigverify_metrics
+                .increment_total_packets_verified(1);
 
-            match packet_result {
-                Ok(deserialized) => {
-                    metrics
-                        .sigverify_metrics
-                        .increment_total_packets_verified(1);
-                    Ok(deserialized)
-                }
-                Err((i, e)) => Err((
+            let Some(data) = solana_packet_ref.data(..) else {
+                let reason =
+                    convert_deserialize_error_to_proto(&DeserializedPacketError::SanitizeError(
+                        solana_sanitize::SanitizeError::InvalidValue,
+                    ));
+                return Err((
                     Reason::DeserializationError(
                         jito_protos::proto::bam_types::DeserializationError {
                             index: i as u32,
-                            reason: convert_deserialize_error_to_proto(&e) as i32,
+                            reason: reason as i32,
                         },
                     ),
                     seq_id,
-                )),
-            }
+                ));
+            };
+
+            Ok(SharedBytes::new(data.to_vec()))
         }
 
         let mut stats = ReceivingStats::default();
@@ -676,7 +733,7 @@ impl BamReceiveAndBuffer {
                     let deserialized = batch
                         .iter()
                         .enumerate()
-                        .map(|(i, pkt)| pkt_to_idp(&pkt, i, seq_id, metrics))
+                        .map(|(i, pkt)| pkt_to_shared_bytes(&pkt, i, seq_id, metrics))
                         .collect::<Result<Vec<_>, _>>()?;
 
                     Ok((deserialized, revert_on_error, seq_id, max_schedule_slot))
@@ -693,7 +750,7 @@ const ATOMIC_TXN_BATCH_BURST: usize = 128;
 const TIMEOUT: Duration = Duration::from_millis(1);
 
 impl ReceiveAndBuffer for BamReceiveAndBuffer {
-    type Transaction = RuntimeTransaction<SanitizedTransaction>;
+    type Transaction = RuntimeTransaction<ResolvedTransactionView<SharedBytes>>;
     type Container = TransactionStateContainer<Self::Transaction>;
 
     fn receive_and_buffer_packets(
@@ -794,9 +851,9 @@ pub fn priority_to_seq_id(priority: u64) -> u32 {
 #[derive(Default)]
 struct BamReceiveAndBufferMetrics {
     total_us: u64,
-    deserialization_us: u64,
     sanitization_us: u64,
     lock_validation_us: u64,
+    resolution_us: u64,
     fee_budget_extraction_us: u64,
     check_transactions_us: u64,
     fee_payer_check_us: u64,
@@ -807,9 +864,9 @@ struct BamReceiveAndBufferMetrics {
 impl BamReceiveAndBufferMetrics {
     fn has_data(&self) -> bool {
         self.total_us > 0
-            || self.deserialization_us > 0
             || self.sanitization_us > 0
             || self.lock_validation_us > 0
+            || self.resolution_us > 0
             || self.fee_budget_extraction_us > 0
             || self.check_transactions_us > 0
             || self.fee_payer_check_us > 0
@@ -825,9 +882,9 @@ impl BamReceiveAndBufferMetrics {
         datapoint_info!(
             "bam-receive-and-buffer",
             ("total_us", self.total_us, i64),
-            ("deserialization_us", self.deserialization_us, i64),
             ("sanitization_us", self.sanitization_us, i64),
             ("lock_validation_us", self.lock_validation_us, i64),
+            ("resolution_us", self.resolution_us, i64),
             (
                 "fee_budget_extraction_us",
                 self.fee_budget_extraction_us,
@@ -845,12 +902,12 @@ impl BamReceiveAndBufferMetrics {
         self.total_us = self.total_us.saturating_add(us);
     }
 
-    fn increment_deserialization_us(&mut self, us: u64) {
-        self.deserialization_us = self.deserialization_us.saturating_add(us);
-    }
-
     fn increment_sanitization_us(&mut self, us: u64) {
         self.sanitization_us = self.sanitization_us.saturating_add(us);
+    }
+
+    fn increment_resolution_us(&mut self, us: u64) {
+        self.resolution_us = self.resolution_us.saturating_add(us);
     }
 
     fn increment_lock_validation_us(&mut self, us: u64) {
@@ -1030,7 +1087,7 @@ mod tests {
     ) -> (
         Arc<AtomicBool>,
         BamReceiveAndBuffer,
-        TransactionStateContainer<RuntimeTransaction<SanitizedTransaction>>,
+        TransactionStateContainer<RuntimeTransaction<ResolvedTransactionView<SharedBytes>>>,
         crossbeam_channel::Receiver<BamOutboundMessage>,
     ) {
         let exit: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
@@ -1170,7 +1227,7 @@ mod tests {
         };
 
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&[bundle], Slot::MAX, &mut stats);
+        let (results, _batch_stats) = BamReceiveAndBuffer::batch_verify(&[bundle], Slot::MAX, &mut stats);
 
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
@@ -1190,7 +1247,7 @@ mod tests {
         };
 
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], Slot::MAX, &mut stats);
+        let (results, batch_stats) = BamReceiveAndBuffer::batch_verify(&[batch], Slot::MAX, &mut stats);
 
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err());
@@ -1214,7 +1271,7 @@ mod tests {
         };
 
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], Slot::MAX, &mut stats);
+        let (results, _batch_stats) = BamReceiveAndBuffer::batch_verify(&[batch], Slot::MAX, &mut stats);
         
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err());
@@ -1244,14 +1301,14 @@ mod tests {
         };
 
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], Slot::MAX, &mut stats);
+        let (results, _batch_stats) = BamReceiveAndBuffer::batch_verify(&[batch], Slot::MAX, &mut stats);
         
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
 
         if let Ok((deserialized_packets, revert_on_error, seq_id, max_schedule_slot)) = &results[0]
         {
-            let (result, stats) = BamReceiveAndBuffer::parse_deserialized_batch(
+            let (result, stats) = BamReceiveAndBuffer::parse_batch(
                 deserialized_packets.clone(),
                 *seq_id,
                 *revert_on_error,
@@ -1304,7 +1361,7 @@ mod tests {
         };
 
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&[bundle], Slot::MAX, &mut stats);
+        let (results, batch_stats) = BamReceiveAndBuffer::batch_verify(&[bundle], Slot::MAX, &mut stats);
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err());
         assert_eq!(batch_stats.num_dropped_without_parsing, 1);
@@ -1336,14 +1393,14 @@ mod tests {
         };
 
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], Slot::MAX, &mut stats);
+        let (results, _batch_stats) = BamReceiveAndBuffer::batch_verify(&[batch], Slot::MAX, &mut stats);
         
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
 
         if let Ok((deserialized_packets, revert_on_error, seq_id, max_schedule_slot)) = &results[0]
         {
-            let (result, stats) = BamReceiveAndBuffer::parse_deserialized_batch(
+            let (result, stats) = BamReceiveAndBuffer::parse_batch(
                 deserialized_packets.clone(),
                 *seq_id,
                 *revert_on_error,
@@ -1401,14 +1458,14 @@ mod tests {
         };
 
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], Slot::MAX, &mut stats);
+        let (results, _batch_stats) = BamReceiveAndBuffer::batch_verify(&[batch], Slot::MAX, &mut stats);
         
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
 
         if let Ok((deserialized_packets, revert_on_error, seq_id, max_schedule_slot)) = &results[0]
         {
-            let (result, stats) = BamReceiveAndBuffer::parse_deserialized_batch(
+            let (result, stats) = BamReceiveAndBuffer::parse_batch(
                 deserialized_packets.clone(),
                 *seq_id,
                 *revert_on_error,
@@ -1446,7 +1503,7 @@ mod tests {
         };
 
         let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, _batch_stats) = BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], Slot::MAX, &mut stats);
+        let (results, _batch_stats) = BamReceiveAndBuffer::batch_verify(&[batch], Slot::MAX, &mut stats);
         
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err());
