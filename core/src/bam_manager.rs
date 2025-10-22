@@ -46,13 +46,13 @@ impl NotifyKeyUpdate for BamConnectionKeyUpdater {
             .as_ref()
             .map_or("None".to_string(), |u| u.clone());
 
-        datapoint_error!(
+        datapoint_warn!(
             "bam-manager_identity-changed",
             ("count", 1, i64),
             ("identity_changed_to", key.pubkey().to_string(), String),
             ("bam_url", disconnect_url, String)
         );
-        error!(
+        warn!(
             "BAM Manager: validator identity changed! Reconnecting to BAM at url {:?} from new identity {}",
             disconnect_url,
             key.pubkey(),
@@ -117,15 +117,13 @@ impl BamManager {
 
         let identity_changed = Arc::new(AtomicBool::new(false));
 
-        let key_updater = Some(Arc::new(BamConnectionKeyUpdater {
+        let key_updater = Arc::new(BamConnectionKeyUpdater {
             bam_url: bam_url.clone(),
             identity_changed_force_reconnect: identity_changed.clone(),
-        }) as Arc<dyn NotifyKeyUpdate + Sync + Send>);
+        }) as Arc<dyn NotifyKeyUpdate + Sync + Send>;
 
         let mut key_notifiers = key_notifiers.write().unwrap();
-        if let Some(key_updater) = key_updater {
-            key_notifiers.add(KeyUpdaterType::BamConnection, key_updater);
-        }
+        key_notifiers.add(KeyUpdaterType::BamConnection, key_updater);
 
         while !exit.load(Ordering::Relaxed) {
             // Update if bam is enabled
@@ -171,7 +169,6 @@ impl BamManager {
                 cached_builder_config = None;
                 if identity_changed.load(Ordering::Relaxed) {
                     identity_changed.store(false, Ordering::Relaxed);
-                    info!("BAM validator identity changed");
                 }
                 warn!("BAM connection lost");
                 continue;
@@ -291,7 +288,7 @@ impl BamManager {
         }
         let mut block_builder_fee_info = block_builder_fee_info.lock().unwrap();
         block_builder_fee_info.block_builder = pubkey;
-        block_builder_fee_info.block_builder_commission = commission as u64;
+        block_builder_fee_info.block_builder_commission = commission;
     }
 
     fn update_bam_recipient_and_commission(
