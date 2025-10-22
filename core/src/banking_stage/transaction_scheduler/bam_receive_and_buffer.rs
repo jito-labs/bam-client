@@ -7,8 +7,10 @@ use crate::banking_stage::transaction_scheduler::receive_and_buffer::calculate_m
 use crate::banking_stage::transaction_scheduler::receive_and_buffer::calculate_priority_and_cost;
 use crate::banking_stage::transaction_scheduler::receive_and_buffer::DisconnectedError;
 use crate::banking_stage::transaction_scheduler::receive_and_buffer::ReceivingStats;
+use crate::banking_stage::transaction_scheduler::transaction_priority_id::TransactionPriorityId;
 use crate::banking_stage::transaction_scheduler::transaction_state::TransactionState;
 use crate::banking_stage::transaction_scheduler::transaction_state_container::SharedBytes;
+use crate::banking_stage::transaction_scheduler::transaction_state_container::StateContainer;
 use crate::banking_stage::transaction_scheduler::transaction_state_container::TransactionViewState;
 use crate::banking_stage::transaction_scheduler::transaction_state_container::TransactionViewStateContainer;
 use crate::banking_stage::transaction_scheduler::transaction_state_container::EXTRA_CAPACITY;
@@ -155,7 +157,7 @@ impl BamReceiveAndBuffer {
                 }
             },
         ) {
-            Ok(Some(_batch_id)) => {
+            Ok(Some(batch_id)) => {
                 // let transaction_ids = {
                 //     let batch_info = container.get_batch(batch_id).expect("batch must exist");
                 //     let mut transaction_ids = ArrayVec::<_, EXTRA_CAPACITY>::new();
@@ -165,7 +167,10 @@ impl BamReceiveAndBuffer {
 
                 // let mut error = None;
 
-                // Note: mega-batching these transaction checks would probably speed things up
+                // let lock_results: [_; EXTRA_CAPACITY] = core::array::from_fn(|_| Ok(()));
+                // let mut error_counters = TransactionErrorMetrics::new();
+
+                // // Note: mega-batching these transaction checks would probably speed things up
                 // let mut transactions = ArrayVec::<_, EXTRA_CAPACITY>::new();
                 // transactions.extend(transaction_ids.iter().map(|id| {
                 //     container
@@ -210,17 +215,16 @@ impl BamReceiveAndBuffer {
                 //         error,
                 //     );
                 // } else {
-                //     container.push_batch_id_into_queue(TransactionPriorityId::new(
-                //         seq_id_to_priority(bam_packet_batch.meta().seq_id),
-                //         batch_id,
-                //     ));
+                container.push_batch_id_into_queue(TransactionPriorityId::new(
+                    seq_id_to_priority(bam_packet_batch.meta().seq_id),
+                    batch_id,
+                ));
                 // }
             }
             // Ok(None) means an error occurred during insertion, all of the transactions were removed from the container and insert_map_error is set
             Ok(None) => {}
             // container is full, nothing was added
             Err(()) => {
-                // error!("Container is full, nothing was added");
                 stats.num_dropped_on_capacity += bam_packet_batch.packet_batch().len();
                 self.bam_response_handle
                     .send_container_full_txn_batch_result(bam_packet_batch.meta().seq_id);
@@ -340,9 +344,11 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
             (root_bank, working_bank)
         };
 
+        let mut count = 0;
+
         match decision {
             BufferedPacketsDecision::Consume(_) | BufferedPacketsDecision::Hold => {
-                loop {
+                while count < 100 {
                     let bam_packet_batch = match self.bam_packet_batch_receiver.try_recv() {
                         Ok(bam_packet_batch) => bam_packet_batch,
                         Err(TryRecvError::Disconnected) => return Err(DisconnectedError),
@@ -382,6 +388,7 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
                         &working_bank,
                         bam_packet_batch,
                     ));
+                    count += 1;
                 }
             }
             BufferedPacketsDecision::ForwardAndHold | BufferedPacketsDecision::Forward => {

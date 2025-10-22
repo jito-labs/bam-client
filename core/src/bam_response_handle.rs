@@ -7,8 +7,7 @@ use {
         },
     },
     jito_protos::proto::bam_types::{
-        atomic_txn_batch_result, not_committed::Reason, DeserializationError,
-        DeserializationErrorReason, LeaderState, SchedulingError, TransactionErrorReason,
+        atomic_txn_batch_result, not_committed::Reason, DeserializationError, DeserializationErrorReason, GenericInvalid, LeaderState, SchedulingError, TransactionErrorReason
     },
     solana_runtime::bank::Bank,
     solana_transaction_error::TransactionError,
@@ -114,7 +113,13 @@ impl BamResponseHandle {
             .try_send(BamOutboundMessage::AtomicTxnBatchResult(
                 jito_protos::proto::bam_types::AtomicTxnBatchResult {
                     seq_id,
-                    result: None, // TODO (LB): something bad
+                    result: Some(atomic_txn_batch_result::Result::NotCommitted(
+                        jito_protos::proto::bam_types::NotCommitted {
+                            reason: Some(Reason::GenericInvalid(GenericInvalid {
+                                message: "bad_sig".to_string(),
+                            })),
+                        },
+                    )),
                 },
             ))
             .is_ok()

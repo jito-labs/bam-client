@@ -197,6 +197,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                         &self.consume_work_sender,
                         &self.bam_response_handle,
                         &mut self.inflight_batches,
+                        &mut self.prio_graph_ids,
                     );
                 *num_scheduled += scheduled;
                 *num_filtered_out += filtered;
@@ -230,6 +231,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 &self.consume_work_sender,
                 &self.bam_response_handle,
                 &mut self.inflight_batches,
+                &mut self.prio_graph_ids,
             );
         *num_scheduled += scheduled;
         *num_filtered_out += filtered;
@@ -248,11 +250,12 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         consume_work_sender: &Sender<ConsumeWork<Tx>>,
         bam_response_handle: &BamResponseHandle,
         inflight_batches: &mut HashMap<u64, InflightBatchInfo>,
+        prio_graph_ids: &mut HashSet<TransactionPriorityId>,
     ) -> (
         usize, /* num scheduled  */
         usize, /* num filtered out */
     ) {
-        const CONSUME_WORK_BATCH_SIZE: usize = 4;
+        const CONSUME_WORK_BATCH_SIZE: usize = 8;
 
         let mut num_scheduled = 0;
         let mut num_filtered_out = 0;
@@ -314,6 +317,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 );
 
                 prio_graph.unblock(&batch_priority_id);
+                prio_graph_ids.remove(&batch_priority_id);
                 container.remove_batch_by_id(batch_priority_id.id);
 
                 num_filtered_out += batch_length;
@@ -429,6 +433,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             self.slot = None;
         }
 
+        println!("inflight_batches: len: {}", self.inflight_batches.len());
         while !self.inflight_batches.is_empty() {
             let Ok(work) = self.finished_consume_work_receiver.recv() else {
                 break;
@@ -445,6 +450,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                     ));
             }
         }
+        println!("inflight_batches: done");
 
         // On slot boundaries, all the transactions are removed from the container and the priority graph is cleared.
         // Anything left in the container at the end of the slot is outside the leader slot window.
@@ -522,16 +528,16 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                 container.remove_batch_by_id(batch_priority_id.id);
 
                 // TODO (LB): need to do the batching based on batch_length here!
-                // self.bam_response_handle.send_result(
-                //     priority_to_seq_id(batch_priority_id.priority),
-                //     result.work.revert_on_error,
-                //     result
-                //         .extra_info
-                //         .as_ref()
-                //         .expect("bam requires extra info")
-                //         .processed_results
-                //         .clone(),
-                // );
+                self.bam_response_handle.send_result(
+                    priority_to_seq_id(batch_priority_id.priority),
+                    result.work.revert_on_error,
+                    result
+                        .extra_info
+                        .as_ref()
+                        .expect("bam requires extra info")
+                        .processed_results
+                        .clone(),
+                );
             }
         }
 
