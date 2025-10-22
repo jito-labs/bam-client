@@ -334,6 +334,8 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
         container: &mut Self::Container,
         decision: &BufferedPacketsDecision,
     ) -> Result<ReceivingStats, DisconnectedError> {
+        const MAX_HANDLE_PACKET_BATCH_COUNT: usize = 100;
+
         let is_bam_enabled = self.bam_enabled.load(Ordering::Relaxed);
         let mut stats = ReceivingStats::default();
 
@@ -348,7 +350,9 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
 
         match decision {
             BufferedPacketsDecision::Consume(_) | BufferedPacketsDecision::Hold => {
-                while count < 100 {
+                // the receive, buffer, schedule loop needs to run hot, so limit the number of batches handled to ensure we can
+                // keep feeding the scheduler
+                while count < MAX_HANDLE_PACKET_BATCH_COUNT {
                     let bam_packet_batch = match self.bam_packet_batch_receiver.try_recv() {
                         Ok(bam_packet_batch) => bam_packet_batch,
                         Err(TryRecvError::Disconnected) => return Err(DisconnectedError),

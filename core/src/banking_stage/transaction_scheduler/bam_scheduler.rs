@@ -310,6 +310,9 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 .enumerate()
                 .find(|(_, res)| res.is_err())
             {
+                transactions_iter.by_ref().take(batch_length).for_each(drop);
+                max_ages_iter.by_ref().take(batch_length).for_each(drop);
+
                 bam_response_handle.send_not_committed_result(
                     priority_to_seq_id(batch_priority_id.priority),
                     index,
@@ -323,8 +326,8 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 num_filtered_out += batch_length;
             } else if is_revert_on_error {
                 let transactions: Vec<Tx> = transactions_iter.by_ref().take(batch_length).collect();
-                let num_txs = transactions.len();
                 let max_ages = max_ages_iter.by_ref().take(batch_length).collect();
+                let num_txs = transactions.len();
 
                 *batch_id += 1;
                 let work = ConsumeWork {
@@ -347,11 +350,10 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             } else {
                 consume_work_batch_priority_ids.push((batch_priority_id, batch_length));
                 consume_work_transactions.extend(transactions_iter.by_ref().take(batch_length));
-
                 consume_work_max_ages.extend(max_ages_iter.by_ref().take(batch_length));
 
                 let num_to_schedule = consume_work_transactions.len();
-                if num_to_schedule > CONSUME_WORK_BATCH_SIZE {
+                if num_to_schedule >= CONSUME_WORK_BATCH_SIZE {
                     *batch_id += 1;
                     let work = ConsumeWork {
                         batch_id: TransactionBatchId::new(*batch_id),

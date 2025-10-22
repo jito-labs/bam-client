@@ -260,6 +260,7 @@ impl<Tx: TransactionWithMeta> StateContainer<Tx> for TransactionStateContainer<T
             transaction_ids, ..
         } = self.batch_ids_to_batch_info.remove(id);
         for transaction_id in transaction_ids {
+            // println!("container: removed {} (tx_id)", transaction_id);
             self.id_to_transaction_state.remove(transaction_id);
         }
     }
@@ -400,7 +401,12 @@ impl TransactionViewStateContainer {
             // entry in the slab was not cleared. However, since we share
             // indexing between the slab and our `bytes_buffer`, we know that
             // `vacant_entry` is not occupied.
-            assert_eq!(Arc::strong_count(bytes_entry), 1, "entry must be unique");
+            assert_eq!(
+                Arc::strong_count(bytes_entry),
+                1,
+                "entry {} must be unique",
+                transaction_id
+            );
             let bytes = Arc::make_mut(bytes_entry);
 
             // Clear and copy the packet data into the bytes buffer.
@@ -441,6 +447,7 @@ impl TransactionViewStateContainer {
             // Optimistically add the batch to the map, removing all transaction_ids if any tx in the batch fails to deserialize.
             if let Some(transaction_id) = self.try_insert_map_only_with_data(batch, |data| f(data))
             {
+                // println!("container: inserted {} (tx_id)", transaction_id);
                 transaction_ids.push(transaction_id);
             } else {
                 for transaction_id in transaction_ids {
