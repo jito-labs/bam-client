@@ -163,8 +163,7 @@ impl BamManager {
 
             // Check if connection is healthy or if the identity changed; if no then disconnect
             // Disconnecting will cause a reconnect attempt, with the new identity if it changed
-            if !connection.is_healthy() || identity_changed.load(Ordering::Relaxed)
-            {
+            if !connection.is_healthy() || identity_changed.load(Ordering::Relaxed) {
                 current_connection = None;
                 cached_builder_config = None;
                 if identity_changed.load(Ordering::Relaxed) {
