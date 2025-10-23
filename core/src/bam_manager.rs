@@ -32,12 +32,12 @@ use {
     solana_signer::Signer,
 };
 
-pub struct BamConnectionKeyUpdater {
+pub struct BamConnectionIdentityUpdater {
     bam_url: Arc<Mutex<Option<String>>>,
     identity_changed_force_reconnect: Arc<AtomicBool>,
 }
 
-impl NotifyKeyUpdate for BamConnectionKeyUpdater {
+impl NotifyKeyUpdate for BamConnectionIdentityUpdater {
     fn update_key(&self, key: &solana_keypair::Keypair) -> Result<(), Box<dyn core::error::Error>> {
         let disconnect_url = self
             .bam_url
@@ -74,7 +74,7 @@ impl BamManager {
         bam_txns_per_slot_threshold: Arc<RwLock<u64>>,
         dependencies: BamDependencies,
         poh_recorder: Arc<RwLock<PohRecorder>>,
-        key_notifiers: Arc<RwLock<KeyUpdaters>>,
+        identity_notifiers: Arc<RwLock<KeyUpdaters>>,
     ) -> Self {
         Self {
             thread: std::thread::spawn(move || {
@@ -84,7 +84,7 @@ impl BamManager {
                     bam_txns_per_slot_threshold,
                     dependencies,
                     poh_recorder,
-                    key_notifiers,
+                    identity_notifiers,
                 )
             }),
         }
@@ -96,7 +96,7 @@ impl BamManager {
         bam_txns_per_slot_threshold: Arc<RwLock<u64>>,
         dependencies: BamDependencies,
         poh_recorder: Arc<RwLock<PohRecorder>>,
-        key_notifiers: Arc<RwLock<KeyUpdaters>>,
+        identity_notifiers: Arc<RwLock<KeyUpdaters>>,
     ) {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(8)
@@ -117,13 +117,15 @@ impl BamManager {
 
         let identity_changed = Arc::new(AtomicBool::new(false));
 
-        let key_updater = Arc::new(BamConnectionKeyUpdater {
+        let identity_updater = Arc::new(BamConnectionIdentityUpdater {
             bam_url: bam_url.clone(),
             identity_changed_force_reconnect: identity_changed.clone(),
         }) as Arc<dyn NotifyKeyUpdate + Sync + Send>;
 
-        let mut key_notifiers = key_notifiers.write().unwrap();
-        key_notifiers.add(KeyUpdaterType::BamConnection, key_updater);
+        let mut identity_notifiers = identity_notifiers.write().unwrap();
+        identity_notifiers.add(KeyUpdaterType::BamConnection, identity_updater);
+        drop(identity_notifiers);
+        info!("Added BAM connection key updater");
 
         while !exit.load(Ordering::Relaxed) {
             // Update if bam is enabled
