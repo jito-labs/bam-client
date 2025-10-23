@@ -1754,7 +1754,7 @@ mod tests {
     fn test_set_bam_url() {
         let test_validator = TestValidatorWithAdminRpc::new();
 
-        let set_initial_bam_url_request = r#"{{"jsonrpc":"2.0","id":1,"method":"setBamUrl","params":["{http://example.com:8080/bam}"]}}"#;
+        let set_initial_bam_url_request = r#"{"jsonrpc":"2.0","id":1,"method":"setBamUrl","params":["http://example.com:8080/bam"]}"#;
         let response = test_validator.handle_request(set_initial_bam_url_request);
 
         let expected_parsed_response: Value = serde_json::from_str(
