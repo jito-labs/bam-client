@@ -5,10 +5,12 @@ use {
     solana_core::bam_dependencies::BamOutboundMessage,
     solana_hash::Hash,
     solana_keypair::Keypair,
+    solana_message::Message,
     solana_perf::packet::solana_packet,
     solana_poh::poh_recorder::SharedWorkingBank,
     solana_pubkey::Pubkey,
     solana_runtime::bank::Bank,
+    solana_signature::Signature,
     solana_signer::Signer,
     solana_system_interface::instruction::transfer,
     solana_transaction::Transaction,
@@ -36,16 +38,20 @@ fn make_transfer_transaction_with_compute_unit_price(
     recent_blockhash: Hash,
     compute_unit_price: u64,
 ) -> Transaction {
-    Transaction::new_signed_with_payer(
+    let mut message = Message::new(
         &[
             transfer(&from_keypair.pubkey(), to, lamports),
             ComputeBudgetInstruction::set_compute_unit_price(compute_unit_price),
             ComputeBudgetInstruction::set_compute_unit_limit(TRANSFER_TRANSACTION_COST),
         ],
         Some(&from_keypair.pubkey()),
-        &[from_keypair],
-        recent_blockhash,
-    )
+    );
+    message.recent_blockhash = recent_blockhash;
+
+    // skip signing because we are not sending the transaction to the network and it slows down tx sending
+    let mut tx = Transaction::new_unsigned(message);
+    tx.signatures = vec![Signature::new_unique(); 1];
+    tx
 }
 
 struct BamOutboundMessageResult {
