@@ -435,7 +435,8 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             self.slot = None;
         }
 
-        println!("inflight_batches: len: {}", self.inflight_batches.len());
+        let num_inflight_batches = self.inflight_batches.len();
+        let now = Instant::now();
         while !self.inflight_batches.is_empty() {
             let Ok(work) = self.finished_consume_work_receiver.recv() else {
                 break;
@@ -452,23 +453,41 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                     ));
             }
         }
-        println!("inflight_batches: done");
+        println!(
+            "inflight_batches: time: {:?} num_inflight_batches: {}",
+            now.elapsed(),
+            num_inflight_batches
+        );
 
         // On slot boundaries, all the transactions are removed from the container and the priority graph is cleared.
         // Anything left in the container at the end of the slot is outside the leader slot window.
         // The prio_graph_ids is used instead of the priority graph pop_and_unblock because its much faster.
+        let now = Instant::now();
+        let num_prio_graph_ids = self.prio_graph_ids.len();
         for next_batch_id in self.prio_graph_ids.drain() {
             // container.remove_batch_by_id(next_batch_id.id);
             self.bam_response_handle
                 .send_outside_leader_slot_bundle_result(priority_to_seq_id(next_batch_id.priority));
         }
+        println!(
+            "prio_graph_ids: time: {:?} num_prio_graph_ids: {}",
+            now.elapsed(),
+            num_prio_graph_ids
+        );
 
         // Anything left in the container was pushed into the queue but hasn't been pulled into the priority graph yet
+        let now = Instant::now();
+        let num_container_batches = container.batch_queue_size();
         while let Some(next_batch_id) = container.pop_batch() {
             // container.remove_batch_by_id(next_batch_id.id);
             self.bam_response_handle
                 .send_outside_leader_slot_bundle_result(priority_to_seq_id(next_batch_id.priority));
         }
+        println!(
+            "container: time: {:?} num_container_batches: {}",
+            now.elapsed(),
+            num_container_batches
+        );
 
         self.prio_graph.clear();
         container.clear();
