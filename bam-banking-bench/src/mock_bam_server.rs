@@ -242,6 +242,25 @@ impl MockBamServer {
             "done waiting for results after {:?}ms",
             now.elapsed().as_millis()
         );
+
+        // if now.elapsed().as_millis() > 100 {
+        //     let mut ordered_seq_ids = bank_stats
+        //         .sent_transactions_and_results
+        //         .keys()
+        //         .collect::<Vec<_>>();
+        //     ordered_seq_ids.sort();
+        //     for seq_id in ordered_seq_ids {
+        //         let tx_and_result = bank_stats
+        //             .sent_transactions_and_results
+        //             .get(seq_id)
+        //             .unwrap();
+        //         println!(
+        //             "seq_id: {:?}, result: {:?}",
+        //             seq_id,
+        //             tx_and_result.result.as_ref().unwrap().result
+        //         );
+        //     }
+        // }
     }
 
     fn send_transactions(

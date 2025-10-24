@@ -7,7 +7,9 @@ use {
         },
     },
     jito_protos::proto::bam_types::{
-        atomic_txn_batch_result, not_committed::Reason, DeserializationError, DeserializationErrorReason, GenericInvalid, LeaderState, SchedulingError, TransactionErrorReason
+        atomic_txn_batch_result, not_committed::Reason, DeserializationError,
+        DeserializationErrorReason, GenericInvalid, LeaderState, SchedulingError,
+        TransactionErrorReason,
     },
     solana_runtime::bank::Bank,
     solana_transaction_error::TransactionError,

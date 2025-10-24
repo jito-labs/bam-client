@@ -158,68 +158,13 @@ impl BamReceiveAndBuffer {
             },
         ) {
             Ok(Some(batch_id)) => {
-                // let transaction_ids = {
-                //     let batch_info = container.get_batch(batch_id).expect("batch must exist");
-                //     let mut transaction_ids = ArrayVec::<_, EXTRA_CAPACITY>::new();
-                //     transaction_ids.extend(batch_info.transaction_ids.iter().cloned());
-                //     transaction_ids
-                // };
-
-                // let mut error = None;
-
-                // let lock_results: [_; EXTRA_CAPACITY] = core::array::from_fn(|_| Ok(()));
-                // let mut error_counters = TransactionErrorMetrics::new();
-
-                // // Note: mega-batching these transaction checks would probably speed things up
-                // let mut transactions = ArrayVec::<_, EXTRA_CAPACITY>::new();
-                // transactions.extend(transaction_ids.iter().map(|id| {
-                //     container
-                //         .get_transaction(*id)
-                //         .expect("transaction must exist")
-                // }));
-                // let check_results = working_bank.check_transactions::<RuntimeTransaction<_>>(
-                //     &transactions,
-                //     &lock_results[..transactions.len()],
-                //     MAX_PROCESSING_AGE,
-                //     &mut error_counters,
-                // );
-
-                // for (index, (result, _transaction_id)) in
-                //     check_results.iter().zip(transaction_ids.iter()).enumerate()
-                // {
-                //     match result {
-                //         Ok(_) => {
-                //             if let Err(e) = Consumer::check_fee_payer_unlocked(
-                //                 working_bank,
-                //                 transactions[index],
-                //                 &mut error_counters,
-                //             ) {
-                //                 stats.num_dropped_on_fee_payer += transaction_ids.len();
-                //                 error = Some((index, e));
-                //                 break;
-                //             }
-                //         }
-                //         Err(e) => {
-                //             error = Some((index, e.clone()));
-                //             break;
-                //         }
-                //     }
-                // }
-                // drop(transactions);
-
-                // if let Some((error_index, error)) = error {
-                //     container.remove_batch_by_id(batch_id);
-                //     self.bam_response_handle.send_not_committed_result(
-                //         bam_packet_batch.meta().seq_id,
-                //         error_index,
-                //         error,
-                //     );
-                // } else {
+                // It's expected BAM does some transaction filtering and streams transactions to the validator only during the slot
+                // they're valid, so this buffer should never grow large enough to cause a performance issue.
+                // To save on performance, buffer the packet and check the transaction/fee payer when popping off the priority queue.
                 container.push_batch_id_into_queue(TransactionPriorityId::new(
                     seq_id_to_priority(bam_packet_batch.meta().seq_id),
                     batch_id,
                 ));
-                // }
             }
             // Ok(None) means an error occurred during insertion, all of the transactions were removed from the container and insert_map_error is set
             Ok(None) => {}
@@ -334,7 +279,8 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
         container: &mut Self::Container,
         decision: &BufferedPacketsDecision,
     ) -> Result<ReceivingStats, DisconnectedError> {
-        const MAX_HANDLE_PACKET_BATCH_COUNT: usize = 100;
+        // for very high throughputs, a smaller number is better since we need to return to the scheduler quickly
+        const MAX_HANDLE_PACKET_BATCH_COUNT: usize = 256;
 
         let is_bam_enabled = self.bam_enabled.load(Ordering::Relaxed);
         let mut stats = ReceivingStats::default();
@@ -379,7 +325,7 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
                     }
 
                     // Throw away batches that are outside the maximum schedulable slot
-                    if bam_packet_batch.meta().max_schedule_slot > working_bank.slot() {
+                    if working_bank.slot() > bam_packet_batch.meta().max_schedule_slot {
                         self.bam_response_handle
                             .send_outside_leader_slot_bundle_result(bam_packet_batch.meta().seq_id);
                         stats.num_dropped_without_parsing += bam_packet_batch.packet_batch().len();

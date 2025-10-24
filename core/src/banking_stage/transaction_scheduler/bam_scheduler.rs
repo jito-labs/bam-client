@@ -164,7 +164,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         num_scheduled: &mut usize,
         num_filtered_out: &mut usize,
     ) {
-        const CHECK_TRANSACTIONS_BATCH_SIZE: usize = 128;
+        const CHECK_TRANSACTIONS_BATCH_SIZE: usize = 256;
 
         let mut batch_priority_ids: ArrayVec<TransactionPriorityId, CHECK_TRANSACTIONS_BATCH_SIZE> =
             ArrayVec::new();
@@ -255,7 +255,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         usize, /* num scheduled  */
         usize, /* num filtered out */
     ) {
-        const CONSUME_WORK_BATCH_SIZE: usize = 8;
+        const CONSUME_WORK_BATCH_SIZE: usize = 4;
 
         let mut num_scheduled = 0;
         let mut num_filtered_out = 0;
@@ -339,6 +339,11 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                     respond_with_extra_info: true,
                     max_schedule_slot: Some(working_bank.slot()),
                 };
+                // println!(
+                //     "bam_scheduler batch size: {} enqueued work: {}",
+                //     work.transactions.len(),
+                //     consume_work_sender.len()
+                // );
                 let _ = consume_work_sender.send(work);
                 num_scheduled += num_txs;
                 inflight_batches.insert(
@@ -371,6 +376,11 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                         max_schedule_slot: Some(working_bank.slot()),
                     };
 
+                    // println!(
+                    //     "bam_scheduler batch size: {} enqueued work: {}",
+                    //     work.transactions.len(),
+                    //     consume_work_sender.len()
+                    // );
                     let _ = consume_work_sender.send(work);
                     num_scheduled += num_to_schedule;
                     let batch_priority_ids = replace(
@@ -397,6 +407,11 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 max_schedule_slot: Some(working_bank.slot()),
             };
 
+            // println!(
+            //     "bam_scheduler batch size: {} enqueued work: {}",
+            //     work.transactions.len(),
+            //     consume_work_sender.len()
+            // );
             let _ = consume_work_sender.send(work);
             num_scheduled += num_to_schedule;
 
@@ -447,13 +462,14 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 .expect("batch must be inflight");
             for (batch_priority_id, _) in batch_info.batch_priority_ids {
                 self.prio_graph_ids.remove(&batch_priority_id);
+                // info!("maybe_bank_boundary_actions: outside leader slot");
                 self.bam_response_handle
                     .send_outside_leader_slot_bundle_result(priority_to_seq_id(
                         batch_priority_id.priority,
                     ));
             }
         }
-        println!(
+        info!(
             "inflight_batches: time: {:?} num_inflight_batches: {}",
             now.elapsed(),
             num_inflight_batches
@@ -466,13 +482,22 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         let num_prio_graph_ids = self.prio_graph_ids.len();
         for next_batch_id in self.prio_graph_ids.drain() {
             // container.remove_batch_by_id(next_batch_id.id);
+            // info!("maybe_bank_boundary_actions: outside leader slot");
             self.bam_response_handle
                 .send_outside_leader_slot_bundle_result(priority_to_seq_id(next_batch_id.priority));
         }
-        println!(
+        info!(
             "prio_graph_ids: time: {:?} num_prio_graph_ids: {}",
             now.elapsed(),
             num_prio_graph_ids
+        );
+
+        info!(
+            "container stats: batch_buffer_size: {} queue_size: {} batch_queue_size: {} buffer_size: {}",
+            container.batch_buffer_size(),
+            container.queue_size(),
+            container.batch_queue_size(),
+            container.buffer_size(),
         );
 
         // Anything left in the container was pushed into the queue but hasn't been pulled into the priority graph yet
@@ -480,10 +505,11 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         let num_container_batches = container.batch_queue_size();
         while let Some(next_batch_id) = container.pop_batch() {
             // container.remove_batch_by_id(next_batch_id.id);
+            // info!("maybe_bank_boundary_actions: container: outside leader slot");
             self.bam_response_handle
                 .send_outside_leader_slot_bundle_result(priority_to_seq_id(next_batch_id.priority));
         }
-        println!(
+        info!(
             "container: time: {:?} num_container_batches: {}",
             now.elapsed(),
             num_container_batches

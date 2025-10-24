@@ -555,7 +555,7 @@ impl BankingStage {
                 Builder::new()
                     .name(format!("solCoWorker{id:02}"))
                     .spawn(move || {
-                        let _ = consume_worker.run(cb);
+                        let _ = consume_worker.run(cb, index);
                     })
                     .unwrap(),
             )
@@ -702,7 +702,7 @@ impl BankingStage {
                 Builder::new()
                     .name(format!("solBamCoWorker{id:02}"))
                     .spawn(move || {
-                        let _ = consume_worker.run(|_| 0);
+                        let _ = consume_worker.run(|_| 0, index);
                     })
                     .unwrap(),
             )

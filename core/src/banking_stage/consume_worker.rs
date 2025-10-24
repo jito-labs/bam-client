@@ -93,7 +93,11 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
     }
 
     #[allow(clippy::result_large_err)]
-    pub fn run(self, reservation_cb: impl Fn(&Bank) -> u64) -> Result<(), ConsumeWorkerError<Tx>> {
+    pub fn run(
+        self,
+        reservation_cb: impl Fn(&Bank) -> u64,
+        index: usize,
+    ) -> Result<(), ConsumeWorkerError<Tx>> {
         while !self.exit.load(Ordering::Relaxed) {
             let work = self.consume_receiver.recv()?;
             self.consume_loop(work, &reservation_cb)?;
