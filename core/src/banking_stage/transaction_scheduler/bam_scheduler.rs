@@ -217,24 +217,27 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 }
             }
         }
-        let (scheduled, filtered) =
-            Self::check_transactions_and_send_work::<CHECK_TRANSACTIONS_BATCH_SIZE>(
-                container,
-                &mut self.prio_graph,
-                &working_bank,
-                &mut batch_priority_ids,
-                &mut batch_lengths,
-                &mut revert_on_errors,
-                &mut transactions,
-                &mut max_ages,
-                &mut self.batch_id,
-                &self.consume_work_sender,
-                &self.bam_response_handle,
-                &mut self.inflight_batches,
-                &mut self.prio_graph_ids,
-            );
-        *num_scheduled += scheduled;
-        *num_filtered_out += filtered;
+
+        if !transactions.is_empty() {
+            let (scheduled, filtered) =
+                Self::check_transactions_and_send_work::<CHECK_TRANSACTIONS_BATCH_SIZE>(
+                    container,
+                    &mut self.prio_graph,
+                    &working_bank,
+                    &mut batch_priority_ids,
+                    &mut batch_lengths,
+                    &mut revert_on_errors,
+                    &mut transactions,
+                    &mut max_ages,
+                    &mut self.batch_id,
+                    &self.consume_work_sender,
+                    &self.bam_response_handle,
+                    &mut self.inflight_batches,
+                    &mut self.prio_graph_ids,
+                );
+            *num_scheduled += scheduled;
+            *num_filtered_out += filtered;
+        }
     }
 
     fn check_transactions_and_send_work<const LEN: usize>(
@@ -376,11 +379,6 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                         max_schedule_slot: Some(working_bank.slot()),
                     };
 
-                    // println!(
-                    //     "bam_scheduler batch size: {} enqueued work: {}",
-                    //     work.transactions.len(),
-                    //     consume_work_sender.len()
-                    // );
                     let _ = consume_work_sender.send(work);
                     num_scheduled += num_to_schedule;
                     let batch_priority_ids = replace(
