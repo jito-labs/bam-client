@@ -125,8 +125,10 @@ pub fn extract_bam_url(matches: &ArgMatches) -> Result<Option<String>, BamUrlErr
 pub fn bam_url_argument() -> Arg<'static, 'static> {
     Arg::with_name("bam_url")
         .long("bam-url")
-        .help("URL of BAM Node; leave empty to disable BAM.")
         .takes_value(true)
+        .min_values(0)
+        .max_values(1)
+        .help("URL of BAM Node; leave empty to disable BAM.")
 }
 
 pub fn bam_transactions_per_slot_fallback_threshold_argument() -> Arg<'static, 'static> {
