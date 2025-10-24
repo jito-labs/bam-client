@@ -289,7 +289,7 @@ impl BamManager {
         }
         let mut block_builder_fee_info = block_builder_fee_info.lock().unwrap();
         block_builder_fee_info.block_builder = pubkey;
-        block_builder_fee_info.block_builder_commission = commission as u64;
+        block_builder_fee_info.block_builder_commission = commission;
     }
 
     fn update_bam_recipient_and_commission(
