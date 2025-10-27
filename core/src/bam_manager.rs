@@ -130,6 +130,7 @@ impl BamManager {
         identity_notifiers.add(KeyUpdaterType::BamConnection, identity_updater);
         drop(identity_notifiers);
         info!("BAM Manager: Added BAM connection key updater");
+        let mut prev_bam_url = bam_url.lock().unwrap().clone();
 
         while !exit.load(Ordering::Relaxed) {
             // Update if bam is enabled
@@ -143,7 +144,7 @@ impl BamManager {
                 let url = bam_url.lock().unwrap().clone();
                 if let Some(url) = url {
                     let result = runtime.block_on(BamConnection::try_init(
-                        url,
+                        url.clone(),
                         dependencies.cluster_info.clone(),
                         dependencies.batch_sender.clone(),
                         dependencies.outbound_receiver.clone(),
@@ -151,7 +152,20 @@ impl BamManager {
                     match result {
                         Ok(connection) => {
                             current_connection = Some(connection);
+                            let slot = poh_recorder.read().unwrap().current_poh_slot();
                             info!("BAM connection established");
+                            datapoint_info!(
+                                "bam_manager-connected",
+                                ("count", 1, i64),
+                                ("slot", slot, i64),
+                                (
+                                    "prev_bam_url",
+                                    prev_bam_url.as_deref().unwrap_or("None"),
+                                    String
+                                ),
+                                ("bam_url", url.clone(), String)
+                            );
+                            prev_bam_url = Some(url);
                             // Sleep to let heartbeat come in
                             std::thread::sleep(std::time::Duration::from_secs(2));
                         }
@@ -193,7 +207,18 @@ impl BamManager {
             if Some(connection.url().to_string()) != url {
                 current_connection = None;
                 cached_builder_config = None;
-                info!("BAM URL changed");
+                if let Some(prev_url) = prev_bam_url.as_ref() {
+                    info!(
+                        "BAM URL changed from {} to {:?}",
+                        prev_url,
+                        url.as_deref().unwrap_or("None")
+                    );
+                } else {
+                    info!(
+                        "BAM URL set to {:?} from None",
+                        url.as_deref().unwrap_or("None")
+                    );
+                }
                 continue;
             }
 

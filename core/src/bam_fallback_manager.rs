@@ -2,7 +2,7 @@ use {
     crate::bam_dependencies::BamDependencies,
     ahash::HashSet,
     solana_clock::Slot,
-    solana_poh::poh_recorder::PohRecorder,
+    solana_poh::poh_recorder::{PohRecorder, SharedWorkingBank},
     solana_runtime::bank_forks::BankForks,
     std::{
         collections::BTreeSet,
@@ -102,12 +102,8 @@ impl BamFallbackManager {
 
             if let Some(most_recent) = evaluation.most_recent_slot {
                 if evaluation.failing_slots.contains(&most_recent) {
-                    while let Some(bank) = shared_working_bank.load() {
-                        if !bank.is_frozen() {
-                            std::thread::sleep(std::time::Duration::from_millis(100));
-                        } else {
-                            break;
-                        }
+                    while Self::should_wait_for_disconnect(&poh_recorder, &shared_working_bank) {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
                     }
 
                     let disconnect_url = bam_url
@@ -116,7 +112,7 @@ impl BamFallbackManager {
                         .as_ref()
                         .map_or("None".to_string(), |u| u.clone());
                     datapoint_error!(
-                        "bam-fallback-manager-disconnected",
+                        "bam_fallback_manager-disconnected",
                         ("count", 1, i64),
                         ("triggered_by_slot", most_recent, i64),
                         ("bam_url", disconnect_url, String)
@@ -137,7 +133,7 @@ impl BamFallbackManager {
             }
 
             datapoint_info!(
-                "bam-fallback-manager-evaluation",
+                "bam_fallback_manager-evaluation",
                 ("leader_slots_tracked", scheduled_leader_slots.len(), i64),
                 ("slots_below_threshold", evaluation.failing_slots.len(), i64),
                 (
@@ -248,6 +244,22 @@ impl BamFallbackManager {
         }
         self.last_sent_slot = slot;
         self.slot_sender.try_send(slot)
+    }
+
+    fn should_wait_for_disconnect(
+        poh_recorder: &Arc<RwLock<PohRecorder>>,
+        shared_working_bank: &SharedWorkingBank,
+    ) -> bool {
+        if let Some(bank) = shared_working_bank.load() {
+            if !bank.is_frozen() {
+                return true;
+            }
+        }
+
+        let poh_recorder = poh_recorder.read().unwrap();
+        // Check if we're somewhere in the middle of a leader rotation
+        // The range is [leader_first_tick_height, leader_last_tick_height]
+        poh_recorder.would_be_leader(0)
     }
 
     pub fn join(self) -> std::thread::Result<()> {
