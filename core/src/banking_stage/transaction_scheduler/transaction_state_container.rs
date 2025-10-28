@@ -424,7 +424,6 @@ impl TransactionViewStateContainer {
     }
 
     // Returns the batch ID if succesful.
-    // TODO (LB): need to bubble up container full error to
     pub(crate) fn try_insert_map_only_with_batch(
         &mut self,
         batches: &[&[u8]],
@@ -447,7 +446,6 @@ impl TransactionViewStateContainer {
             // Optimistically add the batch to the map, removing all transaction_ids if any tx in the batch fails to deserialize.
             if let Some(transaction_id) = self.try_insert_map_only_with_data(batch, |data| f(data))
             {
-                // println!("container: inserted {} (tx_id)", transaction_id);
                 transaction_ids.push(transaction_id);
             } else {
                 for transaction_id in transaction_ids {

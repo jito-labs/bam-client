@@ -2,53 +2,51 @@
 //! and buffers from into the the `TransactionStateContainer`. Key thing to note:
 //! this implementation only functions during the `Consume/Hold` phase; otherwise it will send them back
 //! to BAM with a `Retryable` result.
-use crate::bam_response_handle::BamResponseHandle;
-use crate::banking_stage::transaction_scheduler::receive_and_buffer::calculate_max_age;
-use crate::banking_stage::transaction_scheduler::receive_and_buffer::calculate_priority_and_cost;
-use crate::banking_stage::transaction_scheduler::receive_and_buffer::DisconnectedError;
-use crate::banking_stage::transaction_scheduler::receive_and_buffer::ReceivingStats;
-use crate::banking_stage::transaction_scheduler::transaction_priority_id::TransactionPriorityId;
-use crate::banking_stage::transaction_scheduler::transaction_state::TransactionState;
-use crate::banking_stage::transaction_scheduler::transaction_state_container::SharedBytes;
-use crate::banking_stage::transaction_scheduler::transaction_state_container::StateContainer;
-use crate::banking_stage::transaction_scheduler::transaction_state_container::TransactionViewState;
-use crate::banking_stage::transaction_scheduler::transaction_state_container::TransactionViewStateContainer;
-use crate::banking_stage::transaction_scheduler::transaction_state_container::EXTRA_CAPACITY;
-use crate::verified_bam_packet_batch::VerifiedBamPacketBatch;
-use agave_transaction_view::resolved_transaction_view::ResolvedTransactionView;
-use agave_transaction_view::transaction_version::TransactionVersion;
-use agave_transaction_view::transaction_view::SanitizedTransactionView;
-
-use arrayvec::ArrayVec;
-use crossbeam_channel::{Receiver, RecvTimeoutError, TryRecvError};
-use solana_svm_transaction::svm_message::SVMMessage;
-
-use solana_accounts_db::account_locks::validate_account_locks;
-
-use solana_fee_structure::FeeBudgetLimits;
-use solana_measure::measure_us;
-
-// use solana_perf::sigverify::ed25519_verify_cpu;
-use solana_pubkey::Pubkey;
-use solana_runtime::bank::Bank;
-use solana_runtime_transaction::transaction_meta::StaticMeta;
-use solana_transaction::sanitized::MessageHash;
-
-use std::time::Instant;
-use std::{
-    collections::HashSet,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, RwLock,
-    },
-    time::Duration,
-};
-
 use {
     super::receive_and_buffer::ReceiveAndBuffer,
-    crate::banking_stage::decision_maker::BufferedPacketsDecision,
-    solana_runtime::bank_forks::BankForks,
-    solana_runtime_transaction::runtime_transaction::RuntimeTransaction,
+    crate::{
+        bam_response_handle::BamResponseHandle,
+        banking_stage::{
+            decision_maker::BufferedPacketsDecision,
+            transaction_scheduler::{
+                receive_and_buffer::{
+                    calculate_max_age, calculate_priority_and_cost, DisconnectedError,
+                    ReceivingStats,
+                },
+                transaction_priority_id::TransactionPriorityId,
+                transaction_state::TransactionState,
+                transaction_state_container::{
+                    SharedBytes, StateContainer, TransactionViewState,
+                    TransactionViewStateContainer, EXTRA_CAPACITY,
+                },
+            },
+        },
+        verified_bam_packet_batch::VerifiedBamPacketBatch,
+    },
+    agave_transaction_view::{
+        resolved_transaction_view::ResolvedTransactionView,
+        transaction_version::TransactionVersion, transaction_view::SanitizedTransactionView,
+    },
+    arrayvec::ArrayVec,
+    crossbeam_channel::{Receiver, RecvTimeoutError, TryRecvError},
+    solana_accounts_db::account_locks::validate_account_locks,
+    solana_fee_structure::FeeBudgetLimits,
+    solana_measure::measure_us,
+    solana_pubkey::Pubkey,
+    solana_runtime::{bank::Bank, bank_forks::BankForks},
+    solana_runtime_transaction::{
+        runtime_transaction::RuntimeTransaction, transaction_meta::StaticMeta,
+    },
+    solana_svm_transaction::svm_message::SVMMessage,
+    solana_transaction::sanitized::MessageHash,
+    std::{
+        collections::HashSet,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc, RwLock,
+        },
+        time::{Duration, Instant},
+    },
 };
 
 #[derive(Debug)]
@@ -378,197 +376,8 @@ pub fn priority_to_seq_id(priority: u64) -> u32 {
     u32::try_from(u64::MAX.saturating_sub(priority)).unwrap_or(u32::MAX)
 }
 
-// #[derive(Default)]
-// struct BamReceiveAndBufferMetrics {
-//     total_us: u64,
-//     deserialization_us: u64,
-//     sanitization_us: u64,
-//     lock_validation_us: u64,
-//     fee_budget_extraction_us: u64,
-//     check_transactions_us: u64,
-//     fee_payer_check_us: u64,
-//     blacklist_check_us: u64,
-//     pub sigverify_metrics: SigverifyMetrics,
-// }
-
-// impl BamReceiveAndBufferMetrics {
-//     fn has_data(&self) -> bool {
-//         self.total_us > 0
-//             || self.deserialization_us > 0
-//             || self.sanitization_us > 0
-//             || self.lock_validation_us > 0
-//             || self.fee_budget_extraction_us > 0
-//             || self.check_transactions_us > 0
-//             || self.fee_payer_check_us > 0
-//             || self.blacklist_check_us > 0
-//             || self.sigverify_metrics.total_packets_verified > 0
-//     }
-
-//     fn report(&mut self) {
-//         if !self.has_data() {
-//             return;
-//         }
-
-//         datapoint_info!(
-//             "bam-receive-and-buffer",
-//             ("total_us", self.total_us, i64),
-//             ("deserialization_us", self.deserialization_us, i64),
-//             ("sanitization_us", self.sanitization_us, i64),
-//             ("lock_validation_us", self.lock_validation_us, i64),
-//             (
-//                 "fee_budget_extraction_us",
-//                 self.fee_budget_extraction_us,
-//                 i64
-//             ),
-//             ("check_transactions_us", self.check_transactions_us, i64),
-//             ("fee_payer_check_us", self.fee_payer_check_us, i64),
-//             ("blacklist_check_us", self.blacklist_check_us, i64),
-//         );
-//         self.sigverify_metrics.report();
-//         *self = Self::default();
-//     }
-
-//     fn increment_total_us(&mut self, us: u64) {
-//         self.total_us = self.total_us.saturating_add(us);
-//     }
-
-//     fn increment_deserialization_us(&mut self, us: u64) {
-//         self.deserialization_us = self.deserialization_us.saturating_add(us);
-//     }
-
-//     fn increment_sanitization_us(&mut self, us: u64) {
-//         self.sanitization_us = self.sanitization_us.saturating_add(us);
-//     }
-
-//     fn increment_lock_validation_us(&mut self, us: u64) {
-//         self.lock_validation_us = self.lock_validation_us.saturating_add(us);
-//     }
-
-//     fn increment_fee_budget_extraction_us(&mut self, us: u64) {
-//         self.fee_budget_extraction_us = self.fee_budget_extraction_us.saturating_add(us);
-//     }
-
-//     fn increment_check_transactions_us(&mut self, us: u64) {
-//         self.check_transactions_us = self.check_transactions_us.saturating_add(us);
-//     }
-
-//     fn increment_fee_payer_check_us(&mut self, us: u64) {
-//         self.fee_payer_check_us = self.fee_payer_check_us.saturating_add(us);
-//     }
-
-//     fn increment_blacklist_check_us(&mut self, us: u64) {
-//         self.blacklist_check_us = self.blacklist_check_us.saturating_add(us);
-//     }
-// }
-
-// struct SigverifyMetrics {
-//     pub verify_batches_pp_us_hist: Histogram,
-//     pub batch_packets_len_hist: Histogram,
-//     pub total_verify_time_us: u64,
-//     pub total_packets_verified: usize,
-//     pub total_batches_verified: usize,
-// }
-
-// impl Default for SigverifyMetrics {
-//     fn default() -> Self {
-//         Self {
-//             verify_batches_pp_us_hist: Histogram::new(),
-//             batch_packets_len_hist: Histogram::new(),
-//             total_verify_time_us: 0,
-//             total_packets_verified: 0,
-//             total_batches_verified: 0,
-//         }
-//     }
-// }
-
-// impl SigverifyMetrics {
-//     pub fn report(&self) {
-//         if self.total_packets_verified == 0 {
-//             return;
-//         }
-
-//         datapoint_info!(
-//             "bam-receive-and-buffer_sigverify-stats",
-//             ("total_verify_time_us", self.total_verify_time_us, i64),
-//             ("total_packets_verified", self.total_packets_verified, i64),
-//             ("total_batches_verified", self.total_batches_verified, i64),
-//             (
-//                 "verify_batches_pp_us_p50",
-//                 self.verify_batches_pp_us_hist.percentile(50.0).unwrap_or(0),
-//                 i64
-//             ),
-//             (
-//                 "verify_batches_pp_us_p75",
-//                 self.verify_batches_pp_us_hist.percentile(75.0).unwrap_or(0),
-//                 i64
-//             ),
-//             (
-//                 "verify_batches_pp_us_p90",
-//                 self.verify_batches_pp_us_hist.percentile(90.0).unwrap_or(0),
-//                 i64
-//             ),
-//             (
-//                 "verify_batches_pp_us_p99",
-//                 self.verify_batches_pp_us_hist.percentile(99.0).unwrap_or(0),
-//                 i64
-//             ),
-//             (
-//                 "batch_packets_len_p50",
-//                 self.batch_packets_len_hist.percentile(50.0).unwrap_or(0),
-//                 i64
-//             ),
-//             (
-//                 "batch_packets_len_p75",
-//                 self.batch_packets_len_hist.percentile(75.0).unwrap_or(0),
-//                 i64
-//             ),
-//             (
-//                 "batch_packets_len_p90",
-//                 self.batch_packets_len_hist.percentile(90.0).unwrap_or(0),
-//                 i64
-//             ),
-//             (
-//                 "batch_packets_len_p99",
-//                 self.batch_packets_len_hist.percentile(99.0).unwrap_or(0),
-//                 i64
-//             ),
-//         );
-//     }
-
-//     pub fn increment_verify_batches_pp_us(&mut self, us: u64, packet_count: usize) {
-//         if packet_count > 0 {
-//             let per_packet_us = (us as f64 / packet_count as f64).round() as u64;
-//             self.verify_batches_pp_us_hist
-//                 .increment(per_packet_us)
-//                 .unwrap();
-//         }
-//     }
-
-//     pub fn increment_batch_packets_len(&mut self, packet_count: usize) {
-//         if packet_count > 0 {
-//             self.batch_packets_len_hist
-//                 .increment(packet_count as u64)
-//                 .unwrap();
-//         }
-//     }
-
-//     pub fn increment_total_verify_time(&mut self, us: u64) {
-//         self.total_verify_time_us += us;
-//     }
-
-//     pub fn increment_total_packets_verified(&mut self, count: usize) {
-//         self.total_packets_verified += count;
-//     }
-
-//     pub fn increment_total_batches_verified(&mut self, count: usize) {
-//         self.total_batches_verified += count;
-//     }
-// }
-
 #[cfg(test)]
 mod tests {
-    use solana_signer::Signer;
-    use solana_system_transaction::transfer;
     use {
         super::*,
         crate::banking_stage::{
@@ -582,8 +391,9 @@ mod tests {
         solana_pubkey::Pubkey,
         solana_runtime::bank::Bank,
         solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
-        solana_transaction::versioned::VersionedTransaction,
-        solana_transaction::Transaction,
+        solana_signer::Signer,
+        solana_system_transaction::transfer,
+        solana_transaction::{versioned::VersionedTransaction, Transaction},
         test_case::test_case,
     };
 

@@ -6,7 +6,6 @@ use {
 };
 
 pub enum BamPacketBatchError {
-    OutsideLeaderSlot,
     EmptyBatch,
     TooManyPackets,
     MissingMeta,
@@ -50,9 +49,14 @@ impl VerifiedBamPacketBatch {
     /// ed25519_verify_cpu needs a list of PacketBatches, not an AtomicTxnBatch or BamPacketBatch.
     pub fn validate_and_split(
         txn_batch: AtomicTxnBatch,
-        current_slot: u64,
-    ) -> Result<(PacketBatch, BamPacketBatchMeta), BamPacketBatchError> {
-        let revert_on_error = Self::validate(&txn_batch, current_slot)?;
+    ) -> Result<
+        (PacketBatch, BamPacketBatchMeta),
+        (
+            usize, /* index of the packet in the batch */
+            BamPacketBatchError,
+        ),
+    > {
+        let revert_on_error = Self::validate(&txn_batch)?;
 
         let meta = BamPacketBatchMeta {
             seq_id: txn_batch.seq_id,
@@ -81,33 +85,38 @@ impl VerifiedBamPacketBatch {
     }
 
     /// Validates the AtomicTxnBatch and returns the revert_on_error flag.
-    fn validate(
-        atomic_txn_batch: &AtomicTxnBatch,
-        current_slot: u64,
-    ) -> Result<bool, BamPacketBatchError> {
-        if atomic_txn_batch.max_schedule_slot < current_slot {
-            return Err(BamPacketBatchError::OutsideLeaderSlot);
-        }
-
+    fn validate(atomic_txn_batch: &AtomicTxnBatch) -> Result<bool, (usize, BamPacketBatchError)> {
         if atomic_txn_batch.packets.is_empty() {
-            return Err(BamPacketBatchError::EmptyBatch);
+            return Err((0, BamPacketBatchError::EmptyBatch));
         }
 
         if atomic_txn_batch.packets.len() > 5 {
-            return Err(BamPacketBatchError::TooManyPackets);
+            return Err((0, BamPacketBatchError::TooManyPackets));
         }
 
-        if atomic_txn_batch.packets.iter().any(|p| p.meta.is_none()) {
-            return Err(BamPacketBatchError::MissingMeta);
+        if let Some(index) = atomic_txn_batch
+            .packets
+            .iter()
+            .enumerate()
+            .find(|(_, p)| p.meta.is_none())
+            .map(|(index, _)| index)
+        {
+            return Err((index, BamPacketBatchError::MissingMeta));
         }
 
-        if atomic_txn_batch.packets.iter().any(|p| {
-            p.data.len() > PACKET_DATA_SIZE
-                || p.meta
-                    .as_ref()
-                    .map_or(false, |m| m.size > PACKET_DATA_SIZE as u64)
-        }) {
-            return Err(BamPacketBatchError::PacketTooLarge);
+        if let Some(index) = atomic_txn_batch
+            .packets
+            .iter()
+            .enumerate()
+            .find(|(_, p)| {
+                p.data.len() > PACKET_DATA_SIZE
+                    || p.meta
+                        .as_ref()
+                        .map_or(false, |m| m.size > PACKET_DATA_SIZE as u64)
+            })
+            .map(|(index, _)| index)
+        {
+            return Err((index, BamPacketBatchError::PacketTooLarge));
         }
 
         let Ok(revert_on_error) = atomic_txn_batch
@@ -121,13 +130,13 @@ impl VerifiedBamPacketBatch {
             })
             .all_equal_value()
         else {
-            return Err(BamPacketBatchError::InconsistentRevertOnError);
+            return Err((0, BamPacketBatchError::InconsistentRevertOnError));
         };
 
         // Handling multiple packets in the same batch which don't revert needs downstream changes in the container
         // and other data structures
         if !revert_on_error && atomic_txn_batch.packets.len() > 1 {
-            return Err(BamPacketBatchError::MultiplePacketsNotAllowed);
+            return Err((0, BamPacketBatchError::MultiplePacketsNotAllowed));
         }
 
         Ok(revert_on_error)

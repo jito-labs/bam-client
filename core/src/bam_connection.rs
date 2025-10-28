@@ -4,7 +4,9 @@
 use {
     crate::{
         bam_dependencies::{v0_to_versioned_proto, BamOutboundMessage},
-        verified_bam_packet_batch::{BamPacketBatchMeta, VerifiedBamPacketBatch},
+        verified_bam_packet_batch::{
+            BamPacketBatchError, BamPacketBatchMeta, VerifiedBamPacketBatch,
+        },
     },
     jito_protos::proto::{
         bam_api::{
@@ -13,7 +15,10 @@ use {
             ConfigRequest, ConfigResponse, SchedulerMessage, SchedulerMessageV0, SchedulerResponse,
             SchedulerResponseV0,
         },
-        bam_types::{AuthProof, ValidatorHeartBeat},
+        bam_types::{
+            atomic_txn_batch_result, not_committed::Reason, AtomicTxnBatchResult, AuthProof,
+            DeserializationError, DeserializationErrorReason, NotCommitted, ValidatorHeartBeat,
+        },
     },
     solana_gossip::cluster_info::ClusterInfo,
     solana_keypair::Keypair,
@@ -200,33 +205,89 @@ impl BamConnection {
                         break;
                     };
 
-                    match inbound {
-                        SchedulerResponseV0 { resp: Some(Resp::HeartBeat(_)), .. } => {
-                            last_heartbeat = std::time::Instant::now();
-                            metrics.heartbeat_received.fetch_add(1, Relaxed);
-                        }
-                        SchedulerResponseV0 { resp: Some(Resp::MultipleAtomicTxnBatch(batches)), .. } => {
-                            for batch in batches.batches {
-                                metrics.bundle_received.fetch_add(1, Relaxed);
-                                // TODO: slot
-                                let Ok((packet_batch, meta)) = VerifiedBamPacketBatch::validate_and_split(batch, 0) else {
-                                    // metrics.bundle_forward_to_scheduler_fail.fetch_add(1, Relaxed);
-                                    continue;
-                                };
-
-                                let _ = batch_sender.try_send((packet_batch, meta)).inspect_err(|_| {
-                                    metrics.bundle_forward_to_scheduler_fail.fetch_add(1, Relaxed);
-                                });
-                            }
-                        }
-                        _ => {}
-                    }
+                    Self::handle_inbound_message(inbound, &outbound_sender, &batch_sender, &metrics, &mut last_heartbeat);
                 }
+
             }
         }
         is_healthy.store(false, Relaxed);
         let _ = builder_config_task.await.ok();
         let _ = outbound_task.await.ok();
+    }
+
+    fn handle_inbound_message(
+        inbound: SchedulerResponseV0,
+        outbound_sender: &mpsc::Sender<SchedulerMessage>,
+        batch_sender: &crossbeam_channel::Sender<(PacketBatch, BamPacketBatchMeta)>,
+        metrics: &Arc<BamConnectionMetrics>,
+        last_heartbeat: &mut std::time::Instant,
+    ) {
+        match inbound {
+            SchedulerResponseV0 {
+                resp: Some(Resp::HeartBeat(_)),
+                ..
+            } => {
+                *last_heartbeat = std::time::Instant::now();
+                metrics.heartbeat_received.fetch_add(1, Relaxed);
+            }
+            SchedulerResponseV0 {
+                resp: Some(Resp::MultipleAtomicTxnBatch(batches)),
+                ..
+            } => {
+                for batch in batches.batches {
+                    metrics.bundle_received.fetch_add(1, Relaxed);
+                    let seq_id = batch.seq_id;
+                    match VerifiedBamPacketBatch::validate_and_split(batch) {
+                        Ok((packet_batch, meta)) => {
+                            if batch_sender.try_send((packet_batch, meta)).is_err() {
+                                metrics
+                                    .bundle_forward_to_scheduler_fail
+                                    .fetch_add(1, Relaxed);
+                            }
+                        }
+                        Err((index, e)) => {
+                            metrics
+                                .bundle_forward_to_scheduler_fail
+                                .fetch_add(1, Relaxed);
+                            let _ = outbound_sender
+                                .try_send(v0_to_versioned_proto(SchedulerMessageV0 {
+                                    msg: Some(Msg::MultipleAtomicTxnBatchResult(
+                                        jito_protos::proto::bam_types::MultipleAtomicTxnBatchResult {
+                                            results: vec![AtomicTxnBatchResult {
+                                                seq_id,
+                                                result: Some(
+                                                    atomic_txn_batch_result::Result::NotCommitted(
+                                                        NotCommitted {
+                                                            reason: Some(
+                                                                Reason::DeserializationError(
+                                                                    DeserializationError {
+                                                                        index: index as u32,
+                                                                        reason: match e {
+                                                                            BamPacketBatchError::EmptyBatch => DeserializationErrorReason::Empty as i32,
+                                                                            BamPacketBatchError::TooManyPackets => DeserializationErrorReason::InconsistentBundle as i32,
+                                                                            BamPacketBatchError::MissingMeta => DeserializationErrorReason::InconsistentBundle as i32,
+                                                                            BamPacketBatchError::PacketTooLarge => DeserializationErrorReason::BincodeError as i32,
+                                                                            BamPacketBatchError::InconsistentRevertOnError => DeserializationErrorReason::InconsistentBundle as i32,
+                                                                            BamPacketBatchError::MultiplePacketsNotAllowed => DeserializationErrorReason::InconsistentBundle as i32,
+                                                                        },
+                                                                    },
+                                                                ),
+                                                            ),
+                                                        },
+                                                    ),
+                                                ),
+                                            }],
+                                        },
+                                    )),
+                                }));
+                        }
+                    }
+                }
+            }
+            _ => {
+                error!("Received unsupported inbound message: {:?}", inbound);
+            }
+        }
     }
 
     fn send_batch_results(

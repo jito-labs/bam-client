@@ -1,28 +1,6 @@
 //! A Scheduler implementation that pulls batches off the container, and then
 //! schedules them to workers in a FIFO, account-aware manner. This is facilitated by the
 //! `PrioGraph` data structure, which is a directed graph that tracks the dependencies.
-use crate::banking_stage::scheduler_messages::{MaxAge, TransactionBatchId};
-use crate::banking_stage::transaction_scheduler::scheduler::PreLockFilterAction;
-use crate::banking_stage::transaction_scheduler::scheduler_common::SchedulingCommon;
-use crate::banking_stage::transaction_scheduler::transaction_state::TransactionState;
-use crate::banking_stage::transaction_scheduler::transaction_state_container::BatchInfo;
-use crate::{bam_response_handle::BamResponseHandle, banking_stage::consumer::Consumer};
-
-use ahash::{HashSet, HashSetExt};
-use arrayvec::ArrayVec;
-use itertools::{izip, Itertools};
-use solana_clock::{Slot, MAX_PROCESSING_AGE};
-use solana_runtime::bank::Bank;
-use solana_runtime::bank_forks::BankForks;
-use solana_svm::transaction_error_metrics::TransactionErrorMetrics;
-use solana_transaction_error::TransactionResult;
-
-use std::mem::replace;
-use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
-    time::Instant,
-};
 
 use {
     super::{
@@ -41,6 +19,29 @@ use {
     solana_pubkey::Pubkey,
     solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
     solana_svm_transaction::svm_message::SVMMessage,
+};
+
+use crate::banking_stage::scheduler_messages::{MaxAge, TransactionBatchId};
+use crate::banking_stage::transaction_scheduler::scheduler::PreLockFilterAction;
+use crate::banking_stage::transaction_scheduler::scheduler_common::SchedulingCommon;
+use crate::banking_stage::transaction_scheduler::transaction_state::TransactionState;
+use crate::banking_stage::transaction_scheduler::transaction_state_container::BatchInfo;
+use crate::{bam_response_handle::BamResponseHandle, banking_stage::consumer::Consumer};
+
+use ahash::{HashSet, HashSetExt};
+use arrayvec::ArrayVec;
+use itertools::izip;
+use solana_clock::{Slot, MAX_PROCESSING_AGE};
+use solana_runtime::bank::Bank;
+use solana_runtime::bank_forks::BankForks;
+use solana_svm::transaction_error_metrics::TransactionErrorMetrics;
+use solana_transaction_error::TransactionResult;
+
+use std::mem::replace;
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+    time::Instant,
 };
 
 type SchedulerPrioGraph = PrioGraph<
@@ -140,18 +141,13 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 .get_batch(next_batch_id.id)
                 .expect("batch must exist");
 
-            let txns = transaction_ids
-                .iter()
-                .map(|txn_id| {
+            self.prio_graph.insert_transaction(
+                next_batch_id,
+                Self::get_transactions_account_access(transaction_ids.iter().map(|txn_id| {
                     container
                         .get_transaction(*txn_id)
                         .expect("transaction must exist")
-                })
-                .collect_vec();
-
-            self.prio_graph.insert_transaction(
-                next_batch_id,
-                Self::get_transactions_account_access(txns.into_iter()),
+                })),
             );
             self.prio_graph_ids.insert(next_batch_id);
         }
@@ -342,11 +338,6 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                     respond_with_extra_info: true,
                     max_schedule_slot: Some(working_bank.slot()),
                 };
-                // println!(
-                //     "bam_scheduler batch size: {} enqueued work: {}",
-                //     work.transactions.len(),
-                //     consume_work_sender.len()
-                // );
                 let _ = consume_work_sender.send(work);
                 num_scheduled += num_txs;
                 inflight_batches.insert(
@@ -404,12 +395,6 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 respond_with_extra_info: true,
                 max_schedule_slot: Some(working_bank.slot()),
             };
-
-            // println!(
-            //     "bam_scheduler batch size: {} enqueued work: {}",
-            //     work.transactions.len(),
-            //     consume_work_sender.len()
-            // );
             let _ = consume_work_sender.send(work);
             num_scheduled += num_to_schedule;
 
@@ -448,8 +433,6 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
             self.slot = None;
         }
 
-        let num_inflight_batches = self.inflight_batches.len();
-        let now = Instant::now();
         while !self.inflight_batches.is_empty() {
             let Ok(work) = self.finished_consume_work_receiver.recv() else {
                 break;
@@ -460,58 +443,30 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 .expect("batch must be inflight");
             for (batch_priority_id, _) in batch_info.batch_priority_ids {
                 self.prio_graph_ids.remove(&batch_priority_id);
-                // info!("maybe_bank_boundary_actions: outside leader slot");
-                self.bam_response_handle
-                    .send_outside_leader_slot_bundle_result(priority_to_seq_id(
-                        batch_priority_id.priority,
-                    ));
+                self.bam_response_handle.send_result(
+                    priority_to_seq_id(batch_priority_id.priority),
+                    container
+                        .get_batch(batch_priority_id.id)
+                        .expect("batch exists")
+                        .revert_on_error,
+                    work.extra_info.as_ref().unwrap().processed_results.clone(), // TODO (LB): need to actually batch the results from the batch lengths
+                );
             }
         }
-        info!(
-            "inflight_batches: time: {:?} num_inflight_batches: {}",
-            now.elapsed(),
-            num_inflight_batches
-        );
 
         // On slot boundaries, all the transactions are removed from the container and the priority graph is cleared.
         // Anything left in the container at the end of the slot is outside the leader slot window.
         // The prio_graph_ids is used instead of the priority graph pop_and_unblock because its much faster.
-        let now = Instant::now();
-        let num_prio_graph_ids = self.prio_graph_ids.len();
         for next_batch_id in self.prio_graph_ids.drain() {
-            // container.remove_batch_by_id(next_batch_id.id);
-            // info!("maybe_bank_boundary_actions: outside leader slot");
             self.bam_response_handle
                 .send_outside_leader_slot_bundle_result(priority_to_seq_id(next_batch_id.priority));
         }
-        info!(
-            "prio_graph_ids: time: {:?} num_prio_graph_ids: {}",
-            now.elapsed(),
-            num_prio_graph_ids
-        );
-
-        info!(
-            "container stats: batch_buffer_size: {} queue_size: {} batch_queue_size: {} buffer_size: {}",
-            container.batch_buffer_size(),
-            container.queue_size(),
-            container.batch_queue_size(),
-            container.buffer_size(),
-        );
 
         // Anything left in the container was pushed into the queue but hasn't been pulled into the priority graph yet
-        let now = Instant::now();
-        let num_container_batches = container.batch_queue_size();
         while let Some(next_batch_id) = container.pop_batch() {
-            // container.remove_batch_by_id(next_batch_id.id);
-            // info!("maybe_bank_boundary_actions: container: outside leader slot");
             self.bam_response_handle
                 .send_outside_leader_slot_bundle_result(priority_to_seq_id(next_batch_id.priority));
         }
-        info!(
-            "container: time: {:?} num_container_batches: {}",
-            now.elapsed(),
-            num_container_batches
-        );
 
         self.prio_graph.clear();
         container.clear();
