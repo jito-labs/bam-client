@@ -280,8 +280,27 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
         // for very high throughputs, a smaller number is better since we need to return to the scheduler quickly
         const MAX_HANDLE_PACKET_BATCH_COUNT: usize = 256;
 
-        let is_bam_enabled = self.bam_enabled.load(Ordering::Relaxed);
         let mut stats = ReceivingStats::default();
+        // /// Count of packets that passed sigverify but were dropped
+        // /// without further checks because we were outside the holding
+        // /// window.
+        // pub num_dropped_without_parsing: usize,
+
+        // pub num_dropped_on_parsing_and_sanitization: usize,
+        // pub num_dropped_on_lock_validation: usize,
+        // pub num_dropped_on_compute_budget: usize,
+        // pub num_dropped_on_age: usize,
+        // pub num_dropped_on_already_processed: usize,
+        // pub num_dropped_on_fee_payer: usize,
+        // pub num_dropped_on_capacity: usize,
+
+        // pub num_buffered: usize,
+        // pub num_dropped_on_blacklisted_account: usize,
+
+        // pub receive_time_us: u64,
+        // pub buffer_time_us: u64,
+
+        let is_bam_enabled = self.bam_enabled.load(Ordering::Relaxed);
 
         let (root_bank, working_bank) = {
             let bank_forks = self.bank_forks.read().unwrap();
@@ -306,19 +325,20 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
                         }
                     };
 
+                    stats.num_received += bam_packet_batch.packet_batch().len();
+
                     // If BAM is not enabled, drain the channel
                     if !is_bam_enabled {
                         stats.num_dropped_without_parsing += bam_packet_batch.packet_batch().len();
                         continue;
                     }
 
-                    stats.num_received += bam_packet_batch.packet_batch().len();
-
                     // Throw away batches that are marked as discard from bad signature
                     if bam_packet_batch.meta().discard {
                         self.bam_response_handle
                             .send_bad_signature(bam_packet_batch.meta().seq_id);
-                        stats.num_dropped_without_parsing += bam_packet_batch.packet_batch().len();
+                        stats.num_dropped_on_parsing_and_sanitization +=
+                            bam_packet_batch.packet_batch().len();
                         continue;
                     }
 
@@ -336,6 +356,7 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
                         &working_bank,
                         bam_packet_batch,
                     ));
+
                     count += 1;
                 }
             }
@@ -355,9 +376,10 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
                             break;
                         }
                     };
+                    stats.num_received += batch.packet_batch().len();
+                    stats.num_dropped_without_parsing += batch.packet_batch().len();
                     self.bam_response_handle
                         .send_outside_leader_slot_bundle_result(batch.meta().seq_id);
-                    stats.num_dropped_without_parsing += 1;
                 }
             }
         }

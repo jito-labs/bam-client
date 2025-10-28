@@ -4,14 +4,6 @@
 /// - Updates TPU config
 /// - Updates block builder fee info
 /// - Sets `bam_enabled` flag that is used everywhere
-use std::{
-    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    str::FromStr,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex, RwLock,
-    },
-};
 use {
     crate::{
         bam_connection::BamConnection, bam_dependencies::BamOutboundMessage,
@@ -24,6 +16,12 @@ use {
     solana_poh::poh_recorder::PohRecorder,
     solana_pubkey::Pubkey,
     solana_runtime::bank_forks::BankForks,
+    std::net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+    std::str::FromStr,
+    std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, RwLock,
+    },
 };
 
 pub struct BamManager {
