@@ -504,6 +504,7 @@ impl Tpu {
             bam_txns_per_slot_threshold,
             bam_dependencies,
             poh_recorder.clone(),
+            key_notifiers.clone(),
         );
 
         let (entry_receiver, tpu_entry_notifier) =
