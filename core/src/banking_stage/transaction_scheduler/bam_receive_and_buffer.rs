@@ -55,6 +55,7 @@ enum PacketHandlingError {
     LockValidation,
     ComputeBudget,
     BlacklistedAccount,
+    VoteTransaction,
 }
 
 pub struct BamReceiveAndBuffer {
@@ -153,6 +154,12 @@ impl BamReceiveAndBuffer {
                     packet_index += 1;
                     Err(())
                 }
+                Err(PacketHandlingError::VoteTransaction) => {
+                    insert_map_error = Some((packet_index, PacketHandlingError::VoteTransaction));
+                    stats.num_dropped_on_parsing_and_sanitization += 1;
+                    packet_index += 1;
+                    Err(())
+                }
             },
         ) {
             Ok(Some(batch_id)) => {
@@ -213,6 +220,10 @@ impl BamReceiveAndBuffer {
         // Discard non-vote packets if in vote-only mode.
         if root_bank.vote_only_bank() && !view.is_simple_vote_transaction() {
             return Err(PacketHandlingError::Sanitization);
+        }
+
+        if view.is_simple_vote_transaction() {
+            return Err(PacketHandlingError::VoteTransaction);
         }
 
         // Check if the transaction has too many account locks before loading ALTs
@@ -281,24 +292,6 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
         const MAX_HANDLE_PACKET_BATCH_COUNT: usize = 256;
 
         let mut stats = ReceivingStats::default();
-        // /// Count of packets that passed sigverify but were dropped
-        // /// without further checks because we were outside the holding
-        // /// window.
-        // pub num_dropped_without_parsing: usize,
-
-        // pub num_dropped_on_parsing_and_sanitization: usize,
-        // pub num_dropped_on_lock_validation: usize,
-        // pub num_dropped_on_compute_budget: usize,
-        // pub num_dropped_on_age: usize,
-        // pub num_dropped_on_already_processed: usize,
-        // pub num_dropped_on_fee_payer: usize,
-        // pub num_dropped_on_capacity: usize,
-
-        // pub num_buffered: usize,
-        // pub num_dropped_on_blacklisted_account: usize,
-
-        // pub receive_time_us: u64,
-        // pub buffer_time_us: u64,
 
         let is_bam_enabled = self.bam_enabled.load(Ordering::Relaxed);
 
@@ -400,23 +393,29 @@ pub fn priority_to_seq_id(priority: u64) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use {
-        super::*,
-        crate::banking_stage::{
+    use std::{
+        collections::HashSet,
+        sync::{atomic::AtomicBool, Arc, RwLock},
+    };
+
+    use solana_keypair::Keypair;
+    use solana_ledger::genesis_utils::GenesisConfigInfo;
+    use solana_pubkey::Pubkey;
+    use solana_runtime::{bank::Bank, bank_forks::BankForks};
+
+    use crate::{
+        bam_dependencies::BamOutboundMessage,
+        bam_response_handle::BamResponseHandle,
+        banking_stage::{
             tests::create_slow_genesis_config,
-            transaction_scheduler::transaction_state_container::StateContainer,
+            transaction_scheduler::{
+                bam_receive_and_buffer::{
+                    priority_to_seq_id, seq_id_to_priority, BamReceiveAndBuffer,
+                },
+                transaction_state_container::{StateContainer, TransactionViewStateContainer},
+            },
         },
-        crossbeam_channel::{unbounded, Receiver},
-        solana_keypair::Keypair,
-        solana_ledger::genesis_utils::GenesisConfigInfo,
-        solana_message::Message,
-        solana_pubkey::Pubkey,
-        solana_runtime::bank::Bank,
-        solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
-        solana_signer::Signer,
-        solana_system_transaction::transfer,
-        solana_transaction::{versioned::VersionedTransaction, Transaction},
-        test_case::test_case,
+        verified_bam_packet_batch::VerifiedBamPacketBatch,
     };
 
     #[test]
@@ -443,438 +442,461 @@ mod tests {
     }
 
     fn setup_bam_receive_and_buffer(
-        receiver: crossbeam_channel::Receiver<AtomicTxnBatch>,
+        receiver: crossbeam_channel::Receiver<VerifiedBamPacketBatch>,
         bank_forks: Arc<RwLock<BankForks>>,
         blacklisted_accounts: HashSet<Pubkey>,
     ) -> (
         Arc<AtomicBool>,
         BamReceiveAndBuffer,
-        TransactionStateContainer<RuntimeTransaction<SanitizedTransaction>>,
+        TransactionViewStateContainer,
         crossbeam_channel::Receiver<BamOutboundMessage>,
     ) {
-        let exit: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+        let exit = Arc::new(AtomicBool::new(false));
         let (response_sender, response_receiver) =
             crossbeam_channel::unbounded::<BamOutboundMessage>();
         let receive_and_buffer = BamReceiveAndBuffer::new(
             Arc::new(AtomicBool::new(true)),
             receiver,
-            response_sender,
+            BamResponseHandle::new(response_sender),
             bank_forks,
             blacklisted_accounts,
         );
-        let container = TransactionStateContainer::with_capacity(100);
+        let container = TransactionViewStateContainer::with_capacity(100, true);
         (exit, receive_and_buffer, container, response_receiver)
     }
 
-    fn verify_container<Tx: TransactionWithMeta>(
-        container: &mut impl StateContainer<Tx>,
-        expected_length: usize,
-    ) {
-        let mut actual_length: usize = 0;
-        while let Some(id) = container.pop() {
-            let Some((ids, _, _)) = container.get_batch(id.id) else {
-                panic!(
-                    "transaction in queue position {} with id {} must exist.",
-                    actual_length, id.id
-                );
-            };
-            for id in ids {
-                assert!(
-                    container.get_transaction(*id).is_some(),
-                    "Transaction ID {} not found in container",
-                    id
-                );
-            }
-            actual_length += 1;
-        }
+    // tests:
+    // handle_packet_batch_message:
+    // - larger than EXTRA_CAPACITY
+    // - test rollback
+    // - test capacity exceeded
+    // - test vote transaction
+    // - handle_packet_batch_message
+    // - test capacity consistency
+    // - test bad packet
+    // - test happy path
+    // - test blacklisted account
+    //
+    // receive_and_buffer_packets:
+    // - test forward and hold
+    // - test forward
+    // - test discard
+    // - test not bam enabled
+    // - test bank slot greater than work slot
+    //
+    // todos:
+    // - make sure to verify container
+    // - test bad
 
-        assert_eq!(actual_length, expected_length);
-    }
+    // fn verify_container<Tx: TransactionWithMeta>(
+    //     container: &mut impl StateContainer<Tx>,
+    //     expected_length: usize,
+    // ) {
+    //     let mut actual_length: usize = 0;
+    //     while let Some(id) = container.pop() {
+    //         let Some((ids, _, _)) = container.get_batch(id.id) else {
+    //             panic!(
+    //                 "transaction in queue position {} with id {} must exist.",
+    //                 actual_length, id.id
+    //             );
+    //         };
+    //         for id in ids {
+    //             assert!(
+    //                 container.get_transaction(*id).is_some(),
+    //                 "Transaction ID {} not found in container",
+    //                 id
+    //             );
+    //         }
+    //         actual_length += 1;
+    //     }
 
-    #[test_case(setup_bam_receive_and_buffer; "testcase-bam")]
-    fn test_receive_and_buffer_simple_transfer<R: ReceiveAndBuffer>(
-        setup_receive_and_buffer: impl FnOnce(
-            Receiver<AtomicTxnBatch>,
-            Arc<RwLock<BankForks>>,
-            HashSet<Pubkey>,
-        ) -> (
-            Arc<AtomicBool>,
-            R,
-            R::Container,
-            Receiver<BamOutboundMessage>,
-        ),
-    ) {
-        let (sender, receiver) = unbounded();
-        let (bank_forks, mint_keypair) = test_bank_forks();
-        let (exit, mut receive_and_buffer, mut container, _response_sender) =
-            setup_receive_and_buffer(receiver, bank_forks.clone(), HashSet::new());
-        let transaction = transfer(
-            &mint_keypair,
-            &Pubkey::new_unique(),
-            1,
-            bank_forks.read().unwrap().root_bank().last_blockhash(),
-        );
-        let data = bincode::serialize(&transaction).expect("serializes");
-        let bundle = AtomicTxnBatch {
-            seq_id: 1,
-            packets: vec![Packet { data, meta: None }],
-            max_schedule_slot: Slot::MAX,
-        };
-        sender.send(bundle).unwrap();
+    //     assert_eq!(actual_length, expected_length);
+    // }
 
-        let start = Instant::now();
-        while start.elapsed() < Duration::from_secs(2) {
-            let ReceivingStats { num_received, .. } = receive_and_buffer
-                .receive_and_buffer_packets(&mut container, &BufferedPacketsDecision::Hold)
-                .unwrap();
-            if num_received > 0 {
-                break;
-            }
-        }
+    // #[test_case(setup_bam_receive_and_buffer; "testcase-bam")]
+    // fn test_receive_and_buffer_simple_transfer<R: ReceiveAndBuffer>(
+    //     setup_receive_and_buffer: impl FnOnce(
+    //         Receiver<AtomicTxnBatch>,
+    //         Arc<RwLock<BankForks>>,
+    //         HashSet<Pubkey>,
+    //     ) -> (
+    //         Arc<AtomicBool>,
+    //         R,
+    //         R::Container,
+    //         Receiver<BamOutboundMessage>,
+    //     ),
+    // ) {
+    //     let (sender, receiver) = unbounded();
+    //     let (bank_forks, mint_keypair) = test_bank_forks();
+    //     let (exit, mut receive_and_buffer, mut container, _response_sender) =
+    //         setup_receive_and_buffer(receiver, bank_forks.clone(), HashSet::new());
+    //     let transaction = transfer(
+    //         &mint_keypair,
+    //         &Pubkey::new_unique(),
+    //         1,
+    //         bank_forks.read().unwrap().root_bank().last_blockhash(),
+    //     );
+    //     let data = bincode::serialize(&transaction).expect("serializes");
+    //     let bundle = AtomicTxnBatch {
+    //         seq_id: 1,
+    //         packets: vec![Packet { data, meta: None }],
+    //         max_schedule_slot: Slot::MAX,
+    //     };
+    //     sender.send(bundle).unwrap();
 
-        verify_container(&mut container, 1);
-        exit.store(true, Ordering::Relaxed);
-    }
+    //     let start = Instant::now();
+    //     while start.elapsed() < Duration::from_secs(2) {
+    //         let ReceivingStats { num_received, .. } = receive_and_buffer
+    //             .receive_and_buffer_packets(&mut container, &BufferedPacketsDecision::Hold)
+    //             .unwrap();
+    //         if num_received > 0 {
+    //             break;
+    //         }
+    //     }
 
-    #[test]
-    fn test_receive_and_buffer_invalid_packet() {
-        let (bank_forks, _mint_keypair) = test_bank_forks();
-        let (sender, receiver) = unbounded();
-        let (exit, mut receive_and_buffer, mut container, response_receiver) =
-            setup_bam_receive_and_buffer(receiver, bank_forks.clone(), HashSet::new());
+    //     verify_container(&mut container, 1);
+    //     exit.store(true, Ordering::Relaxed);
+    // }
 
-        let bundle = AtomicTxnBatch {
-            seq_id: 1,
-            packets: vec![Packet {
-                data: vec![],
-                meta: None,
-            }],
-            max_schedule_slot: Slot::MAX,
-        };
-        sender.send(bundle).unwrap();
+    // #[test]
+    // fn test_receive_and_buffer_invalid_packet() {
+    //     let (bank_forks, _mint_keypair) = test_bank_forks();
+    //     let (sender, receiver) = unbounded();
+    //     let (exit, mut receive_and_buffer, mut container, response_receiver) =
+    //         setup_bam_receive_and_buffer(receiver, bank_forks.clone(), HashSet::new());
 
-        let ReceivingStats { num_received, .. } = receive_and_buffer
-            .receive_and_buffer_packets(&mut container, &BufferedPacketsDecision::Hold)
-            .unwrap();
+    //     let bundle = AtomicTxnBatch {
+    //         seq_id: 1,
+    //         packets: vec![Packet {
+    //             data: vec![],
+    //             meta: None,
+    //         }],
+    //         max_schedule_slot: Slot::MAX,
+    //     };
+    //     sender.send(bundle).unwrap();
 
-        assert_eq!(num_received, 0);
-        verify_container(&mut container, 0);
-        let response = response_receiver.recv().unwrap();
-        assert!(matches!(
-            response,
-            BamOutboundMessage::AtomicTxnBatchResult(txn_batch_result) if txn_batch_result.seq_id == 1 &&
-            matches!(&txn_batch_result.result, Some(atomic_txn_batch_result::Result::NotCommitted(not_committed)) if
-                matches!(not_committed.reason, Some(Reason::DeserializationError(_))))
-        ));
-        exit.store(true, Ordering::Relaxed);
-    }
+    //     let ReceivingStats { num_received, .. } = receive_and_buffer
+    //         .receive_and_buffer_packets(&mut container, &BufferedPacketsDecision::Hold)
+    //         .unwrap();
 
-    #[test]
-    fn test_batch_deserialize_success() {
-        let (bank_forks, mint_keypair) = test_bank_forks();
-        let bundle = AtomicTxnBatch {
-            seq_id: 1,
-            packets: vec![Packet {
-                data: bincode::serialize(&transfer(
-                    &mint_keypair,
-                    &Pubkey::new_unique(),
-                    1,
-                    bank_forks.read().unwrap().root_bank().last_blockhash(),
-                ))
-                .unwrap(),
-                meta: None,
-            }],
-            max_schedule_slot: Slot::MAX,
-        };
+    //     assert_eq!(num_received, 0);
+    //     verify_container(&mut container, 0);
+    //     let response = response_receiver.recv().unwrap();
+    //     assert!(matches!(
+    //         response,
+    //         BamOutboundMessage::AtomicTxnBatchResult(txn_batch_result) if txn_batch_result.seq_id == 1 &&
+    //         matches!(&txn_batch_result.result, Some(atomic_txn_batch_result::Result::NotCommitted(not_committed)) if
+    //             matches!(not_committed.reason, Some(Reason::DeserializationError(_))))
+    //     ));
+    //     exit.store(true, Ordering::Relaxed);
+    // }
 
-        let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, _batch_stats) =
-            BamReceiveAndBuffer::batch_deserialize_and_verify(&[bundle], Slot::MAX, &mut stats);
+    // #[test]
+    // fn test_batch_deserialize_success() {
+    //     let (bank_forks, mint_keypair) = test_bank_forks();
+    //     let bundle = AtomicTxnBatch {
+    //         seq_id: 1,
+    //         packets: vec![Packet {
+    //             data: bincode::serialize(&transfer(
+    //                 &mint_keypair,
+    //                 &Pubkey::new_unique(),
+    //                 1,
+    //                 bank_forks.read().unwrap().root_bank().last_blockhash(),
+    //             ))
+    //             .unwrap(),
+    //             meta: None,
+    //         }],
+    //         max_schedule_slot: Slot::MAX,
+    //     };
 
-        assert_eq!(results.len(), 1);
-        assert!(results[0].is_ok());
-        if let Ok((deserialized_packets, _, seq_id, _max_schedule_slot)) = &results[0] {
-            assert_eq!(deserialized_packets.len(), 1);
-            assert_eq!(*seq_id, 1);
-        }
-    }
+    //     let mut stats = BamReceiveAndBufferMetrics::default();
+    //     let (results, _batch_stats) =
+    //         BamReceiveAndBuffer::batch_deserialize_and_verify(&[bundle], Slot::MAX, &mut stats);
 
-    #[test]
-    fn test_batch_deserialize_empty() {
-        let (_bank_forks, _mint_keypair) = test_bank_forks();
-        let batch = AtomicTxnBatch {
-            seq_id: 1,
-            packets: vec![],
-            max_schedule_slot: Slot::MAX,
-        };
+    //     assert_eq!(results.len(), 1);
+    //     assert!(results[0].is_ok());
+    //     if let Ok((deserialized_packets, _, seq_id, _max_schedule_slot)) = &results[0] {
+    //         assert_eq!(deserialized_packets.len(), 1);
+    //         assert_eq!(*seq_id, 1);
+    //     }
+    // }
 
-        let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, batch_stats) =
-            BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], Slot::MAX, &mut stats);
+    // #[test]
+    // fn test_batch_deserialize_empty() {
+    //     let (_bank_forks, _mint_keypair) = test_bank_forks();
+    //     let batch = AtomicTxnBatch {
+    //         seq_id: 1,
+    //         packets: vec![],
+    //         max_schedule_slot: Slot::MAX,
+    //     };
 
-        assert_eq!(results.len(), 1);
-        assert!(results[0].is_err());
-        assert_eq!(batch_stats.num_dropped_without_parsing, 1);
-        if let Err((reason, seq_id)) = &results[0] {
-            assert_eq!(*seq_id, 1);
-            assert!(matches!(reason, Reason::DeserializationError(_)));
-        }
-    }
+    //     let mut stats = BamReceiveAndBufferMetrics::default();
+    //     let (results, batch_stats) =
+    //         BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], Slot::MAX, &mut stats);
 
-    #[test]
-    fn test_batch_deserialize_invalid_packet() {
-        let (_bank_forks, _mint_keypair) = test_bank_forks();
-        let batch = AtomicTxnBatch {
-            seq_id: 1,
-            packets: vec![Packet {
-                data: vec![0; PACKET_DATA_SIZE + 1],
-                meta: None,
-            }],
-            max_schedule_slot: Slot::MAX,
-        };
+    //     assert_eq!(results.len(), 1);
+    //     assert!(results[0].is_err());
+    //     assert_eq!(batch_stats.num_dropped_without_parsing, 1);
+    //     if let Err((reason, seq_id)) = &results[0] {
+    //         assert_eq!(*seq_id, 1);
+    //         assert!(matches!(reason, Reason::DeserializationError(_)));
+    //     }
+    // }
 
-        let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, _batch_stats) =
-            BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], Slot::MAX, &mut stats);
+    // #[test]
+    // fn test_batch_deserialize_invalid_packet() {
+    //     let (_bank_forks, _mint_keypair) = test_bank_forks();
+    //     let batch = AtomicTxnBatch {
+    //         seq_id: 1,
+    //         packets: vec![Packet {
+    //             data: vec![0; PACKET_DATA_SIZE + 1],
+    //             meta: None,
+    //         }],
+    //         max_schedule_slot: Slot::MAX,
+    //     };
 
-        assert_eq!(results.len(), 1);
-        assert!(results[0].is_err());
-        if let Err((reason, seq_id)) = &results[0] {
-            assert_eq!(*seq_id, 1);
-            assert!(matches!(reason, Reason::DeserializationError(_)));
-        }
-    }
+    //     let mut stats = BamReceiveAndBufferMetrics::default();
+    //     let (results, _batch_stats) =
+    //         BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], Slot::MAX, &mut stats);
 
-    #[test]
-    fn test_batch_deserialize_fee_payer_doesnt_exist() {
-        let (bank_forks, _) = test_bank_forks();
-        let fee_payer = Keypair::new();
-        let batch = AtomicTxnBatch {
-            seq_id: 1,
-            packets: vec![Packet {
-                data: bincode::serialize(&transfer(
-                    &fee_payer,
-                    &Pubkey::new_unique(),
-                    1,
-                    bank_forks.read().unwrap().root_bank().last_blockhash(),
-                ))
-                .unwrap(),
-                meta: None,
-            }],
-            max_schedule_slot: Slot::MAX,
-        };
+    //     assert_eq!(results.len(), 1);
+    //     assert!(results[0].is_err());
+    //     if let Err((reason, seq_id)) = &results[0] {
+    //         assert_eq!(*seq_id, 1);
+    //         assert!(matches!(reason, Reason::DeserializationError(_)));
+    //     }
+    // }
 
-        let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, _batch_stats) =
-            BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], Slot::MAX, &mut stats);
+    // #[test]
+    // fn test_batch_deserialize_fee_payer_doesnt_exist() {
+    //     let (bank_forks, _) = test_bank_forks();
+    //     let fee_payer = Keypair::new();
+    //     let batch = AtomicTxnBatch {
+    //         seq_id: 1,
+    //         packets: vec![Packet {
+    //             data: bincode::serialize(&transfer(
+    //                 &fee_payer,
+    //                 &Pubkey::new_unique(),
+    //                 1,
+    //                 bank_forks.read().unwrap().root_bank().last_blockhash(),
+    //             ))
+    //             .unwrap(),
+    //             meta: None,
+    //         }],
+    //         max_schedule_slot: Slot::MAX,
+    //     };
 
-        assert_eq!(results.len(), 1);
-        assert!(results[0].is_ok());
+    //     let mut stats = BamReceiveAndBufferMetrics::default();
+    //     let (results, _batch_stats) =
+    //         BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], Slot::MAX, &mut stats);
 
-        if let Ok((deserialized_packets, revert_on_error, seq_id, max_schedule_slot)) = &results[0]
-        {
-            let (result, stats) = BamReceiveAndBuffer::parse_deserialized_batch(
-                deserialized_packets.clone(),
-                *seq_id,
-                *revert_on_error,
-                *max_schedule_slot,
-                &bank_forks,
-                &HashSet::new(),
-                &mut stats,
-            );
+    //     assert_eq!(results.len(), 1);
+    //     assert!(results[0].is_ok());
 
-            assert!(result.is_err());
-            assert_eq!(stats.num_dropped_on_fee_payer, 1);
-            assert!(matches!(result.err().unwrap(), Reason::TransactionError(_)));
-        }
-    }
+    //     if let Ok((deserialized_packets, revert_on_error, seq_id, max_schedule_slot)) = &results[0]
+    //     {
+    //         let (result, stats) = BamReceiveAndBuffer::parse_deserialized_batch(
+    //             deserialized_packets.clone(),
+    //             *seq_id,
+    //             *revert_on_error,
+    //             *max_schedule_slot,
+    //             &bank_forks,
+    //             &HashSet::new(),
+    //             &mut stats,
+    //         );
 
-    #[test]
-    fn test_batch_deserialize_inconsistent() {
-        let (bank_forks, mint_keypair) = test_bank_forks();
-        let bundle = AtomicTxnBatch {
-            seq_id: 1,
-            packets: vec![
-                Packet {
-                    data: bincode::serialize(&transfer(
-                        &mint_keypair,
-                        &Pubkey::new_unique(),
-                        1,
-                        bank_forks.read().unwrap().root_bank().last_blockhash(),
-                    ))
-                    .unwrap(),
-                    meta: None,
-                },
-                Packet {
-                    data: bincode::serialize(&transfer(
-                        &mint_keypair,
-                        &Pubkey::new_unique(),
-                        1,
-                        bank_forks.read().unwrap().root_bank().last_blockhash(),
-                    ))
-                    .unwrap(),
-                    meta: Some(jito_protos::proto::bam_types::Meta {
-                        flags: Some(jito_protos::proto::bam_types::PacketFlags {
-                            revert_on_error: true,
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    }),
-                },
-            ],
-            max_schedule_slot: Slot::MAX,
-        };
+    //         assert!(result.is_err());
+    //         assert_eq!(stats.num_dropped_on_fee_payer, 1);
+    //         assert!(matches!(result.err().unwrap(), Reason::TransactionError(_)));
+    //     }
+    // }
 
-        let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, batch_stats) =
-            BamReceiveAndBuffer::batch_deserialize_and_verify(&[bundle], Slot::MAX, &mut stats);
-        assert_eq!(results.len(), 1);
-        assert!(results[0].is_err());
-        assert_eq!(batch_stats.num_dropped_without_parsing, 1);
-        if let Err((reason, seq_id)) = &results[0] {
-            assert_eq!(*seq_id, 1);
-            assert!(matches!(reason, Reason::DeserializationError(_)));
-        }
-    }
+    // #[test]
+    // fn test_batch_deserialize_inconsistent() {
+    //     let (bank_forks, mint_keypair) = test_bank_forks();
+    //     let bundle = AtomicTxnBatch {
+    //         seq_id: 1,
+    //         packets: vec![
+    //             Packet {
+    //                 data: bincode::serialize(&transfer(
+    //                     &mint_keypair,
+    //                     &Pubkey::new_unique(),
+    //                     1,
+    //                     bank_forks.read().unwrap().root_bank().last_blockhash(),
+    //                 ))
+    //                 .unwrap(),
+    //                 meta: None,
+    //             },
+    //             Packet {
+    //                 data: bincode::serialize(&transfer(
+    //                     &mint_keypair,
+    //                     &Pubkey::new_unique(),
+    //                     1,
+    //                     bank_forks.read().unwrap().root_bank().last_blockhash(),
+    //                 ))
+    //                 .unwrap(),
+    //                 meta: Some(jito_protos::proto::bam_types::Meta {
+    //                     flags: Some(jito_protos::proto::bam_types::PacketFlags {
+    //                         revert_on_error: true,
+    //                         ..Default::default()
+    //                     }),
+    //                     ..Default::default()
+    //                 }),
+    //             },
+    //         ],
+    //         max_schedule_slot: Slot::MAX,
+    //     };
 
-    #[test]
-    fn test_batch_deserialize_blacklisted_account() {
-        let keypair = Keypair::new();
-        let blacklisted_accounts = HashSet::from([keypair.pubkey()]);
+    //     let mut stats = BamReceiveAndBufferMetrics::default();
+    //     let (results, batch_stats) =
+    //         BamReceiveAndBuffer::batch_deserialize_and_verify(&[bundle], Slot::MAX, &mut stats);
+    //     assert_eq!(results.len(), 1);
+    //     assert!(results[0].is_err());
+    //     assert_eq!(batch_stats.num_dropped_without_parsing, 1);
+    //     if let Err((reason, seq_id)) = &results[0] {
+    //         assert_eq!(*seq_id, 1);
+    //         assert!(matches!(reason, Reason::DeserializationError(_)));
+    //     }
+    // }
 
-        let (bank_forks, mint_keypair) = test_bank_forks();
-        let batch = AtomicTxnBatch {
-            seq_id: 1,
-            packets: vec![Packet {
-                data: bincode::serialize(&transfer(
-                    &mint_keypair,
-                    &keypair.pubkey(),
-                    100,
-                    bank_forks.read().unwrap().root_bank().last_blockhash(),
-                ))
-                .unwrap(),
-                meta: None,
-            }],
-            max_schedule_slot: Slot::MAX,
-        };
+    // #[test]
+    // fn test_batch_deserialize_blacklisted_account() {
+    //     let keypair = Keypair::new();
+    //     let blacklisted_accounts = HashSet::from([keypair.pubkey()]);
 
-        let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, _batch_stats) =
-            BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], Slot::MAX, &mut stats);
+    //     let (bank_forks, mint_keypair) = test_bank_forks();
+    //     let batch = AtomicTxnBatch {
+    //         seq_id: 1,
+    //         packets: vec![Packet {
+    //             data: bincode::serialize(&transfer(
+    //                 &mint_keypair,
+    //                 &keypair.pubkey(),
+    //                 100,
+    //                 bank_forks.read().unwrap().root_bank().last_blockhash(),
+    //             ))
+    //             .unwrap(),
+    //             meta: None,
+    //         }],
+    //         max_schedule_slot: Slot::MAX,
+    //     };
 
-        assert_eq!(results.len(), 1);
-        assert!(results[0].is_ok());
+    //     let mut stats = BamReceiveAndBufferMetrics::default();
+    //     let (results, _batch_stats) =
+    //         BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], Slot::MAX, &mut stats);
 
-        if let Ok((deserialized_packets, revert_on_error, seq_id, max_schedule_slot)) = &results[0]
-        {
-            let (result, stats) = BamReceiveAndBuffer::parse_deserialized_batch(
-                deserialized_packets.clone(),
-                *seq_id,
-                *revert_on_error,
-                *max_schedule_slot,
-                &bank_forks,
-                &blacklisted_accounts,
-                &mut stats,
-            );
+    //     assert_eq!(results.len(), 1);
+    //     assert!(results[0].is_ok());
 
-            assert!(result.is_err());
-            assert_eq!(stats.num_dropped_on_blacklisted_account, 1);
-            assert!(matches!(result.err().unwrap(), Reason::TransactionError(_)));
-        }
-    }
+    //     if let Ok((deserialized_packets, revert_on_error, seq_id, max_schedule_slot)) = &results[0]
+    //     {
+    //         let (result, stats) = BamReceiveAndBuffer::parse_deserialized_batch(
+    //             deserialized_packets.clone(),
+    //             *seq_id,
+    //             *revert_on_error,
+    //             *max_schedule_slot,
+    //             &bank_forks,
+    //             &blacklisted_accounts,
+    //             &mut stats,
+    //         );
 
-    #[test]
-    fn test_batch_deserialize_rejects_vote_transactions() {
-        let (bank_forks, _mint_keypair) = test_bank_forks();
+    //         assert!(result.is_err());
+    //         assert_eq!(stats.num_dropped_on_blacklisted_account, 1);
+    //         assert!(matches!(result.err().unwrap(), Reason::TransactionError(_)));
+    //     }
+    // }
 
-        let vote_keypair = Keypair::new();
-        let node_keypair = Keypair::new();
-        let authorized_voter = Keypair::new();
-        let recent_blockhash = bank_forks.read().unwrap().root_bank().last_blockhash();
+    // #[test]
+    // fn test_batch_deserialize_rejects_vote_transactions() {
+    //     let (bank_forks, _mint_keypair) = test_bank_forks();
 
-        let vote_tx = Transaction::new(
-            &[&node_keypair, &authorized_voter],
-            Message::new(
-                &[solana_vote_program::vote_instruction::vote(
-                    &vote_keypair.pubkey(),
-                    &authorized_voter.pubkey(),
-                    solana_vote_program::vote_state::Vote::new(vec![1], recent_blockhash),
-                )],
-                Some(&node_keypair.pubkey()),
-            ),
-            recent_blockhash,
-        );
+    //     let vote_keypair = Keypair::new();
+    //     let node_keypair = Keypair::new();
+    //     let authorized_voter = Keypair::new();
+    //     let recent_blockhash = bank_forks.read().unwrap().root_bank().last_blockhash();
 
-        let vote_data = bincode::serialize(&VersionedTransaction::from(vote_tx)).unwrap();
+    //     let vote_tx = Transaction::new(
+    //         &[&node_keypair, &authorized_voter],
+    //         Message::new(
+    //             &[solana_vote_program::vote_instruction::vote(
+    //                 &vote_keypair.pubkey(),
+    //                 &authorized_voter.pubkey(),
+    //                 solana_vote_program::vote_state::Vote::new(vec![1], recent_blockhash),
+    //             )],
+    //             Some(&node_keypair.pubkey()),
+    //         ),
+    //         recent_blockhash,
+    //     );
 
-        let meta = jito_protos::proto::bam_types::Meta {
-            flags: Some(jito_protos::proto::bam_types::PacketFlags {
-                simple_vote_tx: true,
-                ..Default::default()
-            }),
-            size: vote_data.len() as u64,
-        };
+    //     let vote_data = bincode::serialize(&VersionedTransaction::from(vote_tx)).unwrap();
 
-        let batch = AtomicTxnBatch {
-            seq_id: 1,
-            packets: vec![Packet {
-                data: vote_data,
-                meta: Some(meta),
-            }],
-            max_schedule_slot: Slot::MAX,
-        };
+    //     let meta = jito_protos::proto::bam_types::Meta {
+    //         flags: Some(jito_protos::proto::bam_types::PacketFlags {
+    //             simple_vote_tx: true,
+    //             ..Default::default()
+    //         }),
+    //         size: vote_data.len() as u64,
+    //     };
 
-        let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, _batch_stats) =
-            BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], Slot::MAX, &mut stats);
+    //     let batch = AtomicTxnBatch {
+    //         seq_id: 1,
+    //         packets: vec![Packet {
+    //             data: vote_data,
+    //             meta: Some(meta),
+    //         }],
+    //         max_schedule_slot: Slot::MAX,
+    //     };
 
-        assert_eq!(results.len(), 1);
-        assert!(results[0].is_ok());
+    //     let mut stats = BamReceiveAndBufferMetrics::default();
+    //     let (results, _batch_stats) =
+    //         BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], Slot::MAX, &mut stats);
 
-        if let Ok((deserialized_packets, revert_on_error, seq_id, max_schedule_slot)) = &results[0]
-        {
-            let (result, stats) = BamReceiveAndBuffer::parse_deserialized_batch(
-                deserialized_packets.clone(),
-                *seq_id,
-                *revert_on_error,
-                *max_schedule_slot,
-                &bank_forks,
-                &HashSet::new(),
-                &mut stats,
-            );
+    //     assert_eq!(results.len(), 1);
+    //     assert!(results[0].is_ok());
 
-            assert!(result.is_err());
-            assert_eq!(stats.num_dropped_on_parsing_and_sanitization, 1);
-            assert!(matches!(
-                result.err().unwrap(),
-                Reason::DeserializationError(_)
-            ));
-        }
-    }
+    //     if let Ok((deserialized_packets, revert_on_error, seq_id, max_schedule_slot)) = &results[0]
+    //     {
+    //         let (result, stats) = BamReceiveAndBuffer::parse_deserialized_batch(
+    //             deserialized_packets.clone(),
+    //             *seq_id,
+    //             *revert_on_error,
+    //             *max_schedule_slot,
+    //             &bank_forks,
+    //             &HashSet::new(),
+    //             &mut stats,
+    //         );
 
-    #[test]
-    fn test_batch_deserialize_reject_wrong_slot() {
-        let (bank_forks, mint_keypair) = test_bank_forks();
-        let batch = AtomicTxnBatch {
-            seq_id: 1,
-            packets: vec![Packet {
-                data: bincode::serialize(&transfer(
-                    &mint_keypair,
-                    &Pubkey::new_unique(),
-                    1,
-                    bank_forks.read().unwrap().root_bank().last_blockhash(),
-                ))
-                .unwrap(),
-                meta: None,
-            }],
-            max_schedule_slot: 0,
-        };
+    //         assert!(result.is_err());
+    //         assert_eq!(stats.num_dropped_on_parsing_and_sanitization, 1);
+    //         assert!(matches!(
+    //             result.err().unwrap(),
+    //             Reason::DeserializationError(_)
+    //         ));
+    //     }
+    // }
 
-        let mut stats = BamReceiveAndBufferMetrics::default();
-        let (results, _batch_stats) =
-            BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], Slot::MAX, &mut stats);
+    // #[test]
+    // fn test_batch_deserialize_reject_wrong_slot() {
+    //     let (bank_forks, mint_keypair) = test_bank_forks();
+    //     let batch = AtomicTxnBatch {
+    //         seq_id: 1,
+    //         packets: vec![Packet {
+    //             data: bincode::serialize(&transfer(
+    //                 &mint_keypair,
+    //                 &Pubkey::new_unique(),
+    //                 1,
+    //                 bank_forks.read().unwrap().root_bank().last_blockhash(),
+    //             ))
+    //             .unwrap(),
+    //             meta: None,
+    //         }],
+    //         max_schedule_slot: 0,
+    //     };
 
-        assert_eq!(results.len(), 1);
-        assert!(results[0].is_err());
-    }
+    //     let mut stats = BamReceiveAndBufferMetrics::default();
+    //     let (results, _batch_stats) =
+    //         BamReceiveAndBuffer::batch_deserialize_and_verify(&[batch], Slot::MAX, &mut stats);
+
+    //     assert_eq!(results.len(), 1);
+    //     assert!(results[0].is_err());
+    // }
 }

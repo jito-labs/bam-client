@@ -145,7 +145,6 @@ impl VerifiedBamPacketBatch {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn test_max_schedule_slot_out_of_range_returns_error() {

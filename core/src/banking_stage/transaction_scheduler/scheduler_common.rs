@@ -445,7 +445,7 @@ mod tests {
 
     #[test]
     fn test_send_batches() {
-        let mut container = TransactionStateContainer::with_capacity(1024);
+        let mut container = TransactionStateContainer::with_capacity(1024, false);
         add_transactions_to_container(&mut container, 3);
 
         let (work_senders, work_receivers): (Vec<Sender<_>>, Vec<Receiver<_>>) =
@@ -493,7 +493,7 @@ mod tests {
 
     #[test]
     fn test_receive_completed() {
-        let mut container = TransactionStateContainer::with_capacity(1024);
+        let mut container = TransactionStateContainer::with_capacity(1024, false);
         add_transactions_to_container(&mut container, 1);
 
         let (work_senders, work_receivers): (Vec<Sender<_>>, Vec<Receiver<_>>) =
@@ -546,7 +546,7 @@ mod tests {
     #[test]
     #[should_panic = "retryable indexes were not in order: [1, 0]"]
     fn test_receive_completed_out_of_order() {
-        let mut container = TransactionStateContainer::with_capacity(1024);
+        let mut container = TransactionStateContainer::with_capacity(1024, false);
 
         let (work_senders, work_receivers): (Vec<Sender<_>>, Vec<Receiver<_>>) =
             (0..NUM_WORKERS).map(|_| unbounded()).unzip();

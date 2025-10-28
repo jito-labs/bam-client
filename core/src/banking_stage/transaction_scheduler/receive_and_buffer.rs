@@ -885,7 +885,7 @@ mod tests {
             bank_forks,
             blacklisted_accounts,
         };
-        let container = TransactionStateContainer::with_capacity(TEST_CONTAINER_CAPACITY);
+        let container = TransactionStateContainer::with_capacity(TEST_CONTAINER_CAPACITY, false);
         (receive_and_buffer, container)
     }
 
@@ -902,7 +902,8 @@ mod tests {
             bank_forks,
             blacklisted_accounts,
         };
-        let container = TransactionViewStateContainer::with_capacity(TEST_CONTAINER_CAPACITY);
+        let container =
+            TransactionViewStateContainer::with_capacity(TEST_CONTAINER_CAPACITY, false);
         (receive_and_buffer, container)
     }
 

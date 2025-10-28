@@ -934,7 +934,9 @@ mod tests {
             BundleAccountLocker::default(),
             |_| 0,
             None,
-            None,
+            Arc::new(AtomicBool::new(false)),
+            unbounded().1,
+            BamResponseHandle::new(unbounded().0),
         );
         drop(non_vote_sender);
         drop(tpu_vote_sender);
@@ -995,7 +997,9 @@ mod tests {
             BundleAccountLocker::default(),
             |_| 0,
             None,
-            None,
+            Arc::new(AtomicBool::new(false)),
+            unbounded().1,
+            BamResponseHandle::new(unbounded().0),
         );
         trace!("sending bank");
         drop(non_vote_sender);
@@ -1065,7 +1069,9 @@ mod tests {
             BundleAccountLocker::default(),
             |_| 0,
             None,
-            None,
+            Arc::new(AtomicBool::new(false)),
+            unbounded().1,
+            BamResponseHandle::new(unbounded().0),
         );
 
         // good tx, and no verify
@@ -1221,7 +1227,9 @@ mod tests {
                 BundleAccountLocker::default(),
                 |_| 0,
                 None,
-                None,
+                Arc::new(AtomicBool::new(false)),
+                unbounded().1,
+                BamResponseHandle::new(unbounded().0),
             );
 
             // wait for banking_stage to eat the packets
@@ -1424,7 +1432,9 @@ mod tests {
             BundleAccountLocker::default(),
             |_| 0,
             None,
-            None,
+            Arc::new(AtomicBool::new(false)),
+            unbounded().1,
+            BamResponseHandle::new(unbounded().0),
         );
 
         let keypairs = (0..100).map(|_| Keypair::new()).collect_vec();
@@ -1556,7 +1566,9 @@ mod tests {
                         BundleAccountLocker::default(),
                         |_| 0,
                         None,
-                        None,
+                        Arc::new(AtomicBool::default()),
+                        unbounded().1,
+                        BamResponseHandle::new(unbounded().0),
                     );
 
                     // bad tx

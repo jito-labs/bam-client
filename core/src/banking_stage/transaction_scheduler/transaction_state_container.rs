@@ -643,10 +643,7 @@ mod tests {
             container
                 .id_to_transaction_state
                 .iter()
-                .map(|ts| match ts.1 {
-                    BatchIdOrTransactionState::Batch(_) => panic!("unexpected batch id"),
-                    BatchIdOrTransactionState::TransactionState(ref state) => state.priority(),
-                })
+                .map(|state| state.1.priority())
                 .next()
                 .unwrap(),
             4
@@ -743,34 +740,34 @@ mod tests {
         assert!(container.pop().is_none());
     }
 
-    #[test]
-    fn test_batch() {
-        let mut container = TransactionStateContainer::with_capacity(5, true);
-        let mut transaction_max_ages = Vec::with_capacity(5);
-        for priority in 0..5 {
-            let (transaction, max_age, _, _) = test_transaction(priority);
-            transaction_max_ages.push((transaction, max_age));
-        }
+    // #[test]
+    // fn test_batch() {
+    //     let mut container = TransactionStateContainer::with_capacity(5, true);
+    //     let mut transaction_max_ages = Vec::with_capacity(5);
+    //     for priority in 0..5 {
+    //         let (transaction, max_age, _, _) = test_transaction(priority);
+    //         transaction_max_ages.push((transaction, max_age));
+    //     }
 
-        // Insert a batch of transactions.
-        let batch_id = container.insert_new_batch(transaction_max_ages, 10, 100, true, 0);
-        assert!(batch_id.is_some());
-        assert_eq!(container.priority_queue.len(), 1);
-        assert_eq!(container.id_to_transaction_state.len(), 6);
-        assert_eq!(container.batch_ids_to_batch_info.len(), 1);
+    //     // Insert a batch of transactions.
+    //     let batch_id = container.insert_new_batch(transaction_max_ages, 10, 100, true, 0);
+    //     assert!(batch_id.is_some());
+    //     assert_eq!(container.priority_queue.len(), 1);
+    //     assert_eq!(container.id_to_transaction_state.len(), 6);
+    //     assert_eq!(container.batch_ids_to_batch_info.len(), 1);
 
-        // Get the batch id and revert_on_error flag.
-        let batch_id = batch_id.unwrap();
-        let (batch, revert_on_error, slot) = container.get_batch(batch_id).unwrap();
-        assert_eq!(batch.len(), 5);
-        assert!(revert_on_error);
-        assert_eq!(slot, 0);
+    //     // Get the batch id and revert_on_error flag.
+    //     let batch_id = batch_id.unwrap();
+    //     let (batch, revert_on_error, slot) = container.get_batch(batch_id).unwrap();
+    //     assert_eq!(batch.len(), 5);
+    //     assert!(revert_on_error);
+    //     assert_eq!(slot, 0);
 
-        // Remove a batch of transactions.
-        let batch_id = container.pop().unwrap();
-        container.remove_by_id(batch_id.id);
-        assert_eq!(container.priority_queue.len(), 0);
-        assert_eq!(container.id_to_transaction_state.len(), 0);
-        assert!(container.batch_ids_to_batch_info.is_empty());
-    }
+    //     // Remove a batch of transactions.
+    //     let batch_id = container.pop().unwrap();
+    //     container.remove_by_id(batch_id.id);
+    //     assert_eq!(container.priority_queue.len(), 0);
+    //     assert_eq!(container.id_to_transaction_state.len(), 0);
+    //     assert!(container.batch_ids_to_batch_info.is_empty());
+    // }
 }

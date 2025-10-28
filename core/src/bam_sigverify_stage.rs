@@ -207,13 +207,14 @@ impl BamSigverifyStage {
 
 #[cfg(test)]
 mod tests {
-    use {super::*, crossbeam_channel::bounded};
+    use {super::*, crossbeam_channel::{bounded, unbounded}};
 
     #[test]
     fn test_bam_sigverify_stage_exits() {
-        let (receiver, sender) = bounded(10);
+        let (_unverified_sender, unverified_receiver) = bounded(10);
+        let (verified_sender, _verified_receiver) = unbounded();
         let exit = Arc::<AtomicBool>::default();
-        let stage = BamSigverifyStage::new(receiver, sender, exit.clone());
+        let stage = BamSigverifyStage::new(unverified_receiver, verified_sender, exit.clone());
         exit.store(true, Ordering::Relaxed);
         stage.join().unwrap();
     }
