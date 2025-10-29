@@ -394,8 +394,7 @@ impl BamReceiveAndBuffer {
 
             // Check 5: Ensure the fee payer has enough to pay for the transaction fee
             // index + revert_on_error check because for multi-tx bundles, sometimes txs 1..N accounts are funded by tx 0
-            if index > 0 && revert_on_error {
-                // Check 5: Ensure the fee payer has enough to pay for the transaction fee
+            if index == 0 {
                 let (result, duration_us) = measure_us!(Consumer::check_fee_payer_unlocked(
                     &working_bank,
                     &tx,
