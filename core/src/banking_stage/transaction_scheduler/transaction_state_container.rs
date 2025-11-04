@@ -260,7 +260,6 @@ impl<Tx: TransactionWithMeta> StateContainer<Tx> for TransactionStateContainer<T
             transaction_ids, ..
         } = self.batch_ids_to_batch_info.remove(id);
         for transaction_id in transaction_ids {
-            // println!("container: removed {} (tx_id)", transaction_id);
             self.id_to_transaction_state.remove(transaction_id);
         }
     }
