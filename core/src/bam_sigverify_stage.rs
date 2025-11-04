@@ -298,14 +298,13 @@ mod tests {
         assert_eq!(verified_batch.packet_batch().len(), 2);
         assert!(!verified_batch
             .packet_batch()
-            .first()
+            .get(0)
             .unwrap()
             .meta()
             .discard());
         assert!(verified_batch
             .packet_batch()
-            .iter()
-            .last()
+            .get(1)
             .unwrap()
             .meta()
             .discard());

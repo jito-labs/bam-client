@@ -889,7 +889,7 @@ mod tests {
             packets.push(
                 BytesPacket::from_data(
                     None,
-                    &transfer(
+                    transfer(
                         &mint_keypair,
                         &Pubkey::new_unique(),
                         count as u64,
@@ -982,7 +982,7 @@ mod tests {
         for count in 0..100 + EXTRA_CAPACITY {
             let packet_batch = vec![BytesPacket::from_data(
                 None,
-                &transfer(
+                transfer(
                     &mint_keypair,
                     &Pubkey::new_unique(),
                     count as u64,
@@ -1008,10 +1008,10 @@ mod tests {
                 )
                 .unwrap();
             assert!(response_receiver.is_empty());
-            assert_eq!(container.batch_queue_size(), count as usize + 1);
-            assert_eq!(container.batch_buffer_size(), count as usize + 1);
+            assert_eq!(container.batch_queue_size(), count + 1);
+            assert_eq!(container.batch_buffer_size(), count + 1);
             assert_eq!(container.queue_size(), 0);
-            assert_eq!(container.buffer_size(), count as usize + 1);
+            assert_eq!(container.buffer_size(), count + 1);
         }
         assert_eq!(container.batch_queue_size(), 100 + EXTRA_CAPACITY);
         assert_eq!(container.batch_buffer_size(), 100 + EXTRA_CAPACITY);
@@ -1020,7 +1020,7 @@ mod tests {
 
         let packet_batch = vec![BytesPacket::from_data(
             None,
-            &transfer(
+            transfer(
                 &mint_keypair,
                 &Pubkey::new_unique(),
                 100 + EXTRA_CAPACITY as u64,
@@ -1067,7 +1067,7 @@ mod tests {
         for count in 0..100 + EXTRA_CAPACITY - 1 {
             let packet_batch = vec![BytesPacket::from_data(
                 None,
-                &transfer(
+                transfer(
                     &mint_keypair,
                     &Pubkey::new_unique(),
                     count as u64,
@@ -1093,10 +1093,10 @@ mod tests {
                 )
                 .unwrap();
             assert!(response_receiver.is_empty());
-            assert_eq!(container.batch_queue_size(), count as usize + 1);
-            assert_eq!(container.batch_buffer_size(), count as usize + 1);
+            assert_eq!(container.batch_queue_size(), count + 1);
+            assert_eq!(container.batch_buffer_size(), count + 1);
             assert_eq!(container.queue_size(), 0);
-            assert_eq!(container.buffer_size(), count as usize + 1);
+            assert_eq!(container.buffer_size(), count + 1);
         }
         assert_eq!(container.batch_queue_size(), 100 + EXTRA_CAPACITY - 1);
         assert_eq!(container.batch_buffer_size(), 100 + EXTRA_CAPACITY - 1);
@@ -1106,7 +1106,7 @@ mod tests {
         let packet_batch = vec![
             BytesPacket::from_data(
                 None,
-                &transfer(
+                transfer(
                     &mint_keypair,
                     &Pubkey::new_unique(),
                     100 + EXTRA_CAPACITY as u64,
@@ -1116,7 +1116,7 @@ mod tests {
             .unwrap(),
             BytesPacket::from_data(
                 None,
-                &transfer(
+                transfer(
                     &mint_keypair,
                     &Pubkey::new_unique(),
                     101 + EXTRA_CAPACITY as u64,

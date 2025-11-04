@@ -69,6 +69,7 @@ pub struct BamManager {
 }
 
 impl BamManager {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         exit: Arc<AtomicBool>,
         bam_url: Arc<Mutex<Option<String>>>,
@@ -103,6 +104,7 @@ impl BamManager {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run(
         exit: Arc<AtomicBool>,
         bam_url: Arc<Mutex<Option<String>>>,

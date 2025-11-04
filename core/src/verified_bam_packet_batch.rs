@@ -112,7 +112,7 @@ impl VerifiedBamPacketBatch {
                 p.data.len() > PACKET_DATA_SIZE
                     || p.meta
                         .as_ref()
-                        .map_or(false, |m| m.size > PACKET_DATA_SIZE as u64)
+                        .is_some_and(|m| m.size > PACKET_DATA_SIZE as u64)
             })
             .map(|(index, _)| index)
         {

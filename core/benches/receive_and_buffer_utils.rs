@@ -210,7 +210,8 @@ pub fn setup_receive_and_buffer<T: ReceiveAndBuffer + ReceiveAndBufferCreator>(
         probability_invalid_blockhash,
         set_rand_cu_price,
     );
-    let container = <T as ReceiveAndBuffer>::Container::with_capacity(TOTAL_BUFFERED_PACKETS);
+    let container =
+        <T as ReceiveAndBuffer>::Container::with_capacity(TOTAL_BUFFERED_PACKETS, false);
 
     ReceiveAndBufferSetup {
         txs,

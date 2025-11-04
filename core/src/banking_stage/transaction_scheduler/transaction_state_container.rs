@@ -443,8 +443,7 @@ impl TransactionViewStateContainer {
         let mut transaction_ids = SmallVec::with_capacity(batches.len());
         for batch in batches {
             // Optimistically add the batch to the map, removing all transaction_ids if any tx in the batch fails to deserialize.
-            if let Some(transaction_id) = self.try_insert_map_only_with_data(batch, |data| f(data))
-            {
+            if let Some(transaction_id) = self.try_insert_map_only_with_data(batch, &mut f) {
                 transaction_ids.push(transaction_id);
             } else {
                 for transaction_id in transaction_ids {

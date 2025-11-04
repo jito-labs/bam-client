@@ -1,6 +1,10 @@
 #![allow(clippy::arithmetic_side_effects)]
 #![feature(test)]
 
+use std::sync::atomic::AtomicBool;
+
+use solana_core::bam_response_handle::BamResponseHandle;
+
 use {
     agave_banking_stage_ingress_types::BankingPacketBatch,
     solana_core::{
@@ -257,7 +261,9 @@ fn bench_banking(
         BundleAccountLocker::default(),
         |_| 0,
         None,
-        None,
+        Arc::new(AtomicBool::new(false)),
+        unbounded().1,
+        BamResponseHandle::new(unbounded().0),
     );
 
     let chunk_len = verified.len() / CHUNKS;

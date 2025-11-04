@@ -49,19 +49,12 @@ type SchedulerPrioGraph = PrioGraph<
 >;
 
 // Inflight batches contain many batches
+#[derive(Default)]
 struct InflightBatchInfo {
     batch_priority_ids: Vec<(
         TransactionPriorityId,
         usize, /* number of txs in the batch */
     )>,
-}
-
-impl Default for InflightBatchInfo {
-    fn default() -> Self {
-        Self {
-            batch_priority_ids: Vec::new(),
-        }
-    }
 }
 
 pub struct BamScheduler<Tx: TransactionWithMeta> {
@@ -235,6 +228,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn check_transactions_and_send_work<const LEN: usize>(
         container: &mut impl StateContainer<Tx>,
         prio_graph: &mut SchedulerPrioGraph,
@@ -267,7 +261,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         // check already processed, bad blockhash, or bad nonce
         let mut check_results: ArrayVec<TransactionResult<()>, LEN> = working_bank
             .check_transactions::<Tx>(
-                &transactions,
+                transactions,
                 lock_results.as_slice(),
                 MAX_PROCESSING_AGE,
                 &mut error_counters,
@@ -281,12 +275,9 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
 
         // check to make sure fee payer has enough to process the transaction and remain rent-exempt
         for (tx, check_result) in transactions.iter().zip(check_results.iter_mut()) {
-            match check_result {
-                Ok(()) => {
-                    *check_result =
-                        Consumer::check_fee_payer_unlocked(&working_bank, tx, &mut error_counters);
-                }
-                Err(_) => {}
+            if let Ok(()) = check_result {
+                *check_result =
+                    Consumer::check_fee_payer_unlocked(working_bank, tx, &mut error_counters);
             }
         }
 
