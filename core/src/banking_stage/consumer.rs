@@ -347,7 +347,15 @@ impl Consumer {
                 Ok(_) => None,
             })
             .collect();
-        if revert_on_error && batch.lock_results().iter().any(|res| res.is_err()) {
+
+        // Only errors up to this point should be retryable - QoS + locking related
+        let first_error = batch
+            .lock_results()
+            .iter()
+            .find_map(|res| res.as_ref().err());
+        if revert_on_error && first_error.is_some() {
+            let first_error = first_error.unwrap();
+
             return ExecuteAndCommitTransactionsOutput {
                 transaction_counts: LeaderProcessedTransactionCounts {
                     attempted_processing_count: batch.sanitized_transactions().len() as u64,
@@ -358,12 +366,7 @@ impl Consumer {
                 commit_transactions_result: Ok(batch
                     .lock_results()
                     .iter()
-                    .map(|res| match res {
-                        Ok(_) => CommitTransactionDetails::NotCommitted(
-                            TransactionError::CommitCancelled,
-                        ),
-                        Err(err) => CommitTransactionDetails::NotCommitted(err.clone()),
-                    })
+                    .map(|_| CommitTransactionDetails::NotCommitted(first_error.clone()))
                     .collect()),
                 execute_and_commit_timings,
                 error_counters,
@@ -389,16 +392,15 @@ impl Consumer {
                 }
             ));
         execute_and_commit_timings.load_execute_us = load_execute_us;
-        let successful_count = load_and_execute_transactions_output
-            .processed_counts
-            .processed_with_successful_result_count as usize;
-        let transaction_errors = load_and_execute_transactions_output
+
+        // There shouldn't be any QoS or locking errors at this point, so find the first error and apply it to all transactions
+        let first_error = load_and_execute_transactions_output
             .processing_results
             .iter()
-            .map(|result| result.flattened_result().err())
-            .collect_vec();
+            .find_map(|result| result.flattened_result().err().clone());
+        if revert_on_error && first_error.is_some() {
+            let first_error = first_error.unwrap();
 
-        if revert_on_error && successful_count != batch.sanitized_transactions().len() {
             return ExecuteAndCommitTransactionsOutput {
                 transaction_counts: LeaderProcessedTransactionCounts {
                     attempted_processing_count: batch.sanitized_transactions().len() as u64,
@@ -406,16 +408,7 @@ impl Consumer {
                 },
                 retryable_transaction_indexes,
                 commit_transactions_result: Ok((0..batch.sanitized_transactions().len())
-                    .map(|index| {
-                        CommitTransactionDetails::NotCommitted(
-                            transaction_errors
-                                .get(index)
-                                .map(|error| {
-                                    error.clone().unwrap_or(TransactionError::CommitCancelled)
-                                })
-                                .unwrap_or(TransactionError::CommitCancelled),
-                        )
-                    })
+                    .map(|_| CommitTransactionDetails::NotCommitted(first_error.clone()))
                     .collect()),
                 execute_and_commit_timings,
                 error_counters,
