@@ -1442,7 +1442,7 @@ dependencies = [
 
 [[package]]
 name = "bam-banking-bench"
-version = "3.0.7"
+version = "3.0.10"
 dependencies = [
  "agave-banking-stage-ingress-types",
  "assert_matches",
@@ -1479,7 +1479,7 @@ dependencies = [
 
 [[package]]
 name = "bam-local-cluster"
-version = "3.0.7"
+version = "3.0.10"
 dependencies = [
  "agave-feature-set",
  "anyhow",
