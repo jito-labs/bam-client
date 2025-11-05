@@ -65,6 +65,7 @@ impl BamValidator {
         runtime: &Runtime,
         config: &CustomValidatorConfig,
         quiet: bool,
+        poh_core: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let validator_binary = format!("{}/agave-validator", cluster_config.validator_build_path);
 
@@ -106,6 +107,8 @@ impl BamValidator {
             .arg("--enable-extended-tx-metadata-storage")
             .arg("--expected-shred-version")
             .arg(compute_shred_version(&genesis_config.hash(), None).to_string())
+            .arg("--experimental-poh-pinned-cpu-core")
+            .arg(poh_core.to_string())
             .arg("--bam-url")
             .arg(&cluster_config.bam_url)
             .arg("--tip-distribution-program-pubkey")
@@ -434,6 +437,7 @@ impl BamLocalCluster {
                 &runtime,
                 validator_config,
                 quiet,
+                i * 2,
             )?;
             validators.push(validator);
 
