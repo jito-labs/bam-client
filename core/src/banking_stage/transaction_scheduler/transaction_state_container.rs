@@ -76,8 +76,10 @@ pub(crate) trait StateContainer<Tx: TransactionWithMeta> {
 
     fn buffer_size(&self) -> usize;
 
+    #[allow(dead_code)]
     fn batch_queue_size(&self) -> usize;
 
+    #[allow(dead_code)]
     fn batch_buffer_size(&self) -> usize;
 
     /// Returns true if the queue is empty.
@@ -133,7 +135,6 @@ pub(crate) trait StateContainer<Tx: TransactionWithMeta> {
 
     fn get_min_max_priority(&self) -> MinMaxResult<u64>;
 
-    #[cfg(feature = "dev-context-only-utils")]
     fn clear(&mut self);
 }
 
@@ -274,7 +275,6 @@ impl<Tx: TransactionWithMeta> StateContainer<Tx> for TransactionStateContainer<T
         }
     }
 
-    #[cfg(feature = "dev-context-only-utils")]
     fn clear(&mut self) {
         self.priority_queue.clear();
         self.id_to_transaction_state.clear();
@@ -564,7 +564,6 @@ impl StateContainer<RuntimeTransactionView> for TransactionViewStateContainer {
         self.inner.get_min_max_priority()
     }
 
-    #[cfg(feature = "dev-context-only-utils")]
     #[inline]
     fn clear(&mut self) {
         self.inner.clear();

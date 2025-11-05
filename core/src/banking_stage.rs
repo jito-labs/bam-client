@@ -81,7 +81,7 @@ mod vote_worker;
 conditional_vis_mod!(packet_deserializer, feature = "dev-context-only-utils", pub);
 mod packet_receiver;
 mod read_write_account_set;
-conditional_vis_mod!(scheduler_messages, feature = "dev-context-only-utils", pub);
+pub mod scheduler_messages;
 conditional_vis_mod!(
     transaction_scheduler,
     feature = "dev-context-only-utils",
