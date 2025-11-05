@@ -1,7 +1,7 @@
-use solana_transaction_error::TransactionError;
 use {
     jito_protos::proto::bam_types::TransactionCommittedResult,
     solana_clock::{Epoch, Slot},
+    solana_transaction_error::TransactionError,
     std::fmt::Display,
 };
 
