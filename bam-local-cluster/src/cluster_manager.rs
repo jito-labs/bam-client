@@ -65,10 +65,33 @@ impl BamValidator {
         runtime: &Runtime,
         config: &CustomValidatorConfig,
         quiet: bool,
+        flamegraph: bool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let validator_binary = format!("{}/agave-validator", cluster_config.validator_build_path);
 
-        let mut cmd = Command::new(validator_binary);
+        // If enabled, set cargo-flamegraph options and output directory for the command
+        let use_flamegraph = flamegraph && std::env::var("FLAMEGRAPH_VALIDATOR").is_ok();
+        let mut cmd = if use_flamegraph {
+            info!("Starting {} with flamegraph profiling", node_name);
+            
+            let mut flamegraph_cmd = Command::new("cargo");
+            flamegraph_cmd.arg("flamegraph");
+            
+            if let Ok(opts) = std::env::var("FLAMEGRAPH_VALIDATOR_OPTS") {
+                for opt in opts.split_whitespace() {
+                    flamegraph_cmd.arg(opt);
+                }
+            }
+            
+            if let Ok(output_path) = std::env::var("FLAMEGRAPH_OUTPUT") {
+                flamegraph_cmd.arg("--output").arg(output_path);
+            }
+            
+            flamegraph_cmd.arg("--").arg(&validator_binary);
+            flamegraph_cmd
+        } else {
+            Command::new(&validator_binary)
+        };
 
         cmd.env("RUST_LOG", "info")
             .arg("--log")
