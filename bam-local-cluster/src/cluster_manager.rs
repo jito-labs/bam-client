@@ -325,6 +325,35 @@ impl BamValidator {
     }
 
     pub fn kill(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        #[cfg(unix)]
+        {
+            use nix::sys::signal::{self, Signal};
+            use nix::unistd::Pid;
+
+            let pid = self.process.id();
+            let is_flamegraph = std::env::var("FLAMEGRAPH_VALIDATOR").is_ok();
+            let timeout = if is_flamegraph {
+                info!("{} is using flamegraph, waiting up to 60s for perf data processing...", self.node_name);
+                Duration::from_secs(60)
+            } else {
+                signal::kill(Pid::from_raw(pid as i32), Signal::SIGTERM)?;
+                info!("Sent SIGTERM to {}, waiting for graceful shutdown...", self.node_name);
+                Duration::from_secs(30)
+            };
+            
+            let start = std::time::Instant::now();
+            while start.elapsed() < timeout {
+                match self.process.try_wait()? {
+                    Some(_) => {
+                        info!("{} exited gracefully", self.node_name);
+                        return Ok(());
+                    }
+                    None => std::thread::sleep(Duration::from_millis(500)),
+                }
+            }
+            
+            info!("{} did not exit gracefully, forcing kill...", self.node_name);
+        }
         self.process.kill()?;
         self.process.wait()?;
         Ok(())
@@ -586,7 +615,7 @@ impl BamLocalCluster {
         genesis_config_info
     }
 
-    pub fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn run(self) -> Result<(), Box<dyn std::error::Error>> {
         // Start process monitoring
         let validators_ptr = self.validators.clone();
         let (tx, mut rx) = tokio::sync::oneshot::channel();
@@ -606,6 +635,9 @@ impl BamLocalCluster {
                 }
             }
         });
+
+        // Shutdown before returning
+        self.shutdown();
 
         Ok(())
     }
@@ -646,6 +678,12 @@ impl BamLocalCluster {
             if let Err(e) = validator.kill() {
                 error!("Failed to kill validator {}: {}", validator.node_name, e);
             }
+        }
+
+        // Extra wait for flamegraph processing if needed
+        if std::env::var("FLAMEGRAPH_VALIDATOR").is_ok() {
+            info!("Waiting additional time for flamegraph to finish processing...");
+            std::thread::sleep(std::time::Duration::from_secs(10));
         }
     }
 }

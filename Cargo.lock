@@ -1437,6 +1437,7 @@ dependencies = [
  "axum 0.7.9",
  "clap 2.33.3",
  "log",
+ "nix",
  "serde",
  "serde_json",
  "solana-account 3.0.0",

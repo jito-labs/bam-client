@@ -42,13 +42,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Run the cluster (this will block until shutdown is requested)
+    // Note: run() consumes self and handles graceful shutdown internally
     if let Err(e) = cluster.run() {
         error!("Cluster error: {}", e);
         return Err(e);
     }
-
-    // Graceful shutdown
-    cluster.shutdown();
 
     Ok(())
 }
