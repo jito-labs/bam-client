@@ -74,8 +74,7 @@ impl BamValidator {
         let mut cmd = if use_flamegraph {
             info!("Starting {} with flamegraph profiling", node_name);
             
-            let mut flamegraph_cmd = Command::new("cargo");
-            flamegraph_cmd.arg("flamegraph");
+            let mut flamegraph_cmd = Command::new("flamegraph");
             
             if let Ok(opts) = std::env::var("FLAMEGRAPH_VALIDATOR_OPTS") {
                 for opt in opts.split_whitespace() {
