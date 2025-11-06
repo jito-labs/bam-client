@@ -463,6 +463,7 @@ impl BamLocalCluster {
                 &runtime,
                 validator_config,
                 quiet,
+                is_bootstrap // Only profile the bootstrap validator
             )?;
             validators.push(validator);
 
