@@ -20,7 +20,7 @@ use {
             atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
             Arc, Mutex,
         },
-        time::SystemTime,
+        time::{Duration, Instant, SystemTime},
     },
     thiserror::Error,
     tokio::{
@@ -32,13 +32,23 @@ use {
 
 pub struct BamConnection {
     config: Arc<Mutex<Option<ConfigResponse>>>,
-    background_task: tokio::task::JoinHandle<()>,
+    connection_task: tokio::task::JoinHandle<()>,
     is_healthy: Arc<AtomicBool>,
     url: String,
     exit: Arc<AtomicBool>,
 }
 
 const AUTH_LABEL: &[u8] = b"X_OFF_CHAIN_JITO_BAM_V1\0";
+const CONNECTION_TIMEOUT: Duration = std::time::Duration::from_secs(5);
+const OUTBOUND_CHANNEL_CAPACITY: usize = 100_000;
+const VALIDATOR_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+const METRICS_AND_HEALTH_CHECK_INTERVAL: Duration = Duration::from_millis(25);
+const REFRESH_CONFIG_INTERVAL: Duration = Duration::from_secs(1);
+const OUTBOUND_TICK_INTERVAL: Duration = Duration::from_millis(1);
+const MAX_WAITING_RESULTS: usize = 24;
+const WAIT_SLEEP_DURATION: Duration = Duration::from_millis(10);
+pub const MAX_DURATION_BETWEEN_NODE_HEARTBEATS: Duration = Duration::from_secs(6);
+pub const WAIT_TO_RECONNECT_DURATION: Duration = Duration::from_secs(1);
 
 impl BamConnection {
     /// Try to initialize a connection to the BAM Node; if it is not possible to connect, it will return an error.
@@ -48,14 +58,12 @@ impl BamConnection {
         batch_sender: crossbeam_channel::Sender<AtomicTxnBatch>,
         outbound_receiver: crossbeam_channel::Receiver<BamOutboundMessage>,
     ) -> Result<Self, TryInitError> {
+        // Create connection and inbound and outbound streams
         let backend_endpoint = tonic::transport::Endpoint::from_shared(url.clone())?;
-        let connection_timeout = std::time::Duration::from_secs(5);
-
-        let channel = timeout(connection_timeout, backend_endpoint.connect()).await??;
-
+        let channel = timeout(CONNECTION_TIMEOUT, backend_endpoint.connect()).await??;
         let mut validator_client = BamNodeApiClient::new(channel);
-
-        let (outbound_sender, outbound_receiver_internal) = mpsc::channel(100_000);
+        let (outbound_sender, outbound_receiver_internal) =
+            mpsc::channel(OUTBOUND_CHANNEL_CAPACITY);
         let outbound_stream = tonic::Request::new(ReceiverStream::new(outbound_receiver_internal));
         let inbound_stream = validator_client
             .init_scheduler_stream(outbound_stream)
@@ -66,12 +74,14 @@ impl BamConnection {
             })?
             .into_inner();
 
+        // Create data structures for the connection task
         let metrics = Arc::new(BamConnectionMetrics::default());
-        let is_healthy = Arc::new(AtomicBool::new(true));
+        let is_healthy = Arc::new(AtomicBool::new(false));
         let config = Arc::new(Mutex::new(None));
-
         let exit = Arc::new(AtomicBool::new(false));
-        let background_task = tokio::spawn(Self::connection_task(
+
+        // Start the connection task
+        let connection_task = tokio::spawn(Self::connection_task(
             exit.clone(),
             inbound_stream,
             outbound_sender,
@@ -86,7 +96,7 @@ impl BamConnection {
 
         Ok(Self {
             config,
-            background_task,
+            connection_task,
             is_healthy,
             url,
             exit,
@@ -106,10 +116,10 @@ impl BamConnection {
         is_healthy: Arc<AtomicBool>,
         outbound_receiver: crossbeam_channel::Receiver<BamOutboundMessage>,
     ) {
-        let mut last_heartbeat = std::time::Instant::now();
-        let mut heartbeat_interval = interval(std::time::Duration::from_secs(5));
+        let mut last_heartbeat = None;
+        let mut heartbeat_interval = interval(VALIDATOR_HEARTBEAT_INTERVAL);
         heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut metrics_and_health_check_interval = interval(std::time::Duration::from_millis(25));
+        let mut metrics_and_health_check_interval = interval(METRICS_AND_HEALTH_CHECK_INTERVAL);
         metrics_and_health_check_interval
             .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -117,7 +127,6 @@ impl BamConnection {
         let Some(auth_proof) = Self::prepare_auth_proof(&mut validator_client, cluster_info).await
         else {
             error!("Failed to prepare auth response");
-            is_healthy.store(false, Relaxed);
             return;
         };
 
@@ -165,8 +174,7 @@ impl BamConnection {
                     metrics.heartbeat_sent.fetch_add(1, Relaxed);
                 }
                 _ = metrics_and_health_check_interval.tick() => {
-                    const TIMEOUT_DURATION: std::time::Duration = std::time::Duration::from_secs(6);
-                    let is_healthy_now = last_heartbeat.elapsed() < TIMEOUT_DURATION;
+                    let is_healthy_now = last_heartbeat.map_or(false, |t: Instant| t.elapsed() < MAX_DURATION_BETWEEN_NODE_HEARTBEATS);
                     is_healthy.store(is_healthy_now, Relaxed);
                     if !is_healthy_now {
                         metrics
@@ -196,7 +204,7 @@ impl BamConnection {
 
                     match inbound {
                         SchedulerResponseV0 { resp: Some(Resp::HeartBeat(_)), .. } => {
-                            last_heartbeat = std::time::Instant::now();
+                            last_heartbeat = Some(std::time::Instant::now());
                             metrics.heartbeat_received.fetch_add(1, Relaxed);
                         }
                         SchedulerResponseV0 { resp: Some(Resp::MultipleAtomicTxnBatch(batches)), .. } => {
@@ -245,7 +253,7 @@ impl BamConnection {
         mut validator_client: BamNodeApiClient<tonic::transport::channel::Channel>,
         metrics: Arc<BamConnectionMetrics>,
     ) {
-        let mut interval = interval(std::time::Duration::from_secs(1));
+        let mut interval = interval(REFRESH_CONFIG_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         while !exit.load(Relaxed) {
@@ -273,7 +281,7 @@ impl BamConnection {
         outbound_receiver: crossbeam_channel::Receiver<BamOutboundMessage>,
         metrics: Arc<BamConnectionMetrics>,
     ) {
-        let mut outbound_tick_interval = interval(std::time::Duration::from_millis(1));
+        let mut outbound_tick_interval = interval(OUTBOUND_TICK_INTERVAL);
         outbound_tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Burst);
 
         let mut waiting_results = Vec::new();
@@ -297,7 +305,6 @@ impl BamConnection {
                             BamOutboundMessage::AtomicTxnBatchResult(result) => {
                                 metrics.bundleresult_sent.fetch_add(1, Relaxed);
                                 waiting_results.push(result);
-                                const MAX_WAITING_RESULTS: usize = 24;
                                 if waiting_results.len() >= MAX_WAITING_RESULTS {
                                     Self::send_batch_results(&mut outbound_sender, std::mem::take(&mut waiting_results), metrics.as_ref());
                                 }
@@ -317,11 +324,25 @@ impl BamConnection {
         Some(slot_signature)
     }
 
-    pub fn is_healthy(&mut self) -> bool {
+    pub fn is_healthy(&self) -> bool {
         self.is_healthy.load(Relaxed)
     }
 
+    pub fn wait_until_healthy_and_config_received(&self, duration: std::time::Duration) -> bool {
+        let start = std::time::Instant::now();
+        while start.elapsed() < duration {
+            if self.is_healthy() && self.get_latest_config().is_some() {
+                return true;
+            }
+            std::thread::sleep(WAIT_SLEEP_DURATION);
+        }
+        false
+    }
+
     pub fn get_latest_config(&self) -> Option<ConfigResponse> {
+        if !self.is_healthy() {
+            return None;
+        }
         self.config.lock().unwrap().clone()
     }
 
@@ -366,8 +387,8 @@ impl Drop for BamConnection {
     fn drop(&mut self) {
         self.is_healthy.store(false, Relaxed);
         self.exit.store(true, Relaxed);
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        self.background_task.abort();
+        std::thread::sleep(WAIT_SLEEP_DURATION);
+        self.connection_task.abort();
     }
 }
 

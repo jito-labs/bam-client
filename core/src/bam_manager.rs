@@ -15,7 +15,9 @@ use std::{
 use {
     crate::{
         admin_rpc_post_init::{KeyUpdaterType, KeyUpdaters},
-        bam_connection::BamConnection,
+        bam_connection::{
+            BamConnection, MAX_DURATION_BETWEEN_NODE_HEARTBEATS, WAIT_TO_RECONNECT_DURATION,
+        },
         bam_dependencies::BamDependencies,
         bam_fallback_manager::BamFallbackManager,
         proxy::block_engine_stage::BlockBuilderFeeInfo,
@@ -166,8 +168,22 @@ impl BamManager {
                                 ("bam_url", url.clone(), String)
                             );
                             prev_bam_url = Some(url);
-                            // Sleep to let heartbeat come in
-                            std::thread::sleep(std::time::Duration::from_secs(2));
+
+                            // Wait until connection is healthy
+                            if !current_connection
+                                .as_ref()
+                                .unwrap()
+                                .wait_until_healthy_and_config_received(
+                                    MAX_DURATION_BETWEEN_NODE_HEARTBEATS,
+                                )
+                            {
+                                warn!("BAM connection not healthy after waiting for {:?}, disconnecting and will retry",
+                                    MAX_DURATION_BETWEEN_NODE_HEARTBEATS);
+                                current_connection = None;
+                                cached_builder_config = None;
+                                std::thread::sleep(WAIT_TO_RECONNECT_DURATION);
+                                continue;
+                            }
                         }
                         Err(e) => {
                             error!("Failed to connect to BAM: {}", e);
@@ -177,7 +193,7 @@ impl BamManager {
             }
 
             let Some(connection) = current_connection.as_mut() else {
-                std::thread::sleep(std::time::Duration::from_secs(1));
+                std::thread::sleep(WAIT_TO_RECONNECT_DURATION);
                 continue;
             };
 
