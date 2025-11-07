@@ -47,8 +47,7 @@ const REFRESH_CONFIG_INTERVAL: Duration = Duration::from_secs(1);
 const OUTBOUND_TICK_INTERVAL: Duration = Duration::from_millis(1);
 const MAX_WAITING_RESULTS: usize = 24;
 const WAIT_SLEEP_DURATION: Duration = Duration::from_millis(10);
-pub const MAX_DURATION_BETWEEN_NODE_HEARTBEATS: Duration =
-    VALIDATOR_HEARTBEAT_INTERVAL.saturating_add(Duration::from_secs(1));
+pub const MAX_DURATION_BETWEEN_NODE_HEARTBEATS: Duration = Duration::from_secs(6);
 pub const WAIT_TO_RECONNECT_DURATION: Duration = Duration::from_secs(1);
 
 impl BamConnection {
