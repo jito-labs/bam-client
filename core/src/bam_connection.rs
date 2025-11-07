@@ -175,7 +175,7 @@ impl BamConnection {
                     metrics.heartbeat_sent.fetch_add(1, Relaxed);
                 }
                 _ = metrics_and_health_check_interval.tick() => {
-                    let is_healthy_now = last_heartbeat.map_or(false, |t: Instant| t.elapsed() < MAX_DURATION_BETWEEN_NODE_HEARTBEATS);
+                    let is_healthy_now = last_heartbeat.is_some_and(|t: Instant| t.elapsed() < MAX_DURATION_BETWEEN_NODE_HEARTBEATS);
                     is_healthy.store(is_healthy_now, Relaxed);
                     if !is_healthy_now {
                         metrics
