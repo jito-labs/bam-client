@@ -4,6 +4,7 @@
 //! to BAM with a `Retryable` result.
 use crate::banking_stage::scheduler_messages::MaxAge;
 use crate::banking_stage::transaction_scheduler::receive_and_buffer::DisconnectedError;
+use crate::banking_stage::transaction_scheduler::transaction_state_container::StateContainer;
 use crate::{
     bam_dependencies::BamOutboundMessage,
     banking_stage::transaction_scheduler::receive_and_buffer::ReceivingStats,
@@ -757,6 +758,13 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
                 };
             },
             BufferedPacketsDecision::ForwardAndHold | BufferedPacketsDecision::Forward => {
+                // Ensure nothing is left in the container
+                while let Some(next_batch_id) = container.pop() {
+                    let seq_id = priority_to_seq_id(next_batch_id.priority);
+                    self.send_no_leader_slot_txn_batch_result(seq_id);
+                    container.remove_by_id(next_batch_id.id);
+                }
+
                 // Send back any batches that were received while in Forward/Hold state
                 let deadline = Instant::now() + Duration::from_millis(100);
                 loop {
