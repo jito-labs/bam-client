@@ -58,6 +58,7 @@ pub struct AdminRpcRequestMetadata {
     pub post_init: Arc<RwLock<Option<AdminRpcRequestMetadataPostInit>>>,
     pub rpc_to_plugin_manager_sender: Option<Sender<GeyserPluginManagerRequest>>,
     pub bam_url: Arc<Mutex<Option<String>>>,
+    pub bam_txns_per_slot_threshold: Arc<RwLock<u64>>,
 }
 
 impl Metadata for AdminRpcRequestMetadata {}
@@ -272,12 +273,18 @@ pub trait AdminRpc {
         &self,
         meta: Self::Metadata,
         block_engine_url: String,
-        disable_block_engine_autoconfig: bool,
         trust_packets: bool,
     ) -> Result<()>;
 
     #[rpc(meta, name = "setBamUrl")]
     fn set_bam_url(&self, meta: Self::Metadata, bam_url: Option<String>) -> Result<()>;
+
+    #[rpc(meta, name = "setBamTransactionsPerSlotFallbackThreshold")]
+    fn set_bam_transactions_per_slot_fallback_threshold(
+        &self,
+        meta: Self::Metadata,
+        threshold: u64,
+    ) -> Result<()>;
 
     #[rpc(meta, name = "setRelayerConfig")]
     fn set_relayer_config(
@@ -533,13 +540,11 @@ impl AdminRpc for AdminRpcImpl {
         &self,
         meta: Self::Metadata,
         block_engine_url: String,
-        disable_block_engine_autoconfig: bool,
         trust_packets: bool,
     ) -> Result<()> {
         debug!("set_block_engine_config request received");
         let config = BlockEngineConfig {
             block_engine_url,
-            disable_block_engine_autoconfig,
             trust_packets,
         };
         // Detailed log messages are printed inside validate function
@@ -558,7 +563,7 @@ impl AdminRpc for AdminRpcImpl {
     fn set_bam_url(&self, meta: Self::Metadata, bam_url: Option<String>) -> Result<()> {
         let old_bam_url = meta.bam_url.lock().unwrap().clone();
         let new_bam_url = bam_url.as_ref().map(|url| url.to_string());
-        debug!("set_bam_url old= {:?}, new={:?}", old_bam_url, new_bam_url);
+        debug!("set_bam_url old={:?}, new={:?}", old_bam_url, new_bam_url);
 
         if let Some(new_bam_url) = &new_bam_url {
             if new_bam_url.is_empty() {
@@ -575,6 +580,20 @@ impl AdminRpc for AdminRpcImpl {
         }
 
         *meta.bam_url.lock().unwrap() = bam_url;
+        Ok(())
+    }
+
+    fn set_bam_transactions_per_slot_fallback_threshold(
+        &self,
+        meta: Self::Metadata,
+        threshold: u64,
+    ) -> Result<()> {
+        let current_threshold = *meta.bam_txns_per_slot_threshold.read().unwrap();
+        debug!(
+            "set_bam_transactions_per_slot_fallback_threshold old={}, new={}",
+            current_threshold, threshold
+        );
+        *meta.bam_txns_per_slot_threshold.write().unwrap() = threshold;
         Ok(())
     }
 
@@ -654,9 +673,7 @@ impl AdminRpc for AdminRpcImpl {
         };
 
         meta.with_post_init(|post_init| {
-            post_init
-                .shred_receiver_address
-                .store(Arc::new(shred_receiver_address));
+            *post_init.shred_receiver_address.write().unwrap() = shred_receiver_address;
             Ok(())
         })
     }
@@ -678,9 +695,7 @@ impl AdminRpc for AdminRpcImpl {
         };
 
         meta.with_post_init(|post_init| {
-            post_init
-                .shred_retransmit_receiver_address
-                .store(Arc::new(shred_receiver_address));
+            *post_init.shred_retransmit_receiver_address.write().unwrap() = shred_receiver_address;
             Ok(())
         })
     }
@@ -1088,7 +1103,6 @@ pub fn load_staked_nodes_overrides(
 mod tests {
     use {
         super::*,
-        arc_swap::ArcSwap,
         serde_json::Value,
         solana_account::{Account, AccountSharedData},
         solana_accounts_db::{
@@ -1170,8 +1184,8 @@ mod tests {
             let repair_whitelist = Arc::new(RwLock::new(HashSet::new()));
             let block_engine_config = Arc::new(Mutex::new(BlockEngineConfig::default()));
             let relayer_config = Arc::new(Mutex::new(RelayerConfig::default()));
-            let shred_receiver_address = Arc::new(ArcSwap::default());
-            let shred_retransmit_receiver_address = Arc::new(ArcSwap::default());
+            let shred_receiver_address = Arc::new(RwLock::new(None));
+            let shred_retransmit_receiver_address = Arc::new(RwLock::new(None));
             let meta = AdminRpcRequestMetadata {
                 rpc_addr: None,
                 start_time: SystemTime::now(),
@@ -1202,6 +1216,7 @@ mod tests {
                 staked_nodes_overrides: Arc::new(RwLock::new(HashMap::new())),
                 rpc_to_plugin_manager_sender: None,
                 bam_url: Arc::new(Mutex::new(None)),
+                bam_txns_per_slot_threshold: Arc::new(RwLock::new(0)),
             };
             let mut io = MetaIoHandler::default();
             io.extend_with(AdminRpcImpl.to_delegate());
@@ -1623,6 +1638,7 @@ mod tests {
                 staked_nodes_overrides: Arc::new(RwLock::new(HashMap::new())),
                 rpc_to_plugin_manager_sender: None,
                 bam_url: Arc::new(Mutex::new(None)),
+                bam_txns_per_slot_threshold: Arc::new(RwLock::new(0)),
             };
 
             let _validator = Validator::new(
