@@ -35,6 +35,11 @@ const DEFAULT_BAM_HTTPS_PORT: u16 = 50056;
 /// # Errors
 /// Returns an error if the URL is invalid or uses an unsupported scheme.
 fn normalize_bam_url(url_str: &str) -> Result<String, BamUrlError> {
+    // If empty, return empty string to disable BAM
+    if url_str.trim().is_empty() {
+        return Ok(String::new());
+    }
+
     let url_str_to_parse = if url_str.contains("://") {
         url_str.into()
     } else {
@@ -117,24 +122,19 @@ pub fn extract_bam_url(matches: &ArgMatches) -> Result<Option<String>, BamUrlErr
     }
 }
 
-pub fn bam_url_argument() -> Arg<'static, 'static> {
+pub fn argument() -> Arg<'static, 'static> {
     Arg::with_name("bam_url")
         .long("bam-url")
+        .min_values(0)
+        .max_values(1)
         .help("URL of BAM Node; leave empty to disable BAM.")
-        .takes_value(true)
-}
-
-pub fn bam_transactions_per_slot_fallback_threshold_argument() -> Arg<'static, 'static> {
-    Arg::with_name("bam_transactions_per_slot_fallback_threshold")
-        .long("bam-transactions-per-slot-fallback-threshold")
-        .help("Number of transactions per slot that must be met or exceed. Triggers fallback from BAM if slots do not meet this minimum transaction amount. Default: 0 (disabled)")
         .takes_value(true)
 }
 
 pub fn command(_default_args: &DefaultArgs) -> App<'_, '_> {
     SubCommand::with_name("set-bam-config")
         .about("Set configuration for connection to a BAM node")
-        .arg(bam_url_argument())
+        .arg(argument())
 }
 
 pub fn execute(subcommand_matches: &ArgMatches, ledger_path: &Path) -> crate::commands::Result<()> {
@@ -151,7 +151,7 @@ mod tests {
     use {super::*, test_case::test_case};
 
     fn create_test_matches(bam_url: Option<&str>) -> ArgMatches {
-        let app = clap::App::new("test-app").arg(bam_url_argument());
+        let app = clap::App::new("test-app").arg(argument());
 
         let args = if let Some(url) = bam_url {
             vec!["test-app", "--bam-url", url]
@@ -245,16 +245,18 @@ mod tests {
     }
 
     // Empty inputs
-    #[test_case("" ; "empty string")]
-    #[test_case("   " ; "spaces only")]
-    #[test_case("\t\n " ; "whitespace only")]
-    fn test_extract_bam_url_empty_inputs(input: &str) {
-        assert_extract_bam_url_error(
+    #[test_case("", ""; "empty string")]
+    #[test_case("   ", ""; "spaces only")]
+    #[test_case("\t\n ", "" ; "whitespace only")]
+    fn test_extract_bam_url_empty_inputs(input: &str, expected: &str) {
+        let matches = create_test_matches(Some(input));
+        let result = extract_bam_url(&matches);
+        assert_eq!(
+            result.unwrap(),
+            expected.to_string().into(),
+            "Failed for input: '{}', expected: '{}'",
             input,
-            BamUrlError::InvalidUrlFormat {
-                url: input.to_string(),
-                source: ParseError::EmptyHost,
-            },
+            expected,
         );
     }
 
