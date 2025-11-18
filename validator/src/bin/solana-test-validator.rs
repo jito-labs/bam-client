@@ -445,6 +445,9 @@ fn main() {
             rpc_to_plugin_manager_sender,
             bam_url: genesis.bam_url.clone(),
             bam_txns_per_slot_threshold: genesis.bam_txns_per_slot_threshold.clone(),
+            bam_leader_check_tolerance_slots: genesis
+                .bam_leader_check_tolerance_slots
+                .clone(),
         },
     );
     let dashboard = if output == Output::Dashboard {

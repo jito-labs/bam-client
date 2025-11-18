@@ -141,6 +141,7 @@ pub struct TestValidatorGenesis {
     admin_rpc_service_post_init: Arc<RwLock<Option<AdminRpcRequestMetadataPostInit>>>,
     pub bam_url: Arc<Mutex<Option<String>>>,
     pub bam_txns_per_slot_threshold: Arc<RwLock<u64>>,
+    pub bam_leader_check_tolerance_slots: Arc<RwLock<u64>>,
 }
 
 impl Default for TestValidatorGenesis {
@@ -179,6 +180,9 @@ impl Default for TestValidatorGenesis {
                 Arc::<RwLock<Option<AdminRpcRequestMetadataPostInit>>>::default(),
             bam_url: Arc::new(Mutex::new(None)),
             bam_txns_per_slot_threshold: Arc::new(RwLock::new(0)),
+            bam_leader_check_tolerance_slots: Arc::new(RwLock::new(
+                solana_core::bam_manager::DEFAULT_BAM_LEADER_CHECK_TOLERANCE_SLOTS,
+            )),
         }
     }
 }

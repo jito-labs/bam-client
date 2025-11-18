@@ -27,12 +27,100 @@ use {
         bam_types::{LeaderState, Socket},
     },
     solana_gossip::cluster_info::ClusterInfo,
+    solana_ledger::leader_schedule_cache::LeaderScheduleCache,
     solana_poh::poh_recorder::PohRecorder,
     solana_pubkey::Pubkey,
     solana_quic_definitions::NotifyKeyUpdate,
     solana_runtime::bank::Bank,
     solana_signer::Signer,
 };
+
+pub const DEFAULT_BAM_LEADER_CHECK_TOLERANCE_SLOTS: u64 = 4;
+
+fn is_validator_leader_within_tolerance(
+    bank: &Bank,
+    identity: &Pubkey,
+    tolerance_slots: u64,
+) -> bool {
+    if tolerance_slots == 0 {
+        return true;
+    }
+
+    let leader_schedule_cache = LeaderScheduleCache::new_from_bank(bank);
+    let current_slot = bank.slot();
+    if let Some((next_leader_slot, _last_leader_slot)) =
+        leader_schedule_cache.next_leader_slot(identity, current_slot, bank, None, u64::MAX)
+    {
+        next_leader_slot <= current_slot.saturating_add(tolerance_slots)
+    } else {
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use {
+        super::*,
+        solana_ledger::genesis_utils::{
+            bootstrap_validator_stake_lamports, create_genesis_config_with_leader,
+        },
+        solana_runtime::bank::Bank,
+    };
+
+    #[test]
+    fn test_is_validator_leader_within_tolerance_true() {
+        let identity = solana_pubkey::new_rand();
+        let mut genesis_config = create_genesis_config_with_leader(
+            42,
+            &identity,
+            bootstrap_validator_stake_lamports(),
+        )
+        .genesis_config;
+        genesis_config.epoch_schedule = solana_epoch_schedule::EpochSchedule::default();
+        let bank = Bank::new_for_tests(&genesis_config);
+
+        assert!(is_validator_leader_within_tolerance(
+            &bank,
+            &identity,
+            DEFAULT_BAM_LEADER_CHECK_TOLERANCE_SLOTS
+        ));
+    }
+
+    #[test]
+    fn test_is_validator_leader_within_tolerance_false_for_other_identity() {
+        let leader = solana_pubkey::new_rand();
+        let mut genesis_config = create_genesis_config_with_leader(
+            42,
+            &leader,
+            bootstrap_validator_stake_lamports(),
+        )
+        .genesis_config;
+        genesis_config.epoch_schedule = solana_epoch_schedule::EpochSchedule::default();
+        let bank = Bank::new_for_tests(&genesis_config);
+
+        let other_identity = solana_pubkey::new_rand();
+        assert!(!is_validator_leader_within_tolerance(
+            &bank,
+            &other_identity,
+            DEFAULT_BAM_LEADER_CHECK_TOLERANCE_SLOTS
+        ));
+    }
+
+    #[test]
+    fn test_is_validator_leader_within_tolerance_zero_tolerance_is_disabled() {
+        let identity = solana_pubkey::new_rand();
+        let genesis_config =
+            create_genesis_config_with_leader(42, &identity, bootstrap_validator_stake_lamports())
+                .genesis_config;
+        let bank = Bank::new_for_tests(&genesis_config);
+
+        assert!(is_validator_leader_within_tolerance(
+            &bank,
+            &identity,
+            0
+        ));
+    }
+}
 
 pub struct BamConnectionIdentityUpdater {
     bam_url: Arc<Mutex<Option<String>>>,
@@ -76,6 +164,7 @@ impl BamManager {
         exit: Arc<AtomicBool>,
         bam_url: Arc<Mutex<Option<String>>>,
         bam_txns_per_slot_threshold: Arc<RwLock<u64>>,
+        bam_leader_check_tolerance_slots: Arc<RwLock<u64>>,
         dependencies: BamDependencies,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         identity_notifiers: Arc<RwLock<KeyUpdaters>>,
@@ -86,6 +175,7 @@ impl BamManager {
                     exit,
                     bam_url,
                     bam_txns_per_slot_threshold,
+                    bam_leader_check_tolerance_slots,
                     dependencies,
                     poh_recorder,
                     identity_notifiers,
@@ -98,6 +188,7 @@ impl BamManager {
         exit: Arc<AtomicBool>,
         bam_url: Arc<Mutex<Option<String>>>,
         bam_txns_per_slot_threshold: Arc<RwLock<u64>>,
+        bam_leader_check_tolerance_slots: Arc<RwLock<u64>>,
         dependencies: BamDependencies,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         identity_notifiers: Arc<RwLock<KeyUpdaters>>,
@@ -143,6 +234,23 @@ impl BamManager {
 
             // If no connection then try to create a new one
             if current_connection.is_none() {
+                let tolerance_slots = *bam_leader_check_tolerance_slots.read().unwrap();
+                if tolerance_slots > 0 {
+                    if let Some(bank) = shared_working_bank.load() {
+                        let identity = dependencies.cluster_info.keypair().pubkey();
+                        if !is_validator_leader_within_tolerance(
+                            &bank,
+                            &identity,
+                            tolerance_slots,
+                        ) {
+                            std::thread::sleep(WAIT_TO_RECONNECT_DURATION);
+                            continue;
+                        }
+                    } else {
+                        std::thread::sleep(WAIT_TO_RECONNECT_DURATION);
+                        continue;
+                    }
+                }
                 let url = bam_url.lock().unwrap().clone();
                 if let Some(url) = url {
                     let result = runtime.block_on(BamConnection::try_init(

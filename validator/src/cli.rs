@@ -964,6 +964,7 @@ pub fn test_app<'a>(version: &'a str, default_args: &'a DefaultTestArgs) -> App<
         )
         .arg(commands::bam::bam_url_argument())
         .arg(commands::bam::bam_transactions_per_slot_fallback_threshold_argument())
+        .arg(commands::bam::bam_leader_check_tolerance_argument())
 }
 
 pub struct DefaultTestArgs {
