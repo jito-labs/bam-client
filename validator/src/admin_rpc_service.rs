@@ -1736,7 +1736,7 @@ mod tests {
     // This test checks that `setBamUrl` call works as expected when setting and clearing the BAM URL.
     #[test]
     fn test_set_bam_url() {
-         let test_validator = TestValidatorWithAdminRpc::new();
+        let test_validator = TestValidatorWithAdminRpc::new();
 
         let set_initial_bam_url_request = r#"{"jsonrpc":"2.0","id":1,"method":"setBamUrl","params":["http://example.com:8080/bam"]}"#;
         let response = test_validator.handle_request(set_initial_bam_url_request);
