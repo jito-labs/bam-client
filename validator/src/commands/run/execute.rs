@@ -580,6 +580,11 @@ pub fn execute(
         value_of(matches, "bam_transactions_per_slot_fallback_threshold").unwrap_or(0),
     ));
 
+    let bam_leader_check_tolerance_slots = Arc::new(RwLock::new(
+        value_of(matches, "bam_leader_check_tolerance")
+            .unwrap_or(solana_core::bam_manager::DEFAULT_BAM_LEADER_CHECK_TOLERANCE_SLOTS),
+    ));
+
     // Defaults are set in cli definition, safe to use unwrap() here
     let expected_heartbeat_interval_ms: u64 =
         value_of(matches, "relayer_expected_heartbeat_interval_ms").unwrap();
@@ -756,6 +761,7 @@ pub fn execute(
             .expect("preallocated_bundle_cost set as default"),
         bam_url,
         bam_txns_per_slot_threshold,
+        bam_leader_check_tolerance_slots,
     };
 
     let reserved = validator_config
@@ -851,6 +857,9 @@ pub fn execute(
             rpc_to_plugin_manager_sender,
             bam_url: validator_config.bam_url.clone(),
             bam_txns_per_slot_threshold: validator_config.bam_txns_per_slot_threshold.clone(),
+            bam_leader_check_tolerance_slots: validator_config
+                .bam_leader_check_tolerance_slots
+                .clone(),
         },
     );
 

@@ -193,6 +193,7 @@ impl Tpu {
         preallocated_bundle_cost: u64,
         bam_url: Arc<Mutex<Option<String>>>,
         bam_txns_per_slot_threshold: Arc<RwLock<u64>>,
+        bam_leader_check_tolerance_slots: Arc<RwLock<u64>>,
     ) -> Self {
         let TpuSockets {
             transactions: transactions_sockets,
@@ -502,6 +503,7 @@ impl Tpu {
             exit.clone(),
             bam_url,
             bam_txns_per_slot_threshold,
+            bam_leader_check_tolerance_slots,
             bam_dependencies,
             poh_recorder.clone(),
             key_notifiers.clone(),

@@ -138,18 +138,39 @@ pub fn bam_transactions_per_slot_fallback_threshold_argument() -> Arg<'static, '
         .takes_value(true)
 }
 
+pub fn bam_leader_check_tolerance_argument() -> Arg<'static, 'static> {
+    Arg::with_name("bam_leader_check_tolerance")
+        .long("bam-leader-check-tolerance")
+        .takes_value(true)
+        .help("Maximum number of upcoming slots in which the validator must have at least one leader slot to enable BAM. Default: 4")
+}
+
 pub fn command(_default_args: &DefaultArgs) -> App<'_, '_> {
     SubCommand::with_name("set-bam-config")
         .about("Set configuration for connection to a BAM node")
         .arg(bam_url_argument())
+        .arg(bam_leader_check_tolerance_argument())
 }
 
 pub fn execute(subcommand_matches: &ArgMatches, ledger_path: &Path) -> crate::commands::Result<()> {
     let bam_url = extract_bam_url(subcommand_matches)
         .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
     let admin_client = admin_rpc_service::connect(ledger_path);
-    admin_rpc_service::runtime()
-        .block_on(async move { admin_client.await?.set_bam_url(bam_url).await })?;
+    admin_rpc_service::runtime().block_on(async move {
+        let client = admin_client.await?;
+        client.set_bam_url(bam_url).await?;
+
+        if let Some(tolerance) = subcommand_matches
+            .value_of("bam_leader_check_tolerance")
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            client
+                .set_bam_leader_check_tolerance_slots(tolerance)
+                .await
+        } else {
+            Ok(())
+        }
+    })?;
     Ok(())
 }
 

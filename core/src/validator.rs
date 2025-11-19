@@ -316,6 +316,7 @@ pub struct ValidatorConfig {
     pub preallocated_bundle_cost: u64,
     pub bam_url: Arc<Mutex<Option<String>>>,
     pub bam_txns_per_slot_threshold: Arc<RwLock<u64>>,
+    pub bam_leader_check_tolerance_slots: Arc<RwLock<u64>>,
 }
 
 impl ValidatorConfig {
@@ -405,6 +406,9 @@ impl ValidatorConfig {
             preallocated_bundle_cost: 0,
             bam_url: Arc::new(Mutex::new(None)),
             bam_txns_per_slot_threshold: Arc::new(RwLock::new(0)),
+            bam_leader_check_tolerance_slots: Arc::new(RwLock::new(
+                crate::bam_manager::DEFAULT_BAM_LEADER_CHECK_TOLERANCE_SLOTS,
+            )),
         }
     }
 
@@ -498,7 +502,7 @@ struct TransactionHistoryServices {
 }
 
 /// A struct easing passing Validator TPU Configurations
-pub struct ValidatorTpuConfig {
+    pub struct ValidatorTpuConfig {
     /// Controls if to use QUIC for sending regular TPU transaction
     pub use_quic: bool,
     /// Controls if to use QUIC for sending TPU votes
@@ -1695,6 +1699,7 @@ impl Validator {
             config.preallocated_bundle_cost,
             config.bam_url.clone(),
             config.bam_txns_per_slot_threshold.clone(),
+            config.bam_leader_check_tolerance_slots.clone(),
         );
 
         datapoint_info!(

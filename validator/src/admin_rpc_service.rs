@@ -60,6 +60,7 @@ pub struct AdminRpcRequestMetadata {
     pub rpc_to_plugin_manager_sender: Option<Sender<GeyserPluginManagerRequest>>,
     pub bam_url: Arc<Mutex<Option<String>>>,
     pub bam_txns_per_slot_threshold: Arc<RwLock<u64>>,
+    pub bam_leader_check_tolerance_slots: Arc<RwLock<u64>>,
 }
 
 impl Metadata for AdminRpcRequestMetadata {}
@@ -285,6 +286,13 @@ pub trait AdminRpc {
         &self,
         meta: Self::Metadata,
         threshold: u64,
+    ) -> Result<()>;
+
+    #[rpc(meta, name = "setBamLeaderCheckToleranceSlots")]
+    fn set_bam_leader_check_tolerance_slots(
+        &self,
+        meta: Self::Metadata,
+        tolerance_slots: u64,
     ) -> Result<()>;
 
     #[rpc(meta, name = "setRelayerConfig")]
@@ -597,6 +605,23 @@ impl AdminRpc for AdminRpcImpl {
             current_threshold, threshold
         );
         *meta.bam_txns_per_slot_threshold.write().unwrap() = threshold;
+        Ok(())
+    }
+
+    fn set_bam_leader_check_tolerance_slots(
+        &self,
+        meta: Self::Metadata,
+        tolerance_slots: u64,
+    ) -> Result<()> {
+        let current_tolerance = *meta.bam_leader_check_tolerance_slots.read().unwrap();
+        debug!(
+            "set_bam_leader_check_tolerance_slots old={}, new={}",
+            current_tolerance, tolerance_slots
+        );
+        *meta
+            .bam_leader_check_tolerance_slots
+            .write()
+            .unwrap() = tolerance_slots;
         Ok(())
     }
 
@@ -1220,6 +1245,9 @@ mod tests {
                 rpc_to_plugin_manager_sender: None,
                 bam_url: Arc::new(Mutex::new(None)),
                 bam_txns_per_slot_threshold: Arc::new(RwLock::new(0)),
+                bam_leader_check_tolerance_slots: Arc::new(RwLock::new(
+                    solana_core::bam_manager::DEFAULT_BAM_LEADER_CHECK_TOLERANCE_SLOTS,
+                )),
             };
             let mut io = MetaIoHandler::default();
             io.extend_with(AdminRpcImpl.to_delegate());
@@ -1642,6 +1670,9 @@ mod tests {
                 rpc_to_plugin_manager_sender: None,
                 bam_url: Arc::new(Mutex::new(None)),
                 bam_txns_per_slot_threshold: Arc::new(RwLock::new(0)),
+                bam_leader_check_tolerance_slots: Arc::new(RwLock::new(
+                    solana_core::bam_manager::DEFAULT_BAM_LEADER_CHECK_TOLERANCE_SLOTS,
+                )),
             };
 
             let _validator = Validator::new(
