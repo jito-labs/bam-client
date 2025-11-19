@@ -1670,6 +1670,9 @@ mod tests {
                 rpc_to_plugin_manager_sender: None,
                 bam_url: Arc::new(Mutex::new(None)),
                 bam_txns_per_slot_threshold: Arc::new(RwLock::new(0)),
+                bam_leader_check_tolerance_slots: Arc::new(RwLock::new(
+                    solana_core::bam_manager::DEFAULT_BAM_LEADER_CHECK_TOLERANCE_SLOTS,
+                )),
             };
 
             let _validator = Validator::new(
