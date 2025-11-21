@@ -57,7 +57,7 @@ jobs:
           # re-enable with https://github.com/buffalojoec/mollusk/pull/74
           # - token
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with:
           submodules: 'recursive'
           token: ${{ secrets.ACCESS_TOKEN }}
@@ -90,7 +90,7 @@ jobs:
           - single-pool
           - token-2022
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with:
           submodules: 'recursive'
           token: ${{ secrets.ACCESS_TOKEN }}
@@ -133,7 +133,7 @@ jobs:
           # re-enable with https://github.com/buffalojoec/mollusk/pull/74
           # - token
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with:
           submodules: 'recursive'
           token: ${{ secrets.ACCESS_TOKEN }}
